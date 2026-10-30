@@ -1,0 +1,9 @@
+.build/
+.build-cache/
+.cache/
+.dd/
+.swiftpm/
+.DS_Store
+**/*.xcodeproj/xcuserdata/
+**/*.xcworkspace/xcuserdata/
+DerivedData/
