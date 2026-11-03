@@ -1,21 +1,44 @@
 import SwiftUI
+#if os(iOS)
+import UIKit
+#endif
 
 enum SNColor {
-    static let page = Color(hex: 0xF2F3F5)
-    static let nav = Color(hex: 0xF7F8FA)
-    static let soft = Color(hex: 0xFAFBFC)
-    static let border = Color(hex: 0xE5E6EB)
-    static let borderStrong = Color(hex: 0xD9DCE2)
-    static let text = Color(hex: 0x4E5969)
-    static let ink = Color(hex: 0x1F2329)
-    static let muted = Color(hex: 0x86909C)
-    static let primary = Color(hex: 0x3370FF)
-    static let primarySoft = Color(hex: 0xEEF4FF)
-    static let green = Color(hex: 0x1F9D61)
-    static let greenSoft = Color(hex: 0xEDF9F3)
-    static let amber = Color(hex: 0xF6C453)
-    static let amberSoft = Color(hex: 0xFFF8E7)
-    static let amberInk = Color(hex: 0x8B6B14)
+    static let page = adaptive(light: 0xF2F3F5, dark: 0x15161A)
+    static let nav = adaptive(light: 0xF7F8FA, dark: 0x1E2025)
+    static let soft = adaptive(light: 0xFAFBFC, dark: 0x24262C)
+    static let surface = adaptive(light: 0xFFFFFF, dark: 0x1B1D22)
+    static let border = adaptive(light: 0xE5E6EB, dark: 0x343740)
+    static let borderStrong = adaptive(light: 0xD9DCE2, dark: 0x454953)
+    static let text = adaptive(light: 0x4E5969, dark: 0xC7CBD2)
+    static let ink = adaptive(light: 0x1F2329, dark: 0xEDEFF2)
+    static let muted = adaptive(light: 0x86909C, dark: 0x969BA5)
+    static let primary = adaptive(light: 0x3370FF, dark: 0x77A0FF)
+    static let primarySoft = adaptive(light: 0xEEF4FF, dark: 0x202D4A)
+    static let green = adaptive(light: 0x1F9D61, dark: 0x55C98D)
+    static let greenSoft = adaptive(light: 0xEDF9F3, dark: 0x183126)
+    static let amber = adaptive(light: 0xF6C453, dark: 0xE8B94A)
+    static let amberSoft = adaptive(light: 0xFFF8E7, dark: 0x362E19)
+    static let amberInk = adaptive(light: 0x8B6B14, dark: 0xE8C66C)
+    static let red = adaptive(light: 0xD92D20, dark: 0xFF746C)
+
+    private static func adaptive(light: UInt32, dark: UInt32) -> Color {
+#if os(iOS)
+        Color(
+            uiColor: UIColor { traits in
+                UIColor(
+                    Color(
+                        hex: traits.userInterfaceStyle == .dark
+                            ? dark
+                            : light
+                    )
+                )
+            }
+        )
+#else
+        Color(hex: light)
+#endif
+    }
 }
 
 extension Color {
@@ -63,7 +86,7 @@ struct CardSurface<Content: View>: View {
 
     var body: some View {
         content
-            .background(Color.white)
+            .background(SNColor.surface)
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay {
                 RoundedRectangle(cornerRadius: 8)

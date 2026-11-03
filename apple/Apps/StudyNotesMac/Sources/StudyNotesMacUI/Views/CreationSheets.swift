@@ -102,15 +102,20 @@ struct CreateNoteSheet: View {
 
     init(model: WorkspaceModel) {
         self.model = model
-        let initialDestination: NoteDestination = if model.selectedCollection == .inbox {
+        let target = model.createNoteTarget
+        let initialDestination: NoteDestination = if target?.knowledgeBaseID == nil,
+                                                     model.selectedCollection == .inbox {
             .inbox
-        } else if let knowledgeBaseID = model.defaultKnowledgeBaseIDForCreation {
+        } else if let knowledgeBaseID = target?.knowledgeBaseID
+            ?? model.defaultKnowledgeBaseIDForCreation {
             .knowledgeBase(knowledgeBaseID)
         } else {
             .inbox
         }
         _destination = State(initialValue: initialDestination)
-        _selectedFolderPath = State(initialValue: model.defaultFolderPathForCreation)
+        _selectedFolderPath = State(
+            initialValue: target?.folderPath ?? model.defaultFolderPathForCreation
+        )
     }
 
     var body: some View {
@@ -213,7 +218,12 @@ struct CreateNoteSheet: View {
                     }
 
                     TextEditor(text: $markdown)
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(
+                            .custom(
+                                model.readingPreferences.codeFont,
+                                size: max(11, model.readingPreferences.fontSize - 4)
+                            )
+                        )
                         .foregroundStyle(SNColor.text)
                         .scrollContentBackground(.hidden)
                         .padding(8)
@@ -226,6 +236,10 @@ struct CreateNoteSheet: View {
                                     lineWidth: 1
                                 )
                         }
+                        .frame(
+                            maxWidth: CGFloat(model.readingPreferences.lineWidth),
+                            alignment: .leading
+                        )
                         .focused($focusedField, equals: .body)
                 }
             }
@@ -370,6 +384,13 @@ struct CreateFolderSheet: View {
             }
             .padding(.top, 16)
 
+            if let error = model.errorMessage {
+                Label(error, systemImage: "exclamationmark.circle")
+                    .font(.sn(9))
+                    .foregroundStyle(SNColor.red)
+                    .padding(.top, 8)
+            }
+
             Spacer()
 
             SheetActions {
@@ -405,9 +426,10 @@ struct CreateFolderSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 470, height: 320)
+        .frame(width: 470, height: 350)
         .background(SNColor.panel)
         .onAppear {
+            model.dismissError()
             isNameFocused = true
         }
         .interactiveDismissDisabled(model.isPerformingAction)
@@ -476,6 +498,13 @@ struct RenameWorkspaceItemSheet: View {
             }
             .padding(.top, 24)
 
+            if let error = model.errorMessage {
+                Label(error, systemImage: "exclamationmark.circle")
+                    .font(.sn(9))
+                    .foregroundStyle(SNColor.red)
+                    .padding(.top, 8)
+            }
+
             Spacer()
 
             SheetActions {
@@ -507,9 +536,10 @@ struct RenameWorkspaceItemSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 460, height: 265)
+        .frame(width: 460, height: 300)
         .background(SNColor.panel)
         .onAppear {
+            model.dismissError()
             isNameFocused = true
         }
         .interactiveDismissDisabled(model.isPerformingAction)

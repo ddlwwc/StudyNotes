@@ -62,6 +62,7 @@ private struct ReaderTopBar: View {
     @Bindable var model: WorkspaceModel
     @State private var showingOutline = false
     @State private var showingSearch = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 8) {
@@ -101,13 +102,21 @@ private struct ReaderTopBar: View {
             }
 
             ReaderToolButton(
-                title: "编辑副本",
-                systemImage: "square.and.pencil",
-                isEnabled: model.selectedDocument?.summary.kind.isTextDocument == true,
-                help: "编辑阅读副本"
+                title: model.isEditingMarkdown ? "完成编辑" : "编辑",
+                systemImage: model.isEditingMarkdown
+                    ? "checkmark.circle"
+                    : "square.and.pencil",
+                isEnabled: model.selectedDocument?.summary.kind == .note
+                    || model.selectedDocument?.summary.kind == .markdown,
+                help: model.isEditingMarkdown
+                    ? "保存并结束编辑（⌘E）"
+                    : "在阅读区编辑（⌘E）"
             ) {
-                model.isShowingEditReaderCopy = true
+                Task {
+                    await model.toggleMarkdownEditing()
+                }
             }
+            .keyboardShortcut("e", modifiers: .command)
 
             ReaderToolButton(
                 title: "版本",
@@ -157,7 +166,7 @@ private struct ReaderTopBar: View {
                 isEnabled: model.selectedDocument != nil,
                 help: model.isStudyPanelVisible ? "收起研读层" : "显示研读层"
             ) {
-                withAnimation(.easeInOut(duration: 0.18)) {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
                     model.isStudyPanelVisible.toggle()
                 }
             }

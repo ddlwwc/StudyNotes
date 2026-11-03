@@ -218,12 +218,17 @@ public actor LibrarySearchService {
 public enum LibraryTreeBuilder {
     public static func folders(
         for knowledgeBaseID: UUID,
-        in materials: [LibraryMaterial]
+        in materials: [LibraryMaterial],
+        knownFolders: [IOSFolder] = []
     ) -> [FolderNode] {
         let scoped = materials.filter {
             $0.manifest.knowledgeBaseID == knowledgeBaseID
         }
-        var paths = Set<String>()
+        var paths = Set(
+            knownFolders
+                .filter { $0.knowledgeBaseID == knowledgeBaseID }
+                .map(\.path)
+        )
         for material in scoped {
             let components = material.folderPath
                 .split(separator: "/")
@@ -240,6 +245,21 @@ public enum LibraryTreeBuilder {
             paths: paths,
             materials: scoped
         )
+    }
+
+    public static func folder(
+        at path: String,
+        in nodes: [FolderNode]
+    ) -> FolderNode? {
+        for node in nodes {
+            if node.path == path {
+                return node
+            }
+            if let match = Self.folder(at: path, in: node.children) {
+                return match
+            }
+        }
+        return nil
     }
 
     private static func nodes(

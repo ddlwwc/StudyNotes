@@ -24,7 +24,7 @@ struct WorkspaceBrandStatus: View {
                     .fill(SNColor.blue)
                 Image(systemName: "books.vertical.fill")
                     .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(SNColor.white)
+                    .foregroundStyle(SNColor.onAccent)
             }
             .frame(width: 30, height: 30)
 
@@ -40,22 +40,6 @@ struct WorkspaceBrandStatus: View {
                     .lineLimit(1)
             }
             .help(model.connectionDetail)
-
-            Button {
-                Task {
-                    await model.chooseWorkspace()
-                }
-            } label: {
-                Image(systemName: "folder.badge.plus")
-                    .font(.system(size: 11))
-                    .frame(width: 22, height: 22)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(SNColor.muted)
-            .disabled(model.isPerformingAction || model.isLoadingIndex)
-            .help(model.isConnected ? "更换学习目录" : "选择学习目录")
-            .accessibilityLabel(model.isConnected ? "更换学习目录" : "选择学习目录")
         }
     }
 
@@ -83,9 +67,42 @@ struct WorkspaceBrandStatus: View {
 
 struct WorkspaceToolbarActions: View {
     let model: WorkspaceModel
+    @Environment(\.openSettings) private var openSettings
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 6) {
+            PaneVisibilityButton(
+                title: "知识库栏",
+                systemImage: "sidebar.left",
+                isVisible: model.isLibraryPaneVisible
+            ) {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                    model.togglePane(.library)
+                }
+            }
+            PaneVisibilityButton(
+                title: "材料目录栏",
+                systemImage: "list.bullet.indent",
+                isVisible: model.isMaterialPaneVisible
+            ) {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                    model.togglePane(.materials)
+                }
+            }
+            PaneVisibilityButton(
+                title: "研读层",
+                systemImage: "sidebar.right",
+                isVisible: model.isStudyPanelVisible
+            ) {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                    model.togglePane(.study)
+                }
+            }
+
+            Divider()
+                .frame(height: 18)
+
             if model.isRecycleScope {
                 if model.hasSelection {
                     Text("已选 \(model.selectedMaterialIDs.count) 项")
@@ -179,7 +196,8 @@ struct WorkspaceToolbarActions: View {
 
             Button {
                 if model.selectedProvider == nil {
-                    model.isShowingAIConfiguration = true
+                    model.settingsPage = .ai
+                    openSettings()
                 } else if model.selectedDocument != nil {
                     model.prepareMaterialSummary()
                 }
@@ -223,7 +241,7 @@ struct WorkspaceSnapshotHeader: View {
                         .fill(SNColor.blue)
                     Image(systemName: "books.vertical.fill")
                         .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(SNColor.white)
+                        .foregroundStyle(SNColor.onAccent)
                 }
                 .frame(width: 30, height: 30)
 
@@ -239,16 +257,26 @@ struct WorkspaceSnapshotHeader: View {
                         .font(.sn(10))
                         .foregroundStyle(SNColor.text)
                 }
-
-                Image(systemName: "folder.badge.plus")
-                    .font(.system(size: 11))
-                    .foregroundStyle(SNColor.muted)
-                    .frame(width: 22, height: 22)
             }
 
             Spacer()
 
             HStack(spacing: 6) {
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(SNColor.blue)
+                Image(systemName: "list.bullet.indent")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(SNColor.blue)
+                Image(systemName: "sidebar.right")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(SNColor.blue)
+
+                Rectangle()
+                    .fill(SNColor.border)
+                    .frame(width: 1, height: 18)
+                    .padding(.horizontal, 4)
+
                 SnapshotActionPill(title: "导入", systemImage: "square.and.arrow.down", isEnabled: true)
                 SnapshotActionPill(title: "新建笔记", systemImage: "square.and.pencil", isEnabled: true)
                 SnapshotActionPill(title: "AI 研读", systemImage: "sparkles", isEnabled: true)
@@ -301,7 +329,7 @@ private struct SnapshotActionPill: View {
         if !isEnabled {
             return SNColor.muted.opacity(0.7)
         }
-        return isPrimary ? SNColor.white : SNColor.text
+        return isPrimary ? SNColor.onAccent : SNColor.text
     }
 
     private var backgroundColor: Color {

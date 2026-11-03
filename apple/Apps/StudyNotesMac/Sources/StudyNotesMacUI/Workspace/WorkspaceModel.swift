@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import Observation
 import StudyNotesKit
 
@@ -13,6 +14,7 @@ public final class WorkspaceModel {
     public private(set) var tags: [String] = []
     public private(set) var selectedNote: MarkdownNote?
     public private(set) var selectedDocument: MaterialDocument?
+    public private(set) var markdownEditorSession: MarkdownEditorSession?
     public private(set) var annotations: [MaterialAnnotation] = []
     public private(set) var conversations: [AIConversation] = []
     public private(set) var revisions: [TextRevision] = []
@@ -24,17 +26,31 @@ public final class WorkspaceModel {
     public private(set) var activeConversationID: UUID?
     public var pendingAIContext: AIContextPreview?
     public private(set) var publishPreview: PublishPreview?
+    public private(set) var noteMediaStatus: NoteMediaStatusResponse?
+    public private(set) var noteMediaConnection: ServiceConnectionStatus = .idle
+    public private(set) var noteMediaQueue: [NoteMediaUploadItem] = []
+    public private(set) var noteMediaCacheByteCount = 0
+    public private(set) var noteMediaScan: NoteMediaReferenceScanResponse?
+    public private(set) var noteMediaHistoricalFiles:
+        [NoteMediaHistoricalLocalFile] = []
+    public private(set) var isScanningNoteMedia = false
     public private(set) var connectionState: WorkspaceConnectionState = .disconnected
     public private(set) var isLoadingIndex = false
     public private(set) var isLoadingNote = false
     public private(set) var isPerformingAction = false
     public private(set) var errorMessage: String?
     public private(set) var actionNotice: String?
+    public private(set) var workspacePreferences: WorkspacePreferences
+    public var readingPreferences: ReadingPreferences {
+        didSet {
+            try? devicePreferences.save(readingPreferences: readingPreferences)
+        }
+    }
+    public var settingsPage: WorkspaceSettingsPage = .workspace
 
     public var selectedCollection: WorkspaceCollection = .all
     public var selectedMaterialIDs: Set<UUID> = []
     public var searchText = ""
-    public var isStudyPanelVisible = true
     public var studyPanelTab: StudyPanelTab = .annotations
     public var isShowingCreateKnowledgeBase = false
     public var isShowingCreateNote = false
@@ -47,7 +63,6 @@ public final class WorkspaceModel {
     public var isShowingEditReaderCopy = false
     public var isShowingVersions = false
     public var isShowingLinkMaterials = false
-    public var isShowingAIConfiguration = false
     public var isShowingPublishPreview = false
     public var annotationDraftRequest: AnnotationDraftRequest?
     public var selectedProviderID: UUID?
@@ -68,10 +83,24 @@ public final class WorkspaceModel {
     public var createFolderRequest: WorkspaceCreateFolderRequest?
     public var renameRequest: WorkspaceRenameTarget?
     public var moveFolderRequest: WorkspaceMoveFolderRequest?
+    public var createNoteTarget: WorkspaceDestination?
+    public var importTarget: WorkspaceDestination?
+    public var activeDragPayload: WorkspaceDragPayload?
 
     @ObservationIgnored private let rootStore: WorkspaceRootStore
     @ObservationIgnored private var store: StudyNotesStore?
     @ObservationIgnored private let secretStore: any SecretStoring
+    @ObservationIgnored private let mediaSecretStore: any SecretStoring
+    @ObservationIgnored private let mediaCredentialStore:
+        KeychainNoteMediaCredentialStore
+    @ObservationIgnored private var mediaCoordinator: NoteMediaCoordinator?
+    @ObservationIgnored private let mediaSupportURL: URL?
+    @ObservationIgnored private let mediaNetworkMonitor = NWPathMonitor()
+    @ObservationIgnored private let mediaNetworkQueue = DispatchQueue(
+        label: "com.studynotes.media-network"
+    )
+    @ObservationIgnored private let devicePreferences: DevicePreferencesStore
+    @ObservationIgnored private let appSettingsStore: AppSettingsStore
     @ObservationIgnored private let aiClient: OpenAICompatibleClient
     @ObservationIgnored private let webArticleFetcher: WebArticleFetcher
     @ObservationIgnored private var aiTask: Task<Void, Never>?
@@ -83,15 +112,122 @@ public final class WorkspaceModel {
     public init(
         rootStore: WorkspaceRootStore = WorkspaceRootStore(),
         secretStore: any SecretStoring = KeychainSecretStore(),
+        mediaSecretStore: any SecretStoring = KeychainSecretStore(
+            service: "com.studynotes.note-media"
+        ),
+        devicePreferences: DevicePreferencesStore = DevicePreferencesStore(),
+        appSettingsStore: AppSettingsStore = AppSettingsStore(),
         aiClient: OpenAICompatibleClient = OpenAICompatibleClient(),
-        webArticleFetcher: WebArticleFetcher = WebArticleFetcher()
+        webArticleFetcher: WebArticleFetcher = WebArticleFetcher(),
+        mediaCoordinator: NoteMediaCoordinator? = nil
     ) {
         self.rootStore = rootStore
         self.secretStore = secretStore
+        self.mediaSecretStore = mediaSecretStore
+        let credentialStore = KeychainNoteMediaCredentialStore(
+            secretStore: mediaSecretStore
+        )
+        mediaCredentialStore = credentialStore
+        mediaSupportURL = Self.mediaApplicationSupportURL()
+        if let mediaCoordinator {
+            self.mediaCoordinator = mediaCoordinator
+        } else if let supportURL = mediaSupportURL,
+                  let baseURL = URL(
+                      string: appSettingsStore.load().publishingServerURL
+                  ) {
+            self.mediaCoordinator = try? NoteMediaCoordinator(
+                applicationSupportRoot: supportURL,
+                baseURL: baseURL,
+                credentialStore: credentialStore
+            )
+        } else {
+            self.mediaCoordinator = nil
+        }
+        self.devicePreferences = devicePreferences
+        self.appSettingsStore = appSettingsStore
         self.aiClient = aiClient
         self.webArticleFetcher = webArticleFetcher
+        workspacePreferences = devicePreferences.loadWorkspacePreferences()
+        readingPreferences = devicePreferences.loadReadingPreferences()
         providerProfiles = AIProviderSettingsStore.load()
         selectedProviderID = providerProfiles.first?.id
+        mediaNetworkMonitor.pathUpdateHandler = { [weak self] path in
+            guard path.status == .satisfied else {
+                return
+            }
+            Task { @MainActor [weak self] in
+                await self?.refreshNoteMediaState()
+            }
+        }
+        mediaNetworkMonitor.start(queue: mediaNetworkQueue)
+    }
+
+    deinit {
+        mediaNetworkMonitor.cancel()
+    }
+
+    public var libraryPaneWidth: Double {
+        workspacePreferences.libraryWidth
+    }
+
+    public var materialPaneWidth: Double {
+        workspacePreferences.materialsWidth
+    }
+
+    public var studyPaneWidth: Double {
+        workspacePreferences.studyWidth
+    }
+
+    public var isLibraryPaneVisible: Bool {
+        !workspacePreferences.isLibraryCollapsed
+    }
+
+    public var isMaterialPaneVisible: Bool {
+        !workspacePreferences.isMaterialsCollapsed
+    }
+
+    public var isStudyPanelVisible: Bool {
+        get { !workspacePreferences.isStudyCollapsed }
+        set {
+            workspacePreferences.isStudyCollapsed = !newValue
+            persistWorkspacePreferences()
+        }
+    }
+
+    public func togglePane(_ pane: WorkspacePane) {
+        switch pane {
+        case .library:
+            workspacePreferences.isLibraryCollapsed.toggle()
+        case .materials:
+            workspacePreferences.isMaterialsCollapsed.toggle()
+        case .study:
+            workspacePreferences.isStudyCollapsed.toggle()
+        }
+        persistWorkspacePreferences()
+    }
+
+    public func setPaneWidth(_ pane: WorkspacePane, width: Double) {
+        switch pane {
+        case .library:
+            workspacePreferences.libraryWidth = width
+        case .materials:
+            workspacePreferences.materialsWidth = width
+        case .study:
+            workspacePreferences.studyWidth = width
+        }
+        persistWorkspacePreferences()
+    }
+
+    public func restoreDefaultWidth(_ pane: WorkspacePane) {
+        switch pane {
+        case .library:
+            workspacePreferences.libraryWidth = WorkspacePreferences.defaultLibraryWidth
+        case .materials:
+            workspacePreferences.materialsWidth = WorkspacePreferences.defaultMaterialsWidth
+        case .study:
+            workspacePreferences.studyWidth = WorkspacePreferences.defaultStudyWidth
+        }
+        persistWorkspacePreferences()
     }
 
     public var isConnected: Bool {
@@ -213,7 +349,7 @@ public final class WorkspaceModel {
                 return byID[hit.materialID]
             }
         }
-        return materials(in: selectedCollection).filter { material in
+        return directoryMaterials.filter { material in
             guard !query.isEmpty else {
                 return true
             }
@@ -227,6 +363,53 @@ public final class WorkspaceModel {
                 knowledgeBaseName
             ].joined(separator: " ")
             return haystack.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    public var currentDirectoryFolderPath: String {
+        selectedFolderPath ?? ""
+    }
+
+    public var currentDirectoryKnowledgeBaseID: UUID? {
+        selectedKnowledgeBaseID
+    }
+
+    public var directChildFolders: [KnowledgeFolder] {
+        guard let selectedKnowledgeBaseID else {
+            return []
+        }
+        let parentPath = currentDirectoryFolderPath
+        return folders(in: selectedKnowledgeBaseID)
+            .filter { $0.parentPath == parentPath }
+            .sorted(by: folderNameOrder)
+    }
+
+    public var directoryMaterials: [StudyMaterialSummary] {
+        let directMaterials: [StudyMaterialSummary]
+        switch selectedCollection {
+        case .all:
+            directMaterials = materials
+        case let .knowledgeBase(id):
+            directMaterials = materials.filter {
+                $0.knowledgeBaseID == id && $0.folderPath.isEmpty
+            }
+        case let .folder(knowledgeBaseID, path):
+            directMaterials = materials.filter {
+                $0.knowledgeBaseID == knowledgeBaseID && $0.folderPath == path
+            }
+        case .inbox:
+            directMaterials = inboxMaterials
+        case .recycleBin:
+            directMaterials = recycledMaterials
+        case let .tag(tag):
+            directMaterials = allActiveMaterials.filter { material in
+                material.tags.contains {
+                    $0.compare(tag, options: .caseInsensitive) == .orderedSame
+                }
+            }
+        }
+        return directMaterials.sorted {
+            $0.title.localizedStandardCompare($1.title) == .orderedAscending
         }
     }
 
@@ -252,13 +435,15 @@ public final class WorkspaceModel {
         case .all:
             return "\(knowledgeBases.count) 个知识库 · \(materials.count) 篇材料"
         case let .knowledgeBase(id):
-            let folderCount = folders.count { $0.knowledgeBaseID == id }
-            return "\(folderCount) 个文件夹 · \(materials.count { $0.knowledgeBaseID == id }) 篇材料"
+            let folderCount = folders.count {
+                $0.knowledgeBaseID == id && $0.parentPath.isEmpty
+            }
+            return "\(folderCount) 个文件夹 · \(directoryMaterials.count) 篇材料"
         case let .folder(knowledgeBaseID, path):
             let folder = folders.first {
                 $0.knowledgeBaseID == knowledgeBaseID && $0.path == path
             }
-            return "\(folder?.name ?? path) · \(materials(in: selectedCollection).count) 篇材料"
+            return "\(folder?.name ?? path) · \(directoryMaterials.count) 篇材料"
         case .inbox:
             return "\(inboxMaterials.count) 篇待整理材料"
         case .recycleBin:
@@ -374,6 +559,7 @@ public final class WorkspaceModel {
                 return
             }
             await loadWorkspace(at: location)
+            await refreshNoteMediaState()
         } catch {
             connectionState = .failed(error.localizedDescription)
         }
@@ -433,6 +619,9 @@ public final class WorkspaceModel {
             return
         }
 
+        guard await flushMarkdownEditorBeforeSelectionChange() else {
+            return
+        }
         invalidateNoteLoad()
         selectedCollection = collection
         selectedMaterialIDs = []
@@ -518,6 +707,11 @@ public final class WorkspaceModel {
         guard !isLoadingIndex else {
             return
         }
+        if selectedMaterialID != id {
+            guard await flushMarkdownEditorBeforeSelectionChange() else {
+                return
+            }
+        }
         if let hit = searchHits.first(where: { $0.materialID == id }) {
             isStudyPanelVisible = true
             if hit.matchedLayer == .ai {
@@ -574,7 +768,9 @@ public final class WorkspaceModel {
     }
 
     public func folders(in knowledgeBaseID: UUID) -> [KnowledgeFolder] {
-        folders.filter { $0.knowledgeBaseID == knowledgeBaseID }
+        folders
+            .filter { $0.knowledgeBaseID == knowledgeBaseID }
+            .sorted(by: folderNameOrder)
     }
 
     public func folderOptions(
@@ -604,7 +800,85 @@ public final class WorkspaceModel {
         guard canCreateNote else {
             return
         }
-        isShowingCreateNote = true
+        let target = selectedCollection == .inbox
+            ? nil
+            : defaultKnowledgeBaseIDForCreation.map {
+                WorkspaceDestination(
+                    knowledgeBaseID: $0,
+                    folderPath: defaultFolderPathForCreation
+                )
+            }
+        createBlankMarkdownNote(at: target)
+    }
+
+    public func presentCreateNoteSheet(
+        in knowledgeBaseID: UUID,
+        folderPath: String
+    ) {
+        guard canCreateNote else {
+            return
+        }
+        createBlankMarkdownNote(
+            at: WorkspaceDestination(
+                knowledgeBaseID: knowledgeBaseID,
+                folderPath: folderPath
+            )
+        )
+    }
+
+    private func createBlankMarkdownNote(
+        at destination: WorkspaceDestination?
+    ) {
+        let title = availableBlankNoteTitle(
+            knowledgeBaseID: destination?.knowledgeBaseID,
+            folderPath: destination?.folderPath ?? ""
+        )
+        let markdown = "# \(title)\n\n"
+        Task {
+            let created: Bool
+            if let knowledgeBaseID = destination?.knowledgeBaseID {
+                created = await createMarkdownNote(
+                    title: title,
+                    markdown: markdown,
+                    in: knowledgeBaseID,
+                    folderPath: destination?.folderPath ?? "",
+                    tags: []
+                )
+            } else {
+                created = await createInboxMarkdownNote(
+                    title: title,
+                    markdown: markdown,
+                    tags: []
+                )
+            }
+            if created, let materialID = selectedMaterialIDs.first {
+                await loadMaterial(id: materialID)
+                beginMarkdownEditing()
+            }
+        }
+    }
+
+    private func availableBlankNoteTitle(
+        knowledgeBaseID: UUID?,
+        folderPath: String
+    ) -> String {
+        let existingTitles: Set<String> = Set(
+            allActiveMaterials.compactMap { material in
+                guard material.knowledgeBaseID == knowledgeBaseID,
+                      material.folderPath == folderPath else {
+                    return nil
+                }
+                return material.title
+            }
+        )
+        guard existingTitles.contains("新笔记") else {
+            return "新笔记"
+        }
+        var suffix = 2
+        while existingTitles.contains("新笔记 \(suffix)") {
+            suffix += 1
+        }
+        return "新笔记 \(suffix)"
     }
 
     public func presentCreateKnowledgeBaseSheet() {
@@ -633,6 +907,397 @@ public final class WorkspaceModel {
             knowledgeBaseID: knowledgeBaseID,
             parentPath: parentPath
         )
+    }
+
+    public var appSettings: AppSettings {
+        appSettingsStore.load()
+    }
+
+    public func updateAppSettings(_ change: (inout AppSettings) -> Void) {
+        let previousServerURL = appSettings.publishingServerURL
+        do {
+            try appSettingsStore.update(change)
+            if appSettings.publishingServerURL != previousServerURL {
+                Task { await refreshNoteMediaState() }
+            }
+        } catch {
+            present(error)
+        }
+    }
+
+    public func saveNoteMediaKey(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            errorMessage = "笔记媒体密钥不能为空。"
+            return false
+        }
+        do {
+            try mediaCredentialStore.save(
+                NoteMediaCredential(secret: trimmed)
+            )
+            actionNotice = "笔记媒体密钥已保存到本机钥匙串"
+            Task { await refreshNoteMediaState() }
+            return true
+        } catch {
+            present(error)
+            return false
+        }
+    }
+
+    public var hasNoteMediaKey: Bool {
+        (try? mediaCredentialStore.load()) != nil
+    }
+
+    public func noteMediaKeyForConnectionTest() -> String? {
+        (try? mediaCredentialStore.load())?.secret
+    }
+
+    public var noteMediaHTTPWarning: String? {
+        guard appSettings.publishingServerURL
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .hasPrefix("http://") else {
+            return noteMediaStatus?.httpWarning == true
+                ? "媒体服务报告当前链路使用 HTTP。"
+                : nil
+        }
+        return "当前媒体服务使用 HTTP，Bearer 密钥可能在传输中被截获。"
+    }
+
+    public var readerMediaCoordinator: NoteMediaCoordinator? {
+        mediaCoordinator
+    }
+
+    public func refreshNoteMediaState() async {
+        if mediaCoordinator == nil {
+            guard let mediaSupportURL,
+                  let baseURL = URL(
+                      string: appSettings.publishingServerURL
+                  ) else {
+                noteMediaConnection = .failed("媒体协调器未初始化。")
+                return
+            }
+            mediaCoordinator = try? NoteMediaCoordinator(
+                applicationSupportRoot: mediaSupportURL,
+                baseURL: baseURL,
+                credentialStore: mediaCredentialStore
+            )
+        }
+        guard let mediaCoordinator else {
+            noteMediaConnection = .failed("媒体协调器未初始化。")
+            return
+        }
+        noteMediaConnection = .testing
+        noteMediaQueue = await mediaCoordinator.items()
+        noteMediaCacheByteCount =
+            (try? await mediaCoordinator.cacheSize()) ?? 0
+        do {
+            guard let baseURL = URL(
+                string: appSettings.publishingServerURL
+            ) else {
+                throw NoteMediaCoordinatorError.invalidBaseURL
+            }
+            try await mediaCoordinator.configure(baseURL: baseURL)
+            noteMediaStatus = try await mediaCoordinator.status()
+            guard let status = noteMediaStatus else {
+                throw NoteMediaClientError.invalidResponse
+            }
+            noteMediaConnection = .succeeded(
+                status.message ?? (status.ok ? "媒体服务可用。" : "媒体服务未就绪。")
+            )
+            await resumePendingNoteMediaUploads()
+        } catch {
+            noteMediaStatus = nil
+            noteMediaConnection = .failed(error.localizedDescription)
+        }
+    }
+
+    @discardableResult
+    public func insertNoteMedia(
+        fileAt url: URL,
+        contentType: String,
+        connection: NoteMediaConnection,
+        confirmedCellularUpload: Bool = false
+    ) async -> NoteMediaInsertionDecision? {
+        guard let mediaCoordinator else {
+            errorMessage = "媒体协调器未初始化。"
+            return nil
+        }
+        do {
+            let decision = try await mediaCoordinator.prepareInsertion(
+                fileAt: url,
+                contentType: contentType,
+                connection: connection,
+                confirmedCellularUpload: confirmedCellularUpload
+            )
+            noteMediaQueue = await mediaCoordinator.items()
+            return decision
+        } catch {
+            present(error)
+            return nil
+        }
+    }
+
+    public func uploadNoteMedia(id: UUID) async {
+        guard let mediaCoordinator else {
+            return
+        }
+        let refreshTask = startNoteMediaQueuePolling()
+        defer { refreshTask.cancel() }
+        do {
+            _ = try await mediaCoordinator.upload(id: id)
+            noteMediaQueue = await mediaCoordinator.items()
+        } catch {
+            noteMediaQueue = await mediaCoordinator.items()
+            present(error)
+        }
+    }
+
+    public func reloadSelectedDocumentMedia() async {
+        guard let store,
+              let materialID = selectedDocument?.summary.id else {
+            return
+        }
+        do {
+            let document = try await store.loadMaterialDocument(id: materialID)
+            selectedDocument = await resolvedMediaDocument(document)
+        } catch {
+            present(error)
+        }
+    }
+
+    public func retryNoteMediaUpload(id: UUID) async {
+        guard let mediaCoordinator else {
+            return
+        }
+        let refreshTask = startNoteMediaQueuePolling()
+        defer { refreshTask.cancel() }
+        do {
+            _ = try await mediaCoordinator.retry(id: id)
+            noteMediaQueue = await mediaCoordinator.items()
+        } catch {
+            noteMediaQueue = await mediaCoordinator.items()
+            present(error)
+        }
+    }
+
+    public func cancelNoteMediaUpload(id: UUID) async {
+        guard let mediaCoordinator else {
+            return
+        }
+        do {
+            try await mediaCoordinator.cancel(id: id)
+            noteMediaQueue = await mediaCoordinator.items()
+        } catch {
+            present(error)
+        }
+    }
+
+    public func clearNoteMediaCache() async {
+        guard let mediaCoordinator else {
+            return
+        }
+        do {
+            try await mediaCoordinator.clearCache()
+            noteMediaCacheByteCount = 0
+            actionNotice = "已清除本机媒体派生缓存"
+        } catch {
+            present(error)
+        }
+    }
+
+    public var noteMediaCleanupCandidates: [NoteMediaUploadItem] {
+        let result = NoteMediaReferenceScanner.scan(
+            currentMarkdown: markdownEditorSession?.markdown
+                ?? selectedDocument?.markdown
+                ?? "",
+            historicalMarkdowns: revisions.map(\.text)
+        )
+        let referenced = Set(result.referencedObjectKeys)
+        return noteMediaQueue.filter {
+            $0.state == .uploaded
+                && !referenced.contains($0.reference.objectKey)
+        }
+    }
+
+    public var noteMediaCurrentByteCount: Int {
+        noteMediaByteCount(for: .current)
+    }
+
+    public var noteMediaHistoricalByteCount: Int {
+        noteMediaByteCount(for: .history)
+    }
+
+    public var noteMediaCleanupCandidateByteCount: Int {
+        noteMediaCleanupCandidates.reduce(0) { $0 + $1.byteCount }
+    }
+
+    public func scanSelectedNoteMedia() async {
+        guard let mediaCoordinator, let document = selectedDocument else {
+            errorMessage = "请先打开一篇笔记再扫描媒体。"
+            return
+        }
+        noteMediaScan = nil
+        noteMediaHistoricalFiles = []
+        isScanningNoteMedia = true
+        defer { isScanningNoteMedia = false }
+        do {
+            let legacyDirectory = document.sourceURL
+                .appending(path: "source", directoryHint: .isDirectory)
+                .appending(path: "media", directoryHint: .isDirectory)
+            noteMediaHistoricalFiles =
+                try NoteMediaCoordinator.historicalLocalFiles(
+                    in: legacyDirectory
+                )
+            let historicalRevisions = try await store?.loadTextRevisions(
+                id: document.id
+            ) ?? []
+            revisions = historicalRevisions
+            noteMediaScan = try await mediaCoordinator.scan(
+                sourceId: document.id.uuidString,
+                currentMarkdown: document.markdown,
+                historicalMarkdowns: historicalRevisions.map(\.text),
+                historicalLocalMedia: noteMediaHistoricalFiles.map {
+                    NoteMediaHistoricalLocalReference(
+                        reference: $0.reference,
+                        size: $0.size
+                    )
+                }
+            )
+            noteMediaQueue = await mediaCoordinator.items()
+            noteMediaCacheByteCount =
+                (try? await mediaCoordinator.cacheSize()) ?? 0
+        } catch {
+            present(error)
+        }
+    }
+
+    public func migrateSelectedNoteMediaHistory() async {
+        guard let mediaCoordinator else {
+            return
+        }
+        do {
+            let references = try await mediaCoordinator
+                .migrateHistoricalLocalFiles(
+                    noteMediaHistoricalFiles,
+                    confirmed: true
+                )
+            noteMediaQueue = await mediaCoordinator.items()
+            actionNotice =
+                "已将 \(references.count) 个历史媒体加入待上传队列；正文引用未自动改写"
+        } catch {
+            present(error)
+        }
+    }
+
+    public func cleanupUnreferencedNoteMedia() async {
+        guard let mediaCoordinator else {
+            return
+        }
+        await scanSelectedNoteMedia()
+        guard noteMediaScan != nil else {
+            return
+        }
+        let candidates = noteMediaCleanupCandidates
+        guard !candidates.isEmpty else {
+            actionNotice = "没有可清理的本机已知云端媒体"
+            return
+        }
+        do {
+            let response = try await mediaCoordinator.cleanup(
+                objectKeys: candidates.map(\.reference.objectKey),
+                confirmed: true
+            )
+            actionNotice = response.queued.isEmpty
+                ? "服务端已跳过全部清理请求"
+                : "已排队清理 \(response.queued.count) 个媒体对象"
+        } catch {
+            present(error)
+        }
+    }
+
+    private static func mediaApplicationSupportURL() -> URL? {
+        guard let baseURL = try? FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        ) else {
+            return nil
+        }
+        let url = baseURL.appending(
+            path: "StudyNotes",
+            directoryHint: .isDirectory
+        )
+        try? FileManager.default.createDirectory(
+            at: url,
+            withIntermediateDirectories: true
+        )
+        return url
+    }
+
+    private func noteMediaByteCount(
+        for scope: NoteMediaReferenceScope
+    ) -> Int {
+        noteMediaScan?.media
+            .filter { $0.scopes.contains(scope) }
+            .reduce(0) { $0 + ($1.size ?? 0) } ?? 0
+    }
+
+    private func startNoteMediaQueuePolling() -> Task<Void, Never> {
+        Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, let coordinator = mediaCoordinator else {
+                    return
+                }
+                noteMediaQueue = await coordinator.items()
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+        }
+    }
+
+    private func resumePendingNoteMediaUploads() async {
+        guard noteMediaStatus?.ok == true else {
+            return
+        }
+        for item in noteMediaQueue where item.state == .waiting {
+            await uploadNoteMedia(id: item.id)
+        }
+    }
+
+    public func canDrop(
+        _ payload: WorkspaceDragPayload,
+        on target: WorkspaceDropTarget
+    ) -> Bool {
+        WorkspaceDropRules.allows(payload, on: target)
+    }
+
+    @discardableResult
+    public func drop(
+        _ payload: WorkspaceDragPayload,
+        on target: WorkspaceDropTarget
+    ) async -> Bool {
+        guard canDrop(payload, on: target) else {
+            return false
+        }
+        switch payload.kind {
+        case .folder:
+            guard let knowledgeBaseID = payload.knowledgeBaseID,
+                  let path = payload.folderPath,
+                  let folder = folders.first(where: {
+                      $0.knowledgeBaseID == knowledgeBaseID
+                          && $0.path == path
+                  }) else {
+                return false
+            }
+            return await moveFolder(folder, toParentPath: target.folderPath)
+        case .materials:
+            return await moveMaterials(
+                ids: Set(payload.materialIDs),
+                toKnowledgeBaseID: target.knowledgeBaseID,
+                folderPath: target.folderPath
+            )
+        }
     }
 
     @discardableResult
@@ -935,7 +1600,9 @@ public final class WorkspaceModel {
             if succeeded {
                 selectedNote = note
                 isShowingCreateNote = false
+                createNoteTarget = nil
                 actionNotice = "已创建笔记“\(note.summary.title)”"
+                beginMarkdownEditing()
             }
             return succeeded
         } catch {
@@ -975,7 +1642,9 @@ public final class WorkspaceModel {
             if succeeded {
                 selectedNote = note
                 isShowingCreateNote = false
+                createNoteTarget = nil
                 actionNotice = "已创建收件箱笔记“\(note.summary.title)”"
+                beginMarkdownEditing()
             }
             return succeeded
         } catch {
@@ -989,17 +1658,35 @@ public final class WorkspaceModel {
         toKnowledgeBaseID knowledgeBaseID: UUID,
         folderPath: String
     ) async -> Bool {
-        guard let store, isConnected, canMoveSelection else {
+        guard canMoveSelection else {
             return false
         }
+        let succeeded = await moveMaterials(
+            ids: selectedMaterialIDs,
+            toKnowledgeBaseID: knowledgeBaseID,
+            folderPath: folderPath
+        )
+        if succeeded {
+            isShowingMoveMaterials = false
+        }
+        return succeeded
+    }
 
-        let ids = Array(selectedMaterialIDs)
+    @discardableResult
+    public func moveMaterials(
+        ids: Set<UUID>,
+        toKnowledgeBaseID knowledgeBaseID: UUID,
+        folderPath: String
+    ) async -> Bool {
+        guard let store, isConnected, !ids.isEmpty else {
+            return false
+        }
         isPerformingAction = true
         defer { isPerformingAction = false }
 
         do {
             let movedIDs = try await store.moveMaterials(
-                ids: ids,
+                ids: Array(ids),
                 toKnowledgeBaseID: knowledgeBaseID,
                 folderPath: folderPath
             )
@@ -1008,7 +1695,6 @@ public final class WorkspaceModel {
                 preferredSelection: Set(movedIDs)
             )
             if succeeded {
-                isShowingMoveMaterials = false
                 actionNotice = "已移动 \(movedIDs.count) 篇材料"
             }
             return succeeded
@@ -1165,6 +1851,29 @@ public final class WorkspaceModel {
         guard isConnected else {
             return
         }
+        importTarget = WorkspaceDestination(
+            knowledgeBaseID: defaultImportKnowledgeBaseID,
+            folderPath: defaultImportFolderPath
+        )
+        if webArticle {
+            isShowingWebImport = true
+        } else {
+            isShowingImport = true
+        }
+    }
+
+    public func presentImportSheet(
+        in knowledgeBaseID: UUID,
+        folderPath: String,
+        webArticle: Bool = false
+    ) {
+        guard isConnected else {
+            return
+        }
+        importTarget = WorkspaceDestination(
+            knowledgeBaseID: knowledgeBaseID,
+            folderPath: folderPath
+        )
         if webArticle {
             isShowingWebImport = true
         } else {
@@ -1209,6 +1918,7 @@ public final class WorkspaceModel {
             )
             if succeeded {
                 isShowingImport = false
+                importTarget = nil
                 let mediaFailureCount = batch.results.reduce(0) {
                     $0 + $1.mediaFailures.count
                 }
@@ -1295,6 +2005,7 @@ public final class WorkspaceModel {
             )
             if succeeded {
                 isShowingWebImport = false
+                importTarget = nil
                 webArticleDraft = nil
                 actionNotice = result.isDuplicate
                     ? "网页内容已在资料库中，未创建重复材料"
@@ -1407,6 +2118,124 @@ public final class WorkspaceModel {
         }
     }
 
+    public var isEditingMarkdown: Bool {
+        markdownEditorSession != nil
+    }
+
+    public func beginMarkdownEditing() {
+        guard let document = selectedDocument,
+              document.summary.kind == .note
+                || document.summary.kind == .markdown else {
+            return
+        }
+        if markdownEditorSession?.materialID == document.id {
+            return
+        }
+        let decoded = try? MarkdownEditorCodec().decode(document.markdown)
+        markdownEditorSession = MarkdownEditorSession(
+            snapshot: MarkdownEditorSnapshot(
+                materialID: document.id,
+                title: document.summary.title,
+                markdown: document.markdown,
+                fingerprint: ContentFingerprint.sha256(document.markdown),
+                compatibilityBlocks: decoded?.compatibilityBlocks ?? []
+            )
+        ) { [weak self] request in
+            guard let self else {
+                return .failed(reason: "编辑器所属工作区已关闭。")
+            }
+            return await self.persistMarkdownEditor(request)
+        }
+    }
+
+    @discardableResult
+    public func finishMarkdownEditing() async -> Bool {
+        guard let session = markdownEditorSession else {
+            return true
+        }
+        await session.endEditing()
+        if session.saveState.status == .saved,
+           session.titleConflict == nil,
+           session.errorMessage == nil {
+            markdownEditorSession = nil
+            return true
+        }
+        errorMessage = session.errorMessage ?? "当前编辑内容尚未保存。"
+        return false
+    }
+
+    public func toggleMarkdownEditing() async {
+        if isEditingMarkdown {
+            _ = await finishMarkdownEditing()
+        } else {
+            beginMarkdownEditing()
+        }
+    }
+
+    public func flushMarkdownEditor(_ reason: MarkdownFlushReason) async {
+        guard let markdownEditorSession else {
+            return
+        }
+        await markdownEditorSession.flush(reason)
+    }
+
+    public func resolveMarkdownTitleConflict(
+        usingManifestTitle: Bool
+    ) async {
+        await markdownEditorSession?.resolveTitleConflict(
+            usingManifestTitle: usingManifestTitle
+        )
+    }
+
+    public func reloadMarkdownEditorFromDisk() async {
+        guard let store, let current = markdownEditorSession else {
+            return
+        }
+        do {
+            let document = try await store.loadMaterialDocument(
+                id: current.materialID
+            )
+            let decoded = try MarkdownEditorCodec().decode(document.markdown)
+            current.replaceSnapshot(
+                MarkdownEditorSnapshot(
+                    materialID: document.id,
+                    title: document.summary.title,
+                    markdown: document.markdown,
+                    fingerprint: ContentFingerprint.sha256(document.markdown),
+                    compatibilityBlocks: decoded.compatibilityBlocks
+                )
+            )
+            selectedDocument = document
+            selectedNote = document.summary.kind == .note
+                ? MarkdownNote(
+                    summary: document.summary,
+                    markdown: document.markdown
+                )
+                : nil
+        } catch {
+            present(error)
+        }
+    }
+
+    public func keepLocalMarkdownVersion() async {
+        await markdownEditorSession?.overrideConflictAndSave()
+    }
+
+    public func prepareEditorAction(
+        _ action: MarkdownEditorAction
+    ) async -> Bool {
+        guard let markdownEditorSession else {
+            return true
+        }
+        switch await markdownEditorSession.prepareForAction(action) {
+        case .allowed:
+            return true
+        case let .blocked(reason):
+            errorMessage = reason
+            return false
+        }
+    }
+
     public func saveReaderCopy(_ text: String) async -> Bool {
         guard let store, let document = selectedDocument else {
             return false
@@ -1416,7 +2245,7 @@ public final class WorkspaceModel {
         do {
             _ = try await store.saveReaderCopy(id: document.summary.id, text: text)
             let updated = try await store.loadMaterialDocument(id: document.summary.id)
-            selectedDocument = updated
+            selectedDocument = await resolvedMediaDocument(updated)
             selectedNote = updated.summary.kind == .note
                 ? MarkdownNote(summary: updated.summary, markdown: updated.markdown)
                 : nil
@@ -1431,8 +2260,77 @@ public final class WorkspaceModel {
         }
     }
 
+    private func persistMarkdownEditor(
+        _ request: MarkdownEditorSaveRequest
+    ) async -> MarkdownEditorSaveResult {
+        guard let store else {
+            return .failed(reason: "学习目录尚未连接。")
+        }
+        do {
+            let current = try await store.loadMaterialDocument(
+                id: request.materialID
+            )
+            let currentFingerprint = ContentFingerprint.sha256(current.markdown)
+            guard currentFingerprint == request.expectedFingerprint else {
+                return .conflict(currentFingerprint: currentFingerprint)
+            }
+            _ = try await store.saveReaderCopy(
+                id: request.materialID,
+                text: request.markdown,
+                title: request.title,
+                createRecoveryVersion: request.createRecoveryVersion
+            )
+            let updated = try await store.loadMaterialDocument(
+                id: request.materialID
+            )
+            selectedDocument = await resolvedMediaDocument(updated)
+            selectedNote = updated.summary.kind == .note
+                ? MarkdownNote(
+                    summary: updated.summary,
+                    markdown: updated.markdown
+                )
+                : nil
+            annotations = try await store.loadAnnotations(
+                materialID: request.materialID
+            )
+            revisions = try await store.loadTextRevisions(
+                id: request.materialID
+            )
+            await reloadIndexPreservingSelection()
+            actionNotice = request.createRecoveryVersion
+                ? "已保存并创建可恢复版本"
+                : "已保存"
+            return .saved(
+                title: request.title,
+                markdown: updated.markdown,
+                fingerprint: ContentFingerprint.sha256(updated.markdown)
+            )
+        } catch {
+            return .failed(reason: error.localizedDescription)
+        }
+    }
+
+    private func flushMarkdownEditorBeforeSelectionChange() async -> Bool {
+        guard let markdownEditorSession else {
+            return true
+        }
+        await markdownEditorSession.flush(.materialSwitch)
+        guard markdownEditorSession.saveState.status == .saved,
+              markdownEditorSession.titleConflict == nil,
+              markdownEditorSession.errorMessage == nil else {
+            errorMessage = markdownEditorSession.errorMessage
+                ?? "切换材料前无法保存当前编辑内容。"
+            return false
+        }
+        self.markdownEditorSession = nil
+        return true
+    }
+
     public func loadRevisions() async {
         guard let store, let document = selectedDocument else {
+            return
+        }
+        guard await prepareEditorAction(.versions) else {
             return
         }
         do {
@@ -1524,7 +2422,6 @@ public final class WorkspaceModel {
             providerProfiles = updated
             selectedProviderID = profile.id
             AIProviderSettingsStore.save(updated)
-            isShowingAIConfiguration = false
             actionNotice = "已保存 AI 供应商“\(profile.name)”"
             return true
         } catch {
@@ -1552,6 +2449,15 @@ public final class WorkspaceModel {
     }
 
     public func prepareSelectionExplanation() {
+        Task {
+            guard await prepareEditorAction(.aiExplain) else {
+                return
+            }
+            presentSelectionExplanation()
+        }
+    }
+
+    private func presentSelectionExplanation() {
         guard let selection = readerSelection,
               let document = selectedDocument,
               let profile = selectedProvider else {
@@ -1579,6 +2485,15 @@ public final class WorkspaceModel {
     }
 
     public func prepareMaterialSummary() {
+        Task {
+            guard await prepareEditorAction(.aiSummarize) else {
+                return
+            }
+            presentMaterialSummary()
+        }
+    }
+
+    private func presentMaterialSummary() {
         guard let document = selectedDocument,
               let profile = selectedProvider else {
             errorMessage = "请先配置并选择 AI 供应商。"
@@ -1599,6 +2514,15 @@ public final class WorkspaceModel {
     }
 
     public func prepareSectionSummary(heading: ReaderHeading) {
+        Task {
+            guard await prepareEditorAction(.aiSummarize) else {
+                return
+            }
+            presentSectionSummary(heading: heading)
+        }
+    }
+
+    private func presentSectionSummary(heading: ReaderHeading) {
         guard let document = selectedDocument,
               let profile = selectedProvider else {
             errorMessage = "请先配置并选择 AI 供应商。"
@@ -1816,12 +2740,49 @@ public final class WorkspaceModel {
     }
 
     public func preparePublishPreview() {
-        guard canPreviewPublish else {
+        guard canPreviewPublish, let document = selectedDocument else {
             return
         }
-        publishIncludeAnnotations = false
-        publishIncludeAI = false
+        let settings = appSettings
+        publishIncludeAnnotations = settings.publishAnnotationsByDefault
+        publishIncludeAI = settings.publishAIByDefault
         Task {
+            guard await prepareEditorAction(.publishPreview) else {
+                return
+            }
+            let markdown = markdownEditorSession?.markdown
+                ?? document.markdown
+            if let mediaCoordinator {
+                let currentKeys = NoteMediaReferenceScanner.objectKeys(
+                    in: markdown
+                )
+                if !currentKeys.isEmpty {
+                    do {
+                        let historicalRevisions = try await store?.loadTextRevisions(
+                            id: document.id
+                        ) ?? revisions
+                        let scan = try await mediaCoordinator.scan(
+                            sourceId: document.id.uuidString,
+                            currentMarkdown: markdown,
+                            historicalMarkdowns:
+                                historicalRevisions.map(\.text)
+                        )
+                        let blocked = scan.media.filter {
+                            currentKeys.contains($0.objectKey)
+                                && $0.status != .ready
+                        }
+                        if !blocked.isEmpty {
+                            errorMessage =
+                                "正文仍有 \(blocked.count) 个媒体未上传或不可用，全部就绪前不能发布。"
+                            return
+                        }
+                    } catch {
+                        errorMessage =
+                            "无法验证正文媒体状态，发布已阻断：\(error.localizedDescription)"
+                        return
+                    }
+                }
+            }
             await refreshPublishPreview()
             isShowingPublishPreview = true
         }
@@ -2182,6 +3143,8 @@ public final class WorkspaceModel {
 
     private func updateReaderForSelection() async {
         invalidateNoteLoad()
+        noteMediaScan = nil
+        noteMediaHistoricalFiles = []
 
         guard selectedMaterialIDs.count == 1,
               let materialID = selectedMaterialIDs.first else {
@@ -2199,6 +3162,43 @@ public final class WorkspaceModel {
         await loadMaterial(id: materialID)
     }
 
+    private func resolvedMediaDocument(
+        _ document: MaterialDocument
+    ) async -> MaterialDocument {
+        guard let mediaCoordinator,
+              document.summary.kind.isTextDocument else {
+            return document
+        }
+        let objectKeys = NoteMediaReferenceScanner.objectKeys(
+            in: document.markdown
+        )
+        let remoteURLs = await mediaCoordinator.inlineURLMap(
+            for: objectKeys
+        )
+        guard !remoteURLs.isEmpty else {
+            return document
+        }
+        let mediaURLs = document.mediaURLs.merging(remoteURLs) {
+            _, remote in remote
+        }
+        let content = ReaderContentBuilder.build(
+            markdown: document.markdown,
+            title: document.summary.title,
+            mediaURLs: mediaURLs
+        )
+        return MaterialDocument(
+            summary: document.summary,
+            markdown: document.markdown,
+            renderedHTML: content.html,
+            headings: content.headings,
+            sourceURL: document.sourceURL,
+            sourceFileURL: document.sourceFileURL,
+            mediaURLs: mediaURLs,
+            pageCount: document.pageCount,
+            hasTextLayer: document.hasTextLayer
+        )
+    }
+
     private func loadMaterial(id: UUID) async {
         guard let store else {
             return
@@ -2214,7 +3214,8 @@ public final class WorkspaceModel {
         }
 
         do {
-            let document = try await store.loadMaterialDocument(id: id)
+            let loadedDocument = try await store.loadMaterialDocument(id: id)
+            let document = await resolvedMediaDocument(loadedDocument)
             let loadedAnnotations = try await store.loadAnnotations(materialID: id)
             let loadedConversations = try await store.loadConversations(materialID: id)
             guard selectedMaterialIDs == [id], noteLoadGeneration == generation else {
@@ -2326,6 +3327,19 @@ public final class WorkspaceModel {
                 ? "已清除 \(materialCount) 篇材料的全部标签"
                 : "已替换 \(materialCount) 篇材料的标签"
         }
+    }
+
+    private func folderNameOrder(
+        _ lhs: KnowledgeFolder,
+        _ rhs: KnowledgeFolder
+    ) -> Bool {
+        lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+    }
+
+    private func persistWorkspacePreferences() {
+        try? devicePreferences.save(
+            workspacePreferences: workspacePreferences
+        )
     }
 
     private func present(_ error: Error) {

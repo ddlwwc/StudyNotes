@@ -61,6 +61,44 @@ struct MaterialReadingTests {
         #expect(document.markdown == restored.text)
     }
 
+    @Test("editor saves can update the manifest title without creating autosave versions")
+    func editorSaveUpdatesTitleAndControlsRecoveryVersions() async throws {
+        let directory = try TestDirectory()
+        defer { directory.remove() }
+        let store = try await makeStore(in: directory.url)
+        let knowledgeBase = try await store.createKnowledgeBase(named: "编辑")
+        let note = try await store.createMarkdownNote(
+            title: "旧标题",
+            in: knowledgeBase.id,
+            markdown: "# 旧标题\n\n第一版"
+        )
+
+        _ = try await store.saveReaderCopy(
+            id: note.summary.id,
+            text: "# 新标题\n\n自动保存",
+            title: "新标题",
+            createRecoveryVersion: false
+        )
+
+        var document = try await store.loadMaterialDocument(
+            id: note.summary.id
+        )
+        #expect(document.summary.title == "新标题")
+        #expect(document.markdown == "# 新标题\n\n自动保存")
+        #expect(try await store.loadTextRevisions(id: note.summary.id).count == 1)
+
+        _ = try await store.saveReaderCopy(
+            id: note.summary.id,
+            text: "# 新标题\n\n显式保存",
+            title: "新标题",
+            createRecoveryVersion: true
+        )
+
+        document = try await store.loadMaterialDocument(id: note.summary.id)
+        #expect(document.markdown == "# 新标题\n\n显式保存")
+        #expect(try await store.loadTextRevisions(id: note.summary.id).count == 2)
+    }
+
     @Test("HTML import removes navigation and shares one clean article view")
     func htmlImportCleansArticle() async throws {
         let directory = try TestDirectory()

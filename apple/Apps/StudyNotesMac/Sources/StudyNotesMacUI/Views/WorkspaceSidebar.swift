@@ -106,8 +106,7 @@ struct WorkspaceSidebar: View {
             }
             .disabled(model.isLoadingIndex)
 
-            WorkspaceConnectionCard(model: model)
-                .padding(10)
+            WorkspaceSidebarFooter(model: model)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(SNColor.nav)
@@ -128,20 +127,6 @@ struct WorkspaceSidebar: View {
                 .foregroundStyle(SNColor.ink)
 
             Spacer(minLength: 4)
-
-            Button {
-                model.presentCreateFolderSheet()
-            } label: {
-                Image(systemName: "folder.badge.plus")
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(width: 26, height: 26)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(SNColor.text)
-            .disabled(!model.canCreateFolder || model.isPerformingAction)
-            .help("新建文件夹")
-            .accessibilityLabel("新建文件夹")
 
             Button {
                 model.presentCreateKnowledgeBaseSheet()
@@ -168,7 +153,7 @@ struct WorkspaceSidebar: View {
             title: knowledgeBase.name,
             systemImage: "books.vertical",
             count: model.materialCount(inKnowledgeBase: knowledgeBase.id),
-            isSelected: model.selectedCollection == .knowledgeBase(knowledgeBase.id),
+            isSelected: model.selectedKnowledgeBaseID == knowledgeBase.id,
             isEnabled: true
         ) {
             Task {
@@ -176,60 +161,12 @@ struct WorkspaceSidebar: View {
             }
         }
         .contextMenu {
-            Button("新建文件夹") {
-                model.presentCreateFolderSheet(
-                    in: knowledgeBase.id,
-                    parentPath: ""
-                )
-            }
             Button("重命名知识库…") {
                 model.renameRequest = .knowledgeBase(knowledgeBase)
             }
             Divider()
             Button("删除知识库…", role: .destructive) {
                 deletionRequest = .knowledgeBase(knowledgeBase)
-            }
-        }
-
-        ForEach(model.folders(in: knowledgeBase.id)) { folder in
-            SidebarNavigationRow(
-                title: folder.name,
-                systemImage: "folder",
-                count: model.folderMaterialCount(
-                    knowledgeBaseID: knowledgeBase.id,
-                    path: folder.path
-                ),
-                isSelected: model.selectedCollection == .folder(
-                    knowledgeBaseID: knowledgeBase.id,
-                    path: folder.path
-                ),
-                isEnabled: true,
-                indentation: folder.depth
-            ) {
-                Task {
-                    await model.selectFolder(
-                        knowledgeBaseID: knowledgeBase.id,
-                        path: folder.path
-                    )
-                }
-            }
-            .contextMenu {
-                Button("新建子文件夹") {
-                    model.presentCreateFolderSheet(
-                        in: knowledgeBase.id,
-                        parentPath: folder.path
-                    )
-                }
-                Button("重命名文件夹…") {
-                    model.renameRequest = .folder(folder)
-                }
-                Button("移动文件夹…") {
-                    model.moveFolderRequest = WorkspaceMoveFolderRequest(folder: folder)
-                }
-                Divider()
-                Button("删除文件夹…", role: .destructive) {
-                    deletionRequest = .folder(folder)
-                }
             }
         }
     }
@@ -330,56 +267,67 @@ private struct SidebarNavigationRow: View {
     }
 }
 
-private struct WorkspaceConnectionCard: View {
+private struct WorkspaceSidebarFooter: View {
     @Bindable var model: WorkspaceModel
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
-        Button {
-            Task {
-                await model.chooseWorkspace()
-            }
-        } label: {
-            VStack(alignment: .leading, spacing: 6) {
+        HStack(spacing: 8) {
+            Button {
+                model.settingsPage = .workspace
+                openSettings()
+            } label: {
                 HStack(spacing: 7) {
                     statusIndicator
-
                     Text(statusTitle)
-                        .font(.sn(10, weight: .medium))
+                        .font(.sn(9, weight: .medium))
                         .foregroundStyle(SNColor.text)
                         .lineLimit(1)
-
-                    Spacer(minLength: 4)
-
-                    if model.isPerformingAction || model.isLoadingIndex {
-                        ProgressView()
-                            .controlSize(.mini)
-                    } else {
-                        Image(systemName: model.isConnected ? "arrow.triangle.2.circlepath" : "folder.badge.plus")
-                            .font(.system(size: 11))
-                            .foregroundStyle(SNColor.muted)
-                    }
+                    Spacer(minLength: 0)
                 }
-
-                Text(model.connectionDetail)
-                    .font(.sn(9))
-                    .foregroundStyle(isFailure ? SNColor.red : SNColor.muted)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 9)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(SNColor.white)
-            .clipShape(RoundedRectangle(cornerRadius: SNRadius.control))
-            .overlay {
-                RoundedRectangle(cornerRadius: SNRadius.control)
-                    .stroke(SNColor.border, lineWidth: 1)
+            .frame(height: 34)
+            .buttonStyle(.plain)
+            .disabled(model.isPerformingAction || model.isLoadingIndex)
+            .help(model.connectionDetail)
+
+            Menu {
+                Button("学习目录…", systemImage: "folder") {
+                    open(.workspace)
+                }
+                Button("AI 配置…", systemImage: "sparkles") {
+                    open(.ai)
+                }
+                Button("发布配置…", systemImage: "paperplane") {
+                    open(.publishing)
+                }
+                Button("密钥与凭据…", systemImage: "key") {
+                    open(.credentials)
+                }
+                Button("阅读偏好…", systemImage: "textformat.size") {
+                    open(.reading)
+                }
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
             }
+            .menuStyle(.borderlessButton)
+            .frame(width: 28)
+            .help("打开设置")
+            .accessibilityLabel("打开设置")
         }
-        .buttonStyle(.plain)
-        .disabled(model.isPerformingAction || model.isLoadingIndex)
-        .help(model.isConnected ? "更换学习目录" : "选择本地或 iCloud 学习目录")
-        .accessibilityLabel(model.isConnected ? "学习目录已连接，点击更换" : "选择学习目录")
+        .padding(.horizontal, 8)
+        .frame(height: 48)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(SNColor.border)
+                .frame(height: 1)
+        }
     }
 
     @ViewBuilder
@@ -408,20 +356,18 @@ private struct WorkspaceConnectionCard: View {
         case let .connected(location):
             "\(location.storageKind.label) · 已连接"
         case .failed:
-            "学习目录连接失败"
+            "目录连接失败"
         case .restoring:
-            "正在恢复学习目录"
+            "正在恢复目录"
         case .connecting:
-            "正在加载学习目录"
+            "正在加载"
         case .disconnected:
             "选择学习目录"
         }
     }
 
-    private var isFailure: Bool {
-        if case .failed = model.connectionState {
-            return true
-        }
-        return false
+    private func open(_ page: WorkspaceSettingsPage) {
+        model.settingsPage = page
+        openSettings()
     }
 }

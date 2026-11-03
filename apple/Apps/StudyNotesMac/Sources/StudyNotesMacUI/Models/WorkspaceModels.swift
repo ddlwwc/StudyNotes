@@ -97,6 +97,35 @@ public enum WorkspaceCollection: Hashable, Sendable {
     case tag(String)
 }
 
+public enum WorkspacePane: String, CaseIterable, Identifiable, Sendable {
+    case library
+    case materials
+    case study
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .library:
+            "知识库栏"
+        case .materials:
+            "材料目录栏"
+        case .study:
+            "研读层"
+        }
+    }
+}
+
+public struct WorkspaceDestination: Equatable, Sendable {
+    public let knowledgeBaseID: UUID?
+    public let folderPath: String
+
+    public init(knowledgeBaseID: UUID?, folderPath: String) {
+        self.knowledgeBaseID = knowledgeBaseID
+        self.folderPath = knowledgeBaseID == nil ? "" : folderPath
+    }
+}
+
 public enum WorkspaceRenameTarget: Identifiable, Equatable, Sendable {
     case knowledgeBase(KnowledgeBase)
     case folder(KnowledgeFolder)

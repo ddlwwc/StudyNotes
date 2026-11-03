@@ -12,6 +12,29 @@ public struct KnowledgeBaseSummary: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
+public struct IOSFolder: Identifiable, Codable, Equatable, Hashable, Sendable {
+    public let knowledgeBaseID: UUID
+    public let name: String
+    public let path: String
+    public let parentPath: String
+
+    public var id: String {
+        "\(knowledgeBaseID.uuidString)/\(path)"
+    }
+
+    public init(
+        knowledgeBaseID: UUID,
+        name: String,
+        path: String,
+        parentPath: String
+    ) {
+        self.knowledgeBaseID = knowledgeBaseID
+        self.name = name
+        self.path = path
+        self.parentPath = parentPath
+    }
+}
+
 public enum IOSRootState: Equatable, Sendable {
     case available(URL, isICloud: Bool)
     case iCloudNotSignedIn
@@ -212,6 +235,7 @@ public struct MaterialDocument: Identifiable, Equatable, Sendable {
 public struct IOSLibrarySnapshot: Equatable, Sendable {
     public let knowledgeBases: [KnowledgeBaseSummary]
     public let materials: [LibraryMaterial]
+    public let folders: [IOSFolder]
     public let rootURL: URL?
     public let isICloud: Bool
     public let refreshedAt: Date
@@ -219,12 +243,14 @@ public struct IOSLibrarySnapshot: Equatable, Sendable {
     public init(
         knowledgeBases: [KnowledgeBaseSummary],
         materials: [LibraryMaterial],
+        folders: [IOSFolder] = [],
         rootURL: URL?,
         isICloud: Bool,
         refreshedAt: Date = Date()
     ) {
         self.knowledgeBases = knowledgeBases
         self.materials = materials
+        self.folders = folders
         self.rootURL = rootURL
         self.isICloud = isICloud
         self.refreshedAt = refreshedAt

@@ -12,7 +12,13 @@ let package = Package(
         .library(name: "StudyNotesKit", targets: ["StudyNotesKit"])
     ],
     targets: [
-        .target(name: "StudyNotesKit"),
+        .target(
+            name: "StudyNotesKit",
+            exclude: ["Editor/Web"],
+            resources: [
+                .process("Editor/Resources")
+            ]
+        ),
         .testTarget(
             name: "StudyNotesKitTests",
             dependencies: ["StudyNotesKit"]

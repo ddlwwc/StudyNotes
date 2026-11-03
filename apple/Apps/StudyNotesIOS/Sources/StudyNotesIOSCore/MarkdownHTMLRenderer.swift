@@ -1,10 +1,13 @@
 import Foundation
+import StudyNotesKit
 
 public enum MarkdownHTMLRenderer {
     public static func render(
         source: String,
         title: String,
-        kind: MaterialContentKind
+        kind: MaterialContentKind,
+        preferences: IOSReadingPreferences = .init(),
+        mediaURLs: [String: URL] = [:]
     ) -> String {
         let body: String
         switch kind {
@@ -13,7 +16,12 @@ public enum MarkdownHTMLRenderer {
         default:
             body = markdownBody(source)
         }
-        return htmlDocument(title: title, body: body)
+        return htmlDocument(
+            title: title,
+            body: body,
+            preferences: preferences,
+            mediaURLs: mediaURLs
+        )
     }
 
     public static func plainText(from source: String) -> String {
@@ -143,6 +151,15 @@ public enum MarkdownHTMLRenderer {
     private static func inline(_ raw: String) -> String {
         var value = escape(raw)
         let replacements: [(String, String)] = [
+            (#"!\[([^\]]*)\]\(([^)]+)\)"#, #"<img alt="$1" src="$2">"#),
+            (
+                #"<img alt="([^"]*)" src="media://([^"]+)">"#,
+                #"<img alt="$1" data-media-key="$2" src="">"#
+            ),
+            (
+                #"<a href="media://([^"]+)">([^<]+)</a>"#,
+                #"<a data-media-key="$1" href="" download="$2">$2</a>"#
+            ),
             ("\\*\\*(.+?)\\*\\*", "<strong>$1</strong>"),
             ("`(.+?)`", "<code>$1</code>"),
             ("\\*(.+?)\\*", "<em>$1</em>"),
@@ -181,8 +198,18 @@ public enum MarkdownHTMLRenderer {
             .replacingOccurrences(of: "\"", with: "&quot;")
     }
 
-    private static func htmlDocument(title: String, body: String) -> String {
-        """
+    private static func htmlDocument(
+        title: String,
+        body: String,
+        preferences: IOSReadingPreferences,
+        mediaURLs: [String: URL]
+    ) -> String {
+        let mediaMap = mediaURLs.mapValues(\.absoluteString)
+        let mediaJSON = (try? JSONSerialization.data(
+            withJSONObject: mediaMap,
+            options: [.sortedKeys]
+        )).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        return """
         <!doctype html>
         <html lang="zh-CN">
         <head>
@@ -190,34 +217,51 @@ public enum MarkdownHTMLRenderer {
           <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
           <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src file: data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:">
           <style>
-            :root { color-scheme: light; }
+            :root {
+              color-scheme: \(colorScheme(preferences.theme));
+              --sn-font-size: \(preferences.fontSize)px;
+              --sn-line-height: \(preferences.lineHeight);
+              --sn-line-width: \(preferences.lineWidth)px;
+              --sn-page: #ffffff;
+              --sn-ink: #1f2329;
+              --sn-text: #4e5969;
+              --sn-soft: #f7f8fa;
+              --sn-border: #e5e6eb;
+              --sn-primary: #3370ff;
+            }
             * { box-sizing: border-box; }
             body {
-              margin: 0;
+              margin: 0 auto;
               padding: 24px 20px 120px;
-              color: #1f2329;
-              background: #ffffff;
+              max-width: var(--sn-line-width);
+              color: var(--sn-ink);
+              background: var(--sn-page);
               font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
-              font-size: 17px;
-              line-height: 1.85;
+              font-size: var(--sn-font-size);
+              line-height: var(--sn-line-height);
               -webkit-text-size-adjust: 100%;
             }
-            h1 { font-size: 28px; line-height: 1.35; margin: 0 0 20px; }
-            h2 { font-size: 22px; line-height: 1.45; margin: 30px 0 12px; }
-            h3, h4, h5, h6 { font-size: 18px; margin: 24px 0 10px; }
+            h1 { font-size: calc(var(--sn-font-size) * 1.75); line-height: 1.35; margin: 0 0 20px; }
+            h2 { font-size: calc(var(--sn-font-size) * 1.38); line-height: 1.45; margin: 30px 0 12px; }
+            h3, h4, h5, h6 { font-size: calc(var(--sn-font-size) * 1.12); margin: 24px 0 10px; }
             p { margin: 0 0 18px; }
             blockquote {
               margin: 20px 0; padding: 8px 0 8px 16px;
-              border-left: 3px solid #3370ff; color: #4e5969;
+              border-left: 3px solid var(--sn-primary); color: var(--sn-text);
             }
             li.bullet { margin: 3px 0 10px 22px; }
             pre.code {
               overflow-x: auto; padding: 14px; border-radius: 8px;
-              background: #f7f8fa; font-size: 13px; line-height: 1.55;
+              background: var(--sn-soft); font-size: calc(var(--sn-font-size) * 0.82); line-height: 1.55;
             }
-            code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88em; }
-            a { color: #3370ff; }
-            hr { border: 0; border-top: 1px solid #e5e6eb; margin: 28px 0; }
+            code { font-family: "\(escapeAttribute(preferences.codeFont))", ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88em; }
+            a { color: var(--sn-primary); }
+            img {
+              display: block; max-width: 100%; height: auto;
+              margin: 20px auto; border-radius: 7px;
+            }
+            hr { border: 0; border-top: 1px solid var(--sn-border); margin: 28px 0; }
+            \(darkModeStyle(preferences.theme))
             ::highlight(studynotes-annotation) {
               background-color: rgba(246, 196, 83, 0.48);
               text-decoration: underline 1px rgba(139, 107, 20, 0.7);
@@ -232,10 +276,58 @@ public enum MarkdownHTMLRenderer {
         </head>
         <body data-title="\(escape(title))">
         \(body.isEmpty ? "<p class=\"sn-empty\" data-block-id=\"block-0\">这篇材料还没有可显示的正文。</p>" : body)
+        <script>
+        const studyNotesMediaURLs = \(mediaJSON);
+        document.querySelectorAll("[data-media-key]").forEach((element) => {
+          const mapped = studyNotesMediaURLs[element.dataset.mediaKey];
+          if (!mapped) return;
+          if (element.tagName === "IMG") element.src = mapped;
+          else if (element.tagName === "A") {
+            element.href = mapped;
+            element.download = element.textContent || "附件";
+          }
+        });
+        </script>
         \(selectionScript)
         </body>
         </html>
         """
+    }
+
+    private static func colorScheme(_ theme: IOSReadingTheme) -> String {
+        switch theme {
+        case .system:
+            "light dark"
+        case .light:
+            "light"
+        case .dark:
+            "dark"
+        }
+    }
+
+    private static func darkModeStyle(_ theme: IOSReadingTheme) -> String {
+        let declarations = """
+        :root {
+          --sn-page: #17181c;
+          --sn-ink: #e8eaed;
+          --sn-text: #b8bcc4;
+          --sn-soft: #24262c;
+          --sn-border: #343740;
+          --sn-primary: #77a0ff;
+        }
+        """
+        switch theme {
+        case .system:
+            return "@media (prefers-color-scheme: dark) {\n\(declarations)\n}"
+        case .dark:
+            return declarations
+        case .light:
+            return ""
+        }
+    }
+
+    private static func escapeAttribute(_ value: String) -> String {
+        escape(value).replacingOccurrences(of: "\n", with: " ")
     }
 
     private static let selectionScript = """

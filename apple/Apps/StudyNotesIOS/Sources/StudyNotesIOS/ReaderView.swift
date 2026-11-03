@@ -2,6 +2,8 @@
 import PDFKit
 import SwiftUI
 import StudyNotesIOSCore
+import StudyNotesKit
+import UniformTypeIdentifiers
 
 struct ReaderView: View {
     @Bindable var model: IOSAppModel
@@ -15,6 +17,11 @@ struct ReaderView: View {
     @State private var imageRectangleDraft: NormalizedRectangle?
     @State private var showingTextComposer = false
     @State private var showingImageComposer = false
+    @State private var showsImageImporter = false
+    @State private var showsFileImporter = false
+    @State private var pendingMediaURL: URL?
+    @State private var pendingMediaKind: MarkdownEditorAttachmentKind?
+    @State private var showsCellularConfirmation = false
 
     var body: some View {
         Group {
@@ -40,7 +47,9 @@ struct ReaderView: View {
     @ViewBuilder
     private func reader(_ session: ReaderSessionModel) -> some View {
         Group {
-            if session.document.material.kind == .image {
+            if isEditing(session) {
+                markdownEditor(session)
+            } else if session.document.material.kind == .image {
                 ImageAnnotationCanvas(
                     contentURL: session.document.contentURL,
                     annotations: session.annotations,
@@ -50,7 +59,7 @@ struct ReaderView: View {
                 PDFDocumentView(url: session.document.contentURL)
             } else {
                 TextReaderWebView(
-                    html: session.textHTML,
+                    html: session.textHTML(preferences: model.readingPreferences),
                     annotations: session.annotations,
                     focusBlockPath: session.focusBlockPath,
                     onSelection: { anchor in
@@ -58,18 +67,62 @@ struct ReaderView: View {
                         textAnchorDraft = anchor
                     }
                 )
+                .simultaneousGesture(
+                    TapGesture(count: 2).onEnded {
+                        guard session.isMarkdownEditable else {
+                            return
+                        }
+                        session.beginEditingMarkdown(
+                            initialDraft: model.editorDraft(for: materialID)
+                        )
+                        model.setEditing(true)
+                    }
+                )
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .safeAreaInset(edge: .bottom) {
-            if textAnchorDraft != nil, session.document.material.kind.supportsTextAnnotation {
+            if !isEditing(session),
+               textAnchorDraft != nil,
+               session.document.material.kind.supportsTextAnnotation {
                 selectionToolbar(session)
-            } else if let imageRectangleDraft {
+            } else if !isEditing(session), let imageRectangleDraft {
                 imageToolbar(session, rectangle: imageRectangleDraft)
             }
         }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
+                if session.isMarkdownEditable {
+                    Button {
+                        if isEditing(session) {
+                            Task {
+                                if await session.finishMarkdownEditing() {
+                                    model.setEditing(false)
+                                    model.clearEditorDraft(materialID: materialID)
+                            model.noticeMessage = "笔记已保存"
+                                    await model.reloadAll()
+                                }
+                            }
+                        } else {
+                    session.beginEditingMarkdown(
+                        initialDraft: model.editorDraft(for: materialID)
+                    )
+                            model.setEditing(true)
+                        }
+                    } label: {
+                        Image(
+                            systemName: isEditing(session)
+                                ? "checkmark.circle"
+                                : "pencil"
+                        )
+                    }
+                    .disabled(session.isSavingMarkdown)
+                    .accessibilityLabel(
+                        isEditing(session) ? "完成并保存" : "编辑笔记"
+                    )
+                }
+
+                if !isEditing(session) {
                 Button {
                     showingAnnotationList = true
                 } label: {
@@ -83,6 +136,7 @@ struct ReaderView: View {
                     Image(systemName: "sparkles")
                 }
                 .accessibilityLabel("AI 研读")
+                }
 
                 Menu {
                     if session.document.material.accessState == .offline {
@@ -157,15 +211,244 @@ struct ReaderView: View {
         .alert(
             "操作未完成",
             isPresented: Binding(
-                get: { session.errorMessage != nil },
-                set: { if !$0 { session.errorMessage = nil } }
+                get: {
+                    session.errorMessage != nil
+                        || session.markdownError != nil
+                },
+                set: {
+                    if !$0 {
+                        session.errorMessage = nil
+                        session.markdownError = nil
+                    }
+                }
             )
         ) {
             Button("知道了", role: .cancel) {
                 session.errorMessage = nil
+                session.markdownError = nil
             }
         } message: {
-            Text(session.errorMessage ?? "")
+            Text(session.errorMessage ?? session.markdownError ?? "")
+        }
+        .alert(
+            "标题不一致",
+            isPresented: Binding(
+                get: { session.editorSession?.titleConflict != nil },
+                set: { _ in }
+            )
+        ) {
+            if case let .manifestAndHeading(manifestTitle, headingTitle) =
+                session.editorSession?.titleConflict {
+                Button("保留清单标题“\(manifestTitle)”") {
+                    Task {
+                        await session.resolveMarkdownTitleConflict(
+                            usingManifestTitle: true
+                        )
+                    }
+                }
+                Button("保留正文标题“\(headingTitle)”") {
+                    Task {
+                        await session.resolveMarkdownTitleConflict(
+                            usingManifestTitle: false
+                        )
+                    }
+                }
+            }
+        } message: {
+            Text("保存前需要确认以哪个标题为准。")
+        }
+        .alert(
+            "编辑冲突",
+            isPresented: Binding(
+                get: {
+                    session.editorSession?.saveState.status == .conflict
+                        && session.editorSession?.titleConflict == nil
+                },
+                set: { _ in }
+            )
+        ) {
+            Button("重新载入磁盘版本", role: .destructive) {
+                Task {
+                    await session.reloadMarkdownFromDisk()
+                }
+            }
+            Button("保留我的版本") {
+                Task {
+                    await session.keepLocalMarkdownVersion()
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(
+                session.editorSession?.errorMessage
+                    ?? "磁盘内容已变化，当前编辑内容仍保留。"
+            )
+        }
+        .onChange(of: session.editorSession?.markdown) {
+            guard isEditing(session),
+                  let markdown = session.editorSession?.markdown else {
+                return
+            }
+            model.updateEditorDraft(
+                markdown,
+                materialID: materialID
+            )
+        }
+    }
+
+    private func isEditing(_ session: ReaderSessionModel) -> Bool {
+        session.isMarkdownEditable
+            && model.workspace.materialID == materialID
+            && model.workspace.isEditing
+    }
+
+    private func markdownEditor(_ session: ReaderSessionModel) -> some View {
+        Group {
+            if let editorSession = session.editorSession {
+                VStack(spacing: 0) {
+                    HStack(spacing: 8) {
+                        Text(editorSession.statusLabel)
+                            .font(.system(size: 10))
+                            .foregroundStyle(SNColor.muted)
+                        if editorSession.isSaving {
+                            ProgressView()
+                                .controlSize(.mini)
+                        }
+                        Spacer()
+                        Button("保存") {
+                            Task {
+                                await editorSession.requestExplicitSave()
+                            }
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(height: 34)
+                    .background(SNColor.page)
+
+                    MarkdownEditorView(
+                        session: editorSession,
+                        readingPreferences: model.readingPreferences,
+                        mediaCoordinator: model.readerMediaCoordinator
+                    ) { kind in
+                        switch kind {
+                        case .image:
+                            showsImageImporter = true
+                        case .file:
+                            showsFileImporter = true
+                        }
+                    }
+                }
+            } else {
+                ProgressView("正在准备编辑器")
+            }
+        }
+        .fileImporter(
+            isPresented: $showsImageImporter,
+            allowedContentTypes: [.image]
+        ) { result in
+            handlePickedAttachment(result, kind: .image)
+        }
+        .fileImporter(
+            isPresented: $showsFileImporter,
+            allowedContentTypes: [.item]
+        ) { result in
+            handlePickedAttachment(result, kind: .file)
+        }
+        .alert(
+            "使用蜂窝网络上传？",
+            isPresented: $showsCellularConfirmation
+        ) {
+            Button("取消", role: .cancel) {
+                pendingMediaURL = nil
+                pendingMediaKind = nil
+            }
+            Button("继续上传") {
+                guard let url = pendingMediaURL,
+                      let kind = pendingMediaKind,
+                      let editorSession = session.editorSession else {
+                    return
+                }
+                pendingMediaURL = nil
+                pendingMediaKind = nil
+                insertPickedMedia(
+                    url,
+                    kind: kind,
+                    session: editorSession,
+                    confirmedCellularUpload: true
+                )
+            }
+        } message: {
+            Text("该文件超过 10MB，上传会使用当前蜂窝网络流量。")
+        }
+    }
+
+    private func handlePickedAttachment(
+        _ result: Result<URL, Error>,
+        kind: MarkdownEditorAttachmentKind
+    ) {
+        guard case let .success(url) = result,
+              let editorSession = session?.editorSession else {
+            return
+        }
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        if model.mediaConnection == .cellular,
+           size > NoteMediaPolicy.cellularConfirmationByteCount {
+            pendingMediaURL = url
+            pendingMediaKind = kind
+            showsCellularConfirmation = true
+            return
+        }
+        insertPickedMedia(
+            url,
+            kind: kind,
+            session: editorSession,
+            confirmedCellularUpload: false
+        )
+    }
+
+    private func insertPickedMedia(
+        _ url: URL,
+        kind: MarkdownEditorAttachmentKind,
+        session: MarkdownEditorSession,
+        confirmedCellularUpload: Bool
+    ) {
+        Task {
+            let isAccessing = url.startAccessingSecurityScopedResource()
+            defer {
+                if isAccessing {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
+            let contentType = NoteMediaPolicy.contentType(
+                forFileExtension: url.pathExtension
+            ) ?? (kind == .image ? "image/jpeg" : "application/octet-stream")
+            guard let decision = await model.insertMedia(
+                fileAt: url,
+                contentType: contentType,
+                connection: model.mediaConnection,
+                confirmedCellularUpload: confirmedCellularUpload
+            ) else {
+                return
+            }
+            switch decision {
+            case .requiresCellularConfirmation:
+                pendingMediaURL = url
+                pendingMediaKind = kind
+                showsCellularConfirmation = true
+            case let .inserted(insertion):
+                session.insertMediaReference(
+                    insertion.reference,
+                    kind: kind,
+                    label: url.deletingPathExtension().lastPathComponent
+                )
+                await self.session?.resolveMediaURLs()
+                _ = await model.uploadMedia(
+                    id: insertion.item.id,
+                    confirmedCellularUpload: true
+                )
+                await self.session?.resolveMediaURLs()
+            }
         }
     }
 
@@ -233,7 +516,17 @@ struct ReaderView: View {
 
     private func loadSession() async {
         do {
-            session = try await model.makeReaderModel(materialID: materialID)
+            let loaded = try await model.makeReaderModel(materialID: materialID)
+            session = loaded
+            if let draft = model.editorDraft(for: materialID) {
+                loaded.draftMarkdown = draft
+            }
+            if model.workspace.materialID == materialID,
+               model.workspace.isEditing {
+                loaded.beginEditingMarkdown(
+                    initialDraft: model.editorDraft(for: materialID)
+                )
+            }
         } catch {
             loadError = error.localizedDescription
         }

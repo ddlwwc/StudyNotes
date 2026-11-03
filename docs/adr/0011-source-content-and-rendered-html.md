@@ -1,3 +1,5 @@
 # 阅读副本保存源内容并派生规范化 HTML
 
+Status: partially superseded by ADR-0017; Markdown remains the source of truth, while visual editing is now permitted.
+
 Markdown 与 HTML 阅读副本以用户可编辑的源文件为真相，保存时由共享 Swift Reader 模块生成经过固定白名单清洗的派生 `rendered.html`，WKWebView 阅读、标注和发布预览都使用该派生结果；产品不建立富文本 AST、第二套可视化编辑器，也不在 Apple 应用中嵌入 Node.js 渲染链。发布时 Mac 上传规范化 HTML，Web 服务再次清洗并保存发布快照，避免匿名页面执行任意脚本。相比保存编辑器专用 JSON，源文件更易导出和人工检查；代价是标注必须使用能跨渲染和源内容变化的锚点，而不能依赖临时 DOM 节点编号。

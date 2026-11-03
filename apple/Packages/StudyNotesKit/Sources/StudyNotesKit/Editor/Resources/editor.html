@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: media:; connect-src 'none'; font-src 'self';">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="editor.css">
+  <title>StudyNotes Editor</title>
+</head>
+<body>
+  <main id="shell">
+    <header id="toolbar" role="toolbar" aria-label="编辑工具栏">
+      <button data-command="undo" title="撤销 (⌘Z)" aria-label="撤销">↶</button>
+      <button data-command="redo" title="重做 (⇧⌘Z)" aria-label="重做">↷</button>
+      <span class="separator"></span>
+      <button data-command="heading1" title="一级标题">H1</button>
+      <button data-command="heading2" title="二级标题">H2</button>
+      <button data-command="bold" title="粗体 (⌘B)"><strong>B</strong></button>
+      <button data-command="italic" title="斜体 (⌘I)"><em>I</em></button>
+      <button data-command="strike" title="删除线"><span class="strike">S</span></button>
+      <button data-command="code" title="行内代码">&lt;/&gt;</button>
+      <button data-command="link" title="链接">↗</button>
+      <span class="separator"></span>
+      <button data-command="quote" title="引用">❝</button>
+      <button data-command="bulletList" title="无序列表">•</button>
+      <button data-command="orderedList" title="有序列表">1.</button>
+      <button data-command="taskList" title="任务列表">☑</button>
+      <button data-command="codeBlock" title="代码块">{ }</button>
+      <button data-command="table" title="表格">▦</button>
+      <span class="separator"></span>
+      <button id="attach-image" title="插入图片占位" aria-label="插入图片占位">Img</button>
+      <button id="attach-file" title="插入附件占位" aria-label="插入附件占位">File</button>
+      <span class="spacer"></span>
+      <button id="outline-toggle" title="大纲" aria-label="大纲">☰</button>
+      <button id="find-toggle" title="查找 (⌘F)" aria-label="查找">⌕</button>
+      <button id="source-toggle" title="源文本模式" aria-label="源文本模式">&lt;/&gt;</button>
+    </header>
+
+    <section id="title-row">
+      <input id="title" type="text" autocomplete="off" spellcheck="false" aria-label="笔记标题" placeholder="无标题">
+    </section>
+
+    <aside id="outline" hidden>
+      <div class="panel-heading">
+        <span>大纲</span>
+        <button id="outline-close" aria-label="关闭大纲">×</button>
+      </div>
+      <nav id="outline-list"></nav>
+    </aside>
+
+    <section id="find-panel" hidden aria-label="文档内查找">
+      <input id="find-query" type="search" placeholder="查找正文" autocomplete="off">
+      <span id="find-count">0/0</span>
+      <button id="find-previous" aria-label="上一个">↑</button>
+      <button id="find-next" aria-label="下一个">↓</button>
+      <button id="find-close" aria-label="关闭查找">×</button>
+    </section>
+
+    <section id="editor-host">
+      <div id="editor"></div>
+      <textarea id="source" spellcheck="false" hidden></textarea>
+      <div id="slash-menu" hidden></div>
+      <div id="status-banner" role="status" hidden></div>
+    </section>
+  </main>
+  <script src="editor.js"></script>
+</body>
+</html>

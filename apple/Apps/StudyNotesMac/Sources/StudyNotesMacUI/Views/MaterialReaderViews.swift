@@ -2,6 +2,7 @@ import AppKit
 import PDFKit
 import StudyNotesKit
 import SwiftUI
+import UniformTypeIdentifiers
 import WebKit
 
 struct MaterialReaderView: View {
@@ -23,24 +24,188 @@ struct MaterialReaderView: View {
 private struct ArticleMaterialReader: View {
     @Bindable var model: WorkspaceModel
     let document: MaterialDocument
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var showsImageImporter = false
+    @State private var showsFileImporter = false
 
     var body: some View {
-        ArticleWebView(
-            document: document,
-            annotations: model.annotations,
-            jumpToAnnotationID: model.annotationJumpID,
-            headingID: model.readerHeadingJumpID,
-            searchText: model.documentSearchText,
-            onSelectionChanged: { selection in
-                model.updateReaderSelection(selection)
-            },
-            onAnnotationClick: { id in
-                model.annotationJumpID = id
-                model.studyPanelTab = .annotations
-                model.isStudyPanelVisible = true
+        Group {
+            if let session = model.markdownEditorSession,
+               session.materialID == document.id,
+               document.summary.kind == .note
+                    || document.summary.kind == .markdown {
+                VStack(spacing: 0) {
+                    HStack(spacing: 8) {
+                        Text(session.statusLabel)
+                            .font(.sn(10))
+                            .foregroundStyle(SNColor.muted)
+
+                        if session.isSaving {
+                            ProgressView()
+                                .controlSize(.mini)
+                        }
+
+                        Spacer()
+
+                        Button {
+                            Task {
+                                await session.requestExplicitSave()
+                            }
+                        } label: {
+                            Label("保存", systemImage: "square.and.arrow.down")
+                                .font(.sn(10))
+                        }
+                        .buttonStyle(.plain)
+                        .keyboardShortcut("s", modifiers: .command)
+                    }
+                    .padding(.horizontal, 16)
+                    .frame(height: 34)
+                    .background(SNColor.panel)
+
+                    MarkdownEditorView(
+                        session: session,
+                        readingPreferences: model.readingPreferences,
+                        mediaCoordinator: model.readerMediaCoordinator
+                    ) { kind in
+                        switch kind {
+                        case .image:
+                            showsImageImporter = true
+                        case .file:
+                            showsFileImporter = true
+                        }
+                    }
+                }
+            } else {
+                ArticleWebView(
+                    document: document,
+                    annotations: model.annotations,
+                    jumpToAnnotationID: model.annotationJumpID,
+                    headingID: model.readerHeadingJumpID,
+                    searchText: model.documentSearchText,
+                    readingPreferences: model.readingPreferences,
+                    isDarkMode: colorScheme == .dark,
+                    onSelectionChanged: { selection in
+                        model.updateReaderSelection(selection)
+                    },
+                    onAnnotationClick: { id in
+                        model.annotationJumpID = id
+                        model.studyPanelTab = .annotations
+                        model.isStudyPanelVisible = true
+                    }
+                )
+                .simultaneousGesture(
+                    TapGesture(count: 2).onEnded {
+                        model.beginMarkdownEditing()
+                    }
+                )
             }
-        )
+        }
         .background(SNColor.white)
+        .alert(
+            "标题不一致",
+            isPresented: Binding(
+                get: { model.markdownEditorSession?.titleConflict != nil },
+                set: { _ in }
+            )
+        ) {
+            if case let .manifestAndHeading(manifestTitle, headingTitle) =
+                model.markdownEditorSession?.titleConflict {
+                Button("保留清单标题“\(manifestTitle)”") {
+                    Task {
+                        await model.resolveMarkdownTitleConflict(
+                            usingManifestTitle: true
+                        )
+                    }
+                }
+                Button("保留正文标题“\(headingTitle)”") {
+                    Task {
+                        await model.resolveMarkdownTitleConflict(
+                            usingManifestTitle: false
+                        )
+                    }
+                }
+            }
+        } message: {
+            Text("保存前需要确认以哪个标题为准，正文内容尚未写入磁盘。")
+        }
+        .alert(
+            "编辑冲突",
+            isPresented: Binding(
+                get: {
+                    model.markdownEditorSession?.saveState.status == .conflict
+                        && model.markdownEditorSession?.titleConflict == nil
+                },
+                set: { _ in }
+            )
+        ) {
+            Button("重新载入磁盘版本", role: .destructive) {
+                Task {
+                    await model.reloadMarkdownEditorFromDisk()
+                }
+            }
+            Button("保留我的版本") {
+                Task {
+                    await model.keepLocalMarkdownVersion()
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(
+                model.markdownEditorSession?.errorMessage
+                    ?? "磁盘内容已变化，当前编辑内容仍保留在编辑器中。"
+            )
+        }
+        .fileImporter(
+            isPresented: $showsImageImporter,
+            allowedContentTypes: [.image],
+            allowsMultipleSelection: false
+        ) { result in
+            handleAttachment(result, kind: .image)
+        }
+        .fileImporter(
+            isPresented: $showsFileImporter,
+            allowedContentTypes: [.item],
+            allowsMultipleSelection: false
+        ) { result in
+            handleAttachment(result, kind: .file)
+        }
+    }
+
+    private func handleAttachment(
+        _ result: Result<[URL], Error>,
+        kind: MarkdownEditorAttachmentKind
+    ) {
+        guard case let .success(urls) = result,
+              let url = urls.first,
+              let session = model.markdownEditorSession else {
+            return
+        }
+        let isAccessing = url.startAccessingSecurityScopedResource()
+        Task {
+            defer {
+                if isAccessing {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
+            let contentType = NoteMediaPolicy.contentType(
+                forFileExtension: url.pathExtension
+            ) ?? (kind == .image ? "image/jpeg" : "application/octet-stream")
+            guard case let .inserted(insertion)? = await model.insertNoteMedia(
+                fileAt: url,
+                contentType: contentType,
+                connection: .wifi,
+                confirmedCellularUpload: true
+            ) else {
+                return
+            }
+            session.insertMediaReference(
+                insertion.reference,
+                kind: kind,
+                label: url.deletingPathExtension().lastPathComponent
+            )
+            await model.uploadNoteMedia(id: insertion.item.id)
+            await model.reloadSelectedDocumentMedia()
+        }
     }
 }
 
@@ -50,6 +215,8 @@ private struct ArticleWebView: NSViewRepresentable {
     let jumpToAnnotationID: UUID?
     let headingID: String?
     let searchText: String
+    let readingPreferences: ReadingPreferences
+    let isDarkMode: Bool
     let onSelectionChanged: (ReaderSelection?) -> Void
     let onAnnotationClick: (UUID) -> Void
 
@@ -82,6 +249,11 @@ private struct ArticleWebView: NSViewRepresentable {
             context.coordinator.load(document: document, in: webView)
             return
         }
+        context.coordinator.applyReadingPreferences(
+            readingPreferences,
+            isDarkMode: isDarkMode,
+            in: webView
+        )
         context.coordinator.applyAnnotations(annotations, in: webView)
         if let jumpToAnnotationID {
             context.coordinator.jump(to: jumpToAnnotationID, in: webView)
@@ -112,6 +284,7 @@ private struct ArticleWebView: NSViewRepresentable {
         weak var webView: WKWebView?
         var documentID: UUID?
         private var loadedDocumentID: UUID?
+        private var readingPreferencesSignature = ""
 
         init(parent: ArticleWebView) {
             self.parent = parent
@@ -127,7 +300,72 @@ private struct ArticleWebView: NSViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            applyReadingPreferences(
+                parent.readingPreferences,
+                isDarkMode: parent.isDarkMode,
+                in: webView
+            )
             applyAnnotations(parent.annotations, in: webView)
+        }
+
+        func applyReadingPreferences(
+            _ preferences: ReadingPreferences,
+            isDarkMode: Bool,
+            in webView: WKWebView
+        ) {
+            let signature = [
+                String(preferences.fontSize),
+                String(preferences.lineHeight),
+                String(preferences.lineWidth),
+                preferences.codeFont,
+                String(isDarkMode)
+            ].joined(separator: "|")
+            guard signature != readingPreferencesSignature else {
+                return
+            }
+            readingPreferencesSignature = signature
+            let background = isDarkMode ? "#1b1c20" : "#ffffff"
+            let text = isDarkMode ? "#c6c9d0" : "#374151"
+            let heading = isDarkMode ? "#f0f1f3" : "#111827"
+            let muted = isDarkMode ? "#a9adb7" : "#4b5563"
+            let border = isDarkMode ? "#34363d" : "#e5e7eb"
+            let codeBackground = isDarkMode ? "#25272d" : "#f7f8fa"
+            let codeText = isDarkMode ? "#eceef2" : "#111827"
+            let codeFont = preferences.codeFont
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            let css = """
+            :root { color-scheme: \(isDarkMode ? "dark" : "light"); }
+            html, body { background: \(background) !important; }
+            body {
+              color: \(text) !important;
+              font-size: \(preferences.fontSize)px !important;
+              line-height: \(preferences.lineHeight) !important;
+            }
+            article { max-width: \(preferences.lineWidth)px !important; }
+            h1, h2, h3, h4, h5, h6 { color: \(heading) !important; }
+            blockquote { color: \(muted) !important; }
+            pre {
+              border-color: \(border) !important;
+              background: \(codeBackground) !important;
+              color: \(codeText) !important;
+              font-family: "\(codeFont)", SFMono-Regular, Menlo, monospace !important;
+              font-size: \(max(11, preferences.fontSize - 4))px !important;
+            }
+            code { font-family: "\(codeFont)", SFMono-Regular, Menlo, monospace !important; }
+            """
+            webView.evaluateJavaScript(
+                """
+                (() => {
+                  let style = document.getElementById('studynotes-reading-preferences');
+                  if (!style) {
+                    style = document.createElement('style');
+                    style.id = 'studynotes-reading-preferences';
+                    document.head.appendChild(style);
+                  }
+                  style.textContent = \(javaScriptString(css));
+                })();
+                """
+            )
         }
 
         func applyAnnotations(

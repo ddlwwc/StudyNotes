@@ -286,6 +286,11 @@ export async function embedMediaAsDataUrls(
   media: VersionMedia[],
   readObject: (objectKey: string) => Promise<Buffer>
 ): Promise<string> {
+  const maximumTotalBytes = 100 * 1024 * 1024;
+  const totalBytes = media.reduce((total, item) => total + item.size, 0);
+  if (totalBytes > maximumTotalBytes) {
+    throw new ValidationError("导出媒体总大小超过 100MB，请分篇导出");
+  }
   const byKey = new Map(media.map((item) => [item.objectKey, item]));
   const dataByKey = new Map<string, string>();
   for (const item of media) {

@@ -24,7 +24,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "StudyNotesIOS",
-            dependencies: ["StudyNotesIOSCore"]
+            dependencies: [
+                "StudyNotesIOSCore",
+                .product(name: "StudyNotesKit", package: "StudyNotesKit")
+            ]
         ),
         .testTarget(
             name: "StudyNotesIOSCoreTests",

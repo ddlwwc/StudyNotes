@@ -1,3 +1,4 @@
+import StudyNotesKit
 import SwiftUI
 
 public struct AppShell: View {
@@ -11,21 +12,43 @@ public struct AppShell: View {
 
     public var body: some View {
         HStack(spacing: 0) {
-            WorkspaceSidebar(model: model)
-                .frame(width: SNMetric.sidebarWidth)
+            if model.isLibraryPaneVisible {
+                WorkspaceSidebar(model: model)
+                    .frame(width: model.libraryPaneWidth)
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+                WorkspacePaneDivider(
+                    width: model.libraryPaneWidth,
+                    range: WorkspacePreferences.libraryWidthRange,
+                    defaultWidth: WorkspacePreferences.defaultLibraryWidth,
+                    dragDirection: 1,
+                    onChange: { model.setPaneWidth(.library, width: $0) },
+                    onReset: { model.restoreDefaultWidth(.library) }
+                )
+            }
 
-            MaterialListPane(model: model)
-                .frame(width: SNMetric.materialListWidth)
+            if model.isMaterialPaneVisible {
+                MaterialListPane(model: model)
+                    .frame(width: model.materialPaneWidth)
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+                WorkspacePaneDivider(
+                    width: model.materialPaneWidth,
+                    range: WorkspacePreferences.materialsWidthRange,
+                    defaultWidth: WorkspacePreferences.defaultMaterialsWidth,
+                    dragDirection: 1,
+                    onChange: { model.setPaneWidth(.materials, width: $0) },
+                    onReset: { model.restoreDefaultWidth(.materials) }
+                )
+            }
 
             ReaderWorkspace(model: model)
-                .frame(minWidth: 460, maxWidth: .infinity)
+                .frame(minWidth: 420, maxWidth: .infinity)
         }
         .frame(
-            minWidth: SNMetric.minimumWindowWidth,
+            minWidth: minimumWorkspaceWidth,
             minHeight: SNMetric.minimumWindowHeight
         )
         .background(SNColor.white)
-        .preferredColorScheme(.light)
+        .preferredColorScheme(preferredColorScheme)
         .toolbar {
             WorkspaceToolbar(model: model)
         }
@@ -64,9 +87,6 @@ public struct AppShell: View {
         }
         .sheet(isPresented: $model.isShowingLinkMaterials) {
             LinkMaterialsSheet(model: model)
-        }
-        .sheet(isPresented: $model.isShowingAIConfiguration) {
-            AIConfigurationSheet(model: model)
         }
         .sheet(item: $model.pendingAIContext) { preview in
             AIContextConfirmationSheet(model: model, preview: preview)
@@ -133,6 +153,24 @@ public struct AppShell: View {
         }
     }
 
+    private var preferredColorScheme: ColorScheme? {
+        switch model.readingPreferences.theme {
+        case .system:
+            nil
+        case .light:
+            .light
+        case .dark:
+            .dark
+        }
+    }
+
+    private var minimumWorkspaceWidth: CGFloat {
+        let visiblePanes = (model.isLibraryPaneVisible ? model.libraryPaneWidth : 0)
+            + (model.isMaterialPaneVisible ? model.materialPaneWidth : 0)
+            + (model.isStudyPanelVisible ? model.studyPaneWidth : 0)
+        return max(SNMetric.minimumWindowWidth, CGFloat(visiblePanes) + 420)
+    }
+
     private var errorIsPresented: Binding<Bool> {
         Binding(
             get: { model.errorMessage != nil },
@@ -147,6 +185,7 @@ public struct AppShell: View {
 
 private struct ReaderWorkspace: View {
     @Bindable var model: WorkspaceModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 0) {
@@ -154,10 +193,22 @@ private struct ReaderWorkspace: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             if model.isStudyPanelVisible {
+                WorkspacePaneDivider(
+                    width: model.studyPaneWidth,
+                    range: WorkspacePreferences.studyWidthRange,
+                    defaultWidth: WorkspacePreferences.defaultStudyWidth,
+                    dragDirection: -1,
+                    onChange: { model.setPaneWidth(.study, width: $0) },
+                    onReset: { model.restoreDefaultWidth(.study) }
+                )
                 StudyPanel(model: model)
-                    .frame(width: SNMetric.studyPanelWidth)
+                    .frame(width: model.studyPaneWidth)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
+        .animation(
+            reduceMotion ? nil : .easeInOut(duration: 0.18),
+            value: model.isStudyPanelVisible
+        )
     }
 }

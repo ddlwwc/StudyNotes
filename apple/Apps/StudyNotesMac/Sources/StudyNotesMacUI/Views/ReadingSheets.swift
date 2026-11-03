@@ -13,8 +13,14 @@ struct ImportMaterialSheet: View {
 
     init(model: WorkspaceModel) {
         self.model = model
-        _destinationID = State(initialValue: model.defaultImportKnowledgeBaseID)
-        _folderPath = State(initialValue: model.defaultImportFolderPath)
+        _destinationID = State(
+            initialValue: model.importTarget?.knowledgeBaseID
+                ?? model.defaultImportKnowledgeBaseID
+        )
+        _folderPath = State(
+            initialValue: model.importTarget?.folderPath
+                ?? model.defaultImportFolderPath
+        )
     }
 
     var body: some View {
@@ -224,8 +230,14 @@ struct WebArticleImportSheet: View {
 
     init(model: WorkspaceModel) {
         self.model = model
-        _destinationID = State(initialValue: model.defaultImportKnowledgeBaseID)
-        _folderPath = State(initialValue: model.defaultImportFolderPath)
+        _destinationID = State(
+            initialValue: model.importTarget?.knowledgeBaseID
+                ?? model.defaultImportKnowledgeBaseID
+        )
+        _folderPath = State(
+            initialValue: model.importTarget?.folderPath
+                ?? model.defaultImportFolderPath
+        )
     }
 
     var body: some View {
@@ -406,7 +418,16 @@ struct EditReaderCopySheet: View {
             )
 
             TextEditor(text: $text)
-                .font(.system(size: 12, design: .monospaced))
+                .font(
+                    .custom(
+                        model.readingPreferences.codeFont,
+                        size: max(11, model.readingPreferences.fontSize - 4)
+                    )
+                )
+                .lineSpacing(
+                    model.readingPreferences.fontSize
+                        * (model.readingPreferences.lineHeight - 1)
+                )
                 .scrollContentBackground(.hidden)
                 .padding(10)
                 .background(SNColor.white)
@@ -415,6 +436,10 @@ struct EditReaderCopySheet: View {
                     RoundedRectangle(cornerRadius: SNRadius.control)
                         .stroke(SNColor.border, lineWidth: 1)
                 }
+                .frame(
+                    maxWidth: CGFloat(model.readingPreferences.lineWidth),
+                    alignment: .leading
+                )
                 .padding(.top, 18)
 
             ReadingSheetActions {
@@ -919,10 +944,10 @@ struct AIContextConfirmationSheet: View {
 struct PublishPreviewSheet: View {
     @Bindable var model: WorkspaceModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openSettings) private var openSettings
     @State private var publishing = PublishingPanelModel()
     @State private var isConfirmingWithdraw = false
     @State private var isConfirmingDelete = false
-    @State private var isConfirmingKeyRotation = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -930,7 +955,7 @@ struct PublishPreviewSheet: View {
                 VStack(alignment: .leading, spacing: 14) {
                 ReadingSheetHeader(
                     title: "发布到 Web",
-                    subtitle: "默认不公开标注和 AI 研读结果；发布使用仅存于 macOS 钥匙串的 Ed25519 私钥签名。"
+                    subtitle: "发布前确认公开范围；发布使用仅存于 macOS 钥匙串的 Ed25519 私钥签名。"
                 )
 
                 Toggle("公开标注与备注", isOn: $model.publishIncludeAnnotations)
@@ -961,13 +986,10 @@ struct PublishPreviewSheet: View {
 
                     GroupBox("发布服务") {
                         VStack(alignment: .leading, spacing: 7) {
-                            TextField("服务器地址", text: $publishing.serverURLText)
-                                .textFieldStyle(.roundedBorder)
-                            SecureField(
-                                "发布密钥注册凭据（仅用于本次登记）",
-                                text: $publishing.registrationSecret
-                            )
-                            .textFieldStyle(.roundedBorder)
+                            Text(publishing.serverURLText)
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(SNColor.muted)
+                                .lineLimit(1)
                             Text(
                                 publishing.credentialKid.map {
                                     "本机公钥：\($0)"
@@ -976,30 +998,11 @@ struct PublishPreviewSheet: View {
                             .font(.sn(8))
                             .foregroundStyle(SNColor.muted)
                             .lineLimit(1)
-                            HStack {
-                                Button(
-                                    publishing.credentialKid == nil
-                                        ? "生成并登记公钥"
-                                        : "登记现有公钥"
-                                ) {
-                                    Task { await publishing.registerKey() }
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .tint(SNColor.blue)
-                                .disabled(
-                                    publishing.isBusy
-                                        || publishing.registrationSecret.isEmpty
-                                )
-
-                                Button("轮换密钥") {
-                                    isConfirmingKeyRotation = true
-                                }
-                                .buttonStyle(.bordered)
-                                .disabled(
-                                    publishing.isBusy
-                                        || publishing.registrationSecret.isEmpty
-                                )
+                            Button("管理发布密钥…") {
+                                model.settingsPage = .credentials
+                                openSettings()
                             }
+                            .buttonStyle(.bordered)
                             .controlSize(.small)
                         }
                         .padding(.top, 4)
@@ -1205,16 +1208,6 @@ struct PublishPreviewSheet: View {
         }
         .onChange(of: model.publishPreview) {
             attachPublishingPreview()
-        }
-        .confirmationDialog(
-            "轮换发布密钥？",
-            isPresented: $isConfirmingKeyRotation
-        ) {
-            Button("撤销旧公钥并轮换", role: .destructive) {
-                Task { await publishing.rotateKey() }
-            }
-        } message: {
-            Text("旧公钥会先撤销；新私钥只保存到本机 macOS 钥匙串。")
         }
         .confirmationDialog(
             "下架这篇 Web 文章？",

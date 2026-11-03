@@ -1,0 +1,518 @@
+import Foundation
+import Observation
+
+public struct MarkdownEditorSnapshot: Equatable, Sendable {
+    public let materialID: UUID
+    public let title: String
+    public let markdown: String
+    public let fingerprint: String
+    public let compatibilityBlocks: [MarkdownCompatibilityBlock]
+
+    public init(
+        materialID: UUID,
+        title: String,
+        markdown: String,
+        fingerprint: String,
+        compatibilityBlocks: [MarkdownCompatibilityBlock]
+    ) {
+        self.materialID = materialID
+        self.title = title
+        self.markdown = markdown
+        self.fingerprint = fingerprint
+        self.compatibilityBlocks = compatibilityBlocks
+    }
+}
+
+public struct MarkdownEditorSaveRequest: Equatable, Sendable {
+    public let materialID: UUID
+    public let title: String
+    public let markdown: String
+    public let expectedFingerprint: String
+    public let createRecoveryVersion: Bool
+
+    public init(
+        materialID: UUID,
+        title: String,
+        markdown: String,
+        expectedFingerprint: String,
+        createRecoveryVersion: Bool
+    ) {
+        self.materialID = materialID
+        self.title = title
+        self.markdown = markdown
+        self.expectedFingerprint = expectedFingerprint
+        self.createRecoveryVersion = createRecoveryVersion
+    }
+}
+
+public enum MarkdownEditorSaveResult: Equatable, Sendable {
+    case saved(title: String, markdown: String, fingerprint: String)
+    case conflict(currentFingerprint: String)
+    case failed(reason: String)
+}
+
+public enum MarkdownEditorTitleConflict: Equatable, Sendable {
+    case manifestAndHeading(
+        manifestTitle: String,
+        headingTitle: String
+    )
+}
+
+public enum MarkdownEditorActionDecision: Equatable, Sendable {
+    case allowed
+    case blocked(reason: String)
+}
+
+public typealias MarkdownEditorSaveHandler =
+    @MainActor @Sendable (MarkdownEditorSaveRequest) async
+        -> MarkdownEditorSaveResult
+
+@MainActor
+@Observable
+public final class MarkdownEditorSession {
+    public let materialID: UUID
+    public private(set) var title: String
+    public private(set) var markdown: String
+    public private(set) var compatibilityBlocks: [MarkdownCompatibilityBlock]
+    public private(set) var saveState: MarkdownSaveState
+    public private(set) var titleConflict: MarkdownEditorTitleConflict?
+    public private(set) var errorMessage: String?
+    public private(set) var isSourceMode = false
+
+    @ObservationIgnored private let saveHandler: MarkdownEditorSaveHandler
+    @ObservationIgnored private let codec: MarkdownEditorCodec
+    @ObservationIgnored private let titleSync: MarkdownTitleSync
+    @ObservationIgnored private let policy = MarkdownSavePolicy()
+    @ObservationIgnored private weak var host: (any MarkdownEditorHosting)?
+    @ObservationIgnored private var expectedFingerprint: String
+    @ObservationIgnored private var conflictFingerprint: String?
+    @ObservationIgnored private var autosaveTask: Task<Void, Never>?
+    @ObservationIgnored private var didBecomeReady = false
+
+    public var onAttachmentRequested:
+        ((MarkdownEditorAttachmentKind) -> Void)?
+
+    public init(
+        snapshot: MarkdownEditorSnapshot,
+        codec: MarkdownEditorCodec = MarkdownEditorCodec(),
+        saveHandler: @escaping MarkdownEditorSaveHandler
+    ) {
+        materialID = snapshot.materialID
+        title = snapshot.title
+        markdown = snapshot.markdown
+        compatibilityBlocks = snapshot.compatibilityBlocks
+        expectedFingerprint = snapshot.fingerprint
+        saveState = MarkdownSaveState()
+        self.codec = codec
+        titleSync = MarkdownTitleSync(codec: codec)
+        self.saveHandler = saveHandler
+    }
+
+    public var isSaving: Bool {
+        saveState.status == .saving
+    }
+
+    public var hasUnsavedChanges: Bool {
+        saveState.hasUnsavedChanges || saveState.status == .saving
+    }
+
+    public var statusLabel: String {
+        switch saveState.status {
+        case .saved:
+            "已保存"
+        case .pendingChanges:
+            "有未保存更改"
+        case .saving:
+            "正在保存"
+        case .failed:
+            "保存失败"
+        case .conflict:
+            "存在冲突"
+        }
+    }
+
+    public func attach(_ host: any MarkdownEditorHosting) {
+        self.host = host
+        if didBecomeReady {
+            sendLoadedDocument()
+        }
+    }
+
+    public func receive(_ message: MarkdownEditorBridgeMessage) {
+        switch message {
+        case .ready:
+            didBecomeReady = true
+            sendLoadedDocument()
+        case let .loadDocument(markdown, title, compatibilityBlocks):
+            self.markdown = markdown
+            self.title = title
+            self.compatibilityBlocks = compatibilityBlocks
+        case let .markdownChanged(markdown):
+            self.markdown = markdown
+            Task { await reduce(.contentChanged) }
+        case let .titleChanged(title):
+            self.title = title
+            Task { await reduce(.contentChanged) }
+        case let .sourceChanged(markdown):
+            self.markdown = markdown
+            if let decoded = try? codec.decode(markdown) {
+                compatibilityBlocks = decoded.compatibilityBlocks
+            }
+            Task { await reduce(.contentChanged) }
+        case let .sourceModeChanged(enabled):
+            isSourceMode = enabled
+            if !enabled {
+                sendLoadedDocument()
+            }
+        case .command(.save), .saveRequested:
+            Task { await requestExplicitSave() }
+        case .command(.undo), .command(.redo),
+             .command(.focusTitle), .command(.enterSourceMode),
+             .command(.exitSourceMode):
+            break
+        case let .attachRequested(kind):
+            onAttachmentRequested?(kind)
+        case let .failed(reason):
+            errorMessage = reason
+            Task { await reduce(.saveFailed(reason: reason)) }
+        }
+    }
+
+    public func flush(_ reason: MarkdownFlushReason) async {
+        await reduce(.immediateFlush(reason))
+    }
+
+    public func requestExplicitSave() async {
+        await reduce(.explicitSave)
+    }
+
+    public func endEditing() async {
+        await reduce(.endEditing)
+    }
+
+    public func prepareForAction(
+        _ action: MarkdownEditorAction
+    ) async -> MarkdownEditorActionDecision {
+        if saveState.status == .saving {
+            await waitForActiveSave()
+        }
+        if case .conflict = saveState.status {
+            return .blocked(reason: "请先处理当前编辑冲突。")
+        }
+        if case let .failed(reason) = saveState.status {
+            return .blocked(reason: reason)
+        }
+
+        let effects = policy.reduce(
+            state: &saveState,
+            event: .actionRequested(action)
+        )
+        for effect in effects {
+            switch effect {
+            case .allow:
+                return .allowed
+            case let .block(_, reason):
+                return .blocked(reason: blockMessage(reason))
+            case .waitForSave:
+                await reduce(.debounceElapsed)
+                await waitForActiveSave()
+                if case .saved = saveState.status {
+                    return .allowed
+                }
+                if case .conflict = saveState.status {
+                    return .blocked(reason: "请先处理当前编辑冲突。")
+                }
+                if case let .failed(reason) = saveState.status {
+                    return .blocked(reason: reason)
+                }
+                return .blocked(reason: "当前编辑内容尚未保存。")
+            case .saveNow, .scheduleAutosave, .cancelAutosave:
+                break
+            }
+        }
+        return .blocked(reason: "当前编辑内容尚未保存。")
+    }
+
+    public func resolveTitleConflict(
+        usingManifestTitle: Bool
+    ) async {
+        guard let titleConflict else {
+            return
+        }
+        switch titleConflict {
+        case let .manifestAndHeading(manifestTitle, headingTitle):
+            self.titleConflict = nil
+            if usingManifestTitle {
+                do {
+                    markdown = try titleSync.applying(
+                        title: manifestTitle,
+                        to: markdown
+                    )
+                    compatibilityBlocks = try codec.decode(
+                        markdown
+                    ).compatibilityBlocks
+                    sendLoadedDocument()
+                } catch {
+                    errorMessage = error.localizedDescription
+                    await reduce(.saveFailed(
+                        reason: error.localizedDescription
+                    ))
+                    return
+                }
+            } else {
+                title = headingTitle
+                send(.titleChanged(headingTitle))
+            }
+            saveState = MarkdownSaveState(
+                status: .pendingChanges,
+                hasUnsavedChanges: true
+            )
+            await requestExplicitSave()
+        }
+    }
+
+    public func replaceSnapshot(_ snapshot: MarkdownEditorSnapshot) {
+        title = snapshot.title
+        markdown = snapshot.markdown
+        compatibilityBlocks = snapshot.compatibilityBlocks
+        expectedFingerprint = snapshot.fingerprint
+        conflictFingerprint = nil
+        titleConflict = nil
+        errorMessage = nil
+        saveState = MarkdownSaveState()
+        sendLoadedDocument()
+    }
+
+    public func overrideConflictAndSave() async {
+        guard let conflictFingerprint else {
+            return
+        }
+        expectedFingerprint = conflictFingerprint
+        self.conflictFingerprint = nil
+        saveState = MarkdownSaveState(
+            status: .pendingChanges,
+            hasUnsavedChanges: true
+        )
+        await requestExplicitSave()
+    }
+
+    public func sendCommand(_ command: MarkdownEditorCommand) {
+        send(.command(command))
+    }
+
+    public func insertMediaReference(
+        _ reference: NoteMediaReference,
+        kind: MarkdownEditorAttachmentKind,
+        label: String = ""
+    ) {
+        let normalizedLabel = label
+            .replacingOccurrences(of: "]", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let markdownSyntax: String
+        switch kind {
+        case .image:
+            markdownSyntax = "![\(normalizedLabel.isEmpty ? "图片" : normalizedLabel)](\(reference.stringValue))"
+        case .file:
+            markdownSyntax = "[\(normalizedLabel.isEmpty ? "附件" : normalizedLabel)](\(reference.stringValue))"
+        }
+        if !markdown.isEmpty, !markdown.hasSuffix("\n") {
+            markdown += "\n"
+        }
+        if !markdown.isEmpty, !markdown.hasSuffix("\n\n") {
+            markdown += "\n"
+        }
+        markdown += markdownSyntax
+        sendLoadedDocument()
+        Task { await reduce(.contentChanged) }
+    }
+
+    private func reduce(_ event: MarkdownSaveEvent) async {
+        let effects = policy.reduce(state: &saveState, event: event)
+        for effect in effects {
+            switch effect {
+            case let .scheduleAutosave(milliseconds):
+                scheduleAutosave(after: milliseconds)
+            case .cancelAutosave:
+                autosaveTask?.cancel()
+                autosaveTask = nil
+            case let .saveNow(createRecoveryVersion):
+                await performSave(
+                    createRecoveryVersion: createRecoveryVersion
+                )
+            case .block:
+                break
+            case .waitForSave, .allow:
+                break
+            }
+        }
+    }
+
+    private func scheduleAutosave(after milliseconds: Int) {
+        autosaveTask?.cancel()
+        autosaveTask = Task { [weak self] in
+            try? await Task.sleep(
+                for: .milliseconds(milliseconds)
+            )
+            guard !Task.isCancelled else {
+                return
+            }
+            await self?.reduce(.debounceElapsed)
+        }
+    }
+
+    private func performSave(createRecoveryVersion: Bool) async {
+        let requestedMarkdown = markdown
+        let requestedTitle = title
+        let prepared: MarkdownEditorPreparedSave
+        do {
+            prepared = try MarkdownEditorSavePreparation(
+                codec: codec,
+                titleSync: titleSync
+            ).prepare(
+                manifestTitle: requestedTitle,
+                markdown: requestedMarkdown,
+                compatibilityBlocks: compatibilityBlocks
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+            await reduce(.saveFailed(reason: error.localizedDescription))
+            return
+        }
+
+        switch prepared {
+        case let .titleConfirmation(manifestTitle, headingTitle):
+            titleConflict = .manifestAndHeading(
+                manifestTitle: manifestTitle,
+                headingTitle: headingTitle
+            )
+            errorMessage = "清单标题与正文首个一级标题不一致，请选择保留哪一个。"
+            await reduce(.conflictDetected)
+            return
+        case let .ready(title, markdown):
+            let outcome = await saveHandler(
+                MarkdownEditorSaveRequest(
+                    materialID: materialID,
+                    title: title,
+                    markdown: markdown,
+                    expectedFingerprint: expectedFingerprint,
+                    createRecoveryVersion: createRecoveryVersion
+                )
+            )
+            switch outcome {
+            case let .saved(savedTitle, savedMarkdown, fingerprint):
+                expectedFingerprint = fingerprint
+                conflictFingerprint = nil
+                errorMessage = nil
+                if self.markdown == requestedMarkdown {
+                    self.markdown = savedMarkdown
+                }
+                if self.title == requestedTitle {
+                    self.title = savedTitle
+                }
+                if let decoded = try? codec.decode(self.markdown) {
+                    compatibilityBlocks = decoded.compatibilityBlocks
+                }
+                await reduce(.saveSucceeded)
+            case let .conflict(currentFingerprint):
+                conflictFingerprint = currentFingerprint
+                errorMessage = "文件已被其他设备或工具修改，当前编辑内容未覆盖磁盘。"
+                await reduce(.conflictDetected)
+            case let .failed(reason):
+                errorMessage = reason
+                await reduce(.saveFailed(reason: reason))
+            }
+        }
+    }
+
+    private func sendLoadedDocument() {
+        guard didBecomeReady else {
+            return
+        }
+        send(
+            .loadDocument(
+                markdown: markdown,
+                title: title,
+                compatibilityBlocks: compatibilityBlocks
+            )
+        )
+    }
+
+    private func send(_ message: MarkdownEditorBridgeMessage) {
+        Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            do {
+                try await host?.send(message)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func blockMessage(
+        _ reason: MarkdownActionBlockReason
+    ) -> String {
+        switch reason {
+        case .saveFailed:
+            "请先解决保存失败，再继续当前操作。"
+        case .saveConflict:
+            "请先处理编辑冲突，再继续当前操作。"
+        case let .pendingUploads(count):
+            "还有 \(count) 个媒体文件正在等待上传或失败。"
+        }
+    }
+
+    private func waitForActiveSave() async {
+        for _ in 0..<250 where saveState.status == .saving {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+    }
+}
+
+public enum MarkdownEditorPreparedSave: Equatable, Sendable {
+    case ready(title: String, markdown: String)
+    case titleConfirmation(
+        manifestTitle: String,
+        headingTitle: String
+    )
+}
+
+public struct MarkdownEditorSavePreparation: Sendable {
+    private let codec: MarkdownEditorCodec
+    private let titleSync: MarkdownTitleSync
+
+    public init(
+        codec: MarkdownEditorCodec = MarkdownEditorCodec(),
+        titleSync: MarkdownTitleSync? = nil
+    ) {
+        self.codec = codec
+        self.titleSync = titleSync ?? MarkdownTitleSync(codec: codec)
+    }
+
+    public func prepare(
+        manifestTitle: String,
+        markdown: String,
+        compatibilityBlocks: [MarkdownCompatibilityBlock]
+    ) throws -> MarkdownEditorPreparedSave {
+        let normalized = try codec.decode(markdown).markdown
+        let safeMarkdown = try codec.encode(
+            MarkdownEditorDocument(
+                markdown: normalized,
+                compatibilityBlocks: compatibilityBlocks
+            )
+        )
+        switch try titleSync.plan(
+            manifestTitle: manifestTitle,
+            markdown: safeMarkdown
+        ) {
+        case let .synchronized(title, markdown):
+            return .ready(title: title, markdown: markdown)
+        case let .confirmation(manifestTitle, headingTitle):
+            return .titleConfirmation(
+                manifestTitle: manifestTitle,
+                headingTitle: headingTitle
+            )
+        }
+    }
+}

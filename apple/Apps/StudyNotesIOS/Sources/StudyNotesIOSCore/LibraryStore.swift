@@ -1,9 +1,11 @@
 import Foundation
+import StudyNotesKit
 
 public actor IOSLibraryStore {
     public let rootURL: URL
 
     private let fileManager: FileManager
+    private let sharedStore: StudyNotesStore
     private let onDemandRootURL: URL
     private let offlineRootURL: URL
     private let pendingRootURL: URL
@@ -16,6 +18,9 @@ public actor IOSLibraryStore {
     ) throws {
         self.rootURL = rootURL
         self.fileManager = fileManager
+        self.sharedStore = StudyNotesStore(
+            rootURL: rootURL
+        )
         let support = try StudyNotesFileSupport.applicationSupportDirectory(
             fileManager: fileManager
         )
@@ -39,7 +44,7 @@ public actor IOSLibraryStore {
         }
     }
 
-    public func snapshot(isICloud: Bool) throws -> IOSLibrarySnapshot {
+    public func snapshot(isICloud: Bool) async throws -> IOSLibrarySnapshot {
         try prepareRoot()
         _ = try? flushPendingMutations()
 
@@ -53,10 +58,20 @@ public actor IOSLibraryStore {
             path: "Libraries",
             directoryHint: .isDirectory
         )
+        let indexedFolders = (try? await sharedStore.loadIndex().folders) ?? []
+        let folders = indexedFolders.map {
+            IOSFolder(
+                knowledgeBaseID: $0.knowledgeBaseID,
+                name: $0.name,
+                path: $0.path,
+                parentPath: $0.parentPath
+            )
+        }
         guard fileManager.fileExists(atPath: librariesURL.path) else {
             return IOSLibrarySnapshot(
                 knowledgeBases: knowledgeBases,
                 materials: [],
+                folders: folders,
                 rootURL: rootURL,
                 isICloud: isICloud
             )
@@ -100,16 +115,120 @@ public actor IOSLibraryStore {
         return IOSLibrarySnapshot(
             knowledgeBases: knowledgeBases,
             materials: materials,
+            folders: folders,
             rootURL: rootURL,
             isICloud: isICloud
         )
+    }
+
+    @discardableResult
+    public func createFolder(
+        named name: String,
+        in knowledgeBaseID: UUID,
+        parentPath: String = ""
+    ) async throws -> IOSFolder {
+        let folder = try await sharedStore.createFolder(
+            named: name,
+            in: knowledgeBaseID,
+            parentPath: parentPath
+        )
+        return iosFolder(folder)
+    }
+
+    @discardableResult
+    public func renameFolder(
+        at path: String,
+        in knowledgeBaseID: UUID,
+        to name: String
+    ) async throws -> IOSFolder {
+        let folder = try await sharedStore.renameFolder(
+            at: path,
+            in: knowledgeBaseID,
+            to: name
+        )
+        return iosFolder(folder)
+    }
+
+    @discardableResult
+    public func moveFolder(
+        at path: String,
+        in knowledgeBaseID: UUID,
+        toParentPath parentPath: String
+    ) async throws -> IOSFolder {
+        let folder = try await sharedStore.moveFolder(
+            at: path,
+            in: knowledgeBaseID,
+            toParentPath: parentPath
+        )
+        return iosFolder(folder)
+    }
+
+    @discardableResult
+    public func deleteFolder(
+        at path: String,
+        in knowledgeBaseID: UUID
+    ) async throws -> [UUID] {
+        try await sharedStore.deleteFolder(
+            at: path,
+            in: knowledgeBaseID
+        )
+    }
+
+    @discardableResult
+    public func createMarkdownNote(
+        title: String,
+        in knowledgeBaseID: UUID,
+        markdown: String,
+        folderPath: String = ""
+    ) async throws -> UUID {
+        let note = try await sharedStore.createMarkdownNote(
+            title: title,
+            in: knowledgeBaseID,
+            markdown: markdown,
+            folderPath: folderPath
+        )
+        return note.summary.id
+    }
+
+    public func moveMaterials(
+        ids: [UUID],
+        toKnowledgeBaseID knowledgeBaseID: UUID,
+        folderPath: String = ""
+    ) async throws {
+        _ = try await sharedStore.moveMaterials(
+            ids: ids,
+            toKnowledgeBaseID: knowledgeBaseID,
+            folderPath: folderPath
+        )
+    }
+
+    public func moveMaterialsToRecycleBin(ids: [UUID]) async throws {
+        _ = try await sharedStore.moveMaterialsToRecycleBin(ids: ids)
+    }
+
+    @discardableResult
+    public func saveMarkdown(
+        materialID: UUID,
+        text: String,
+        title: String,
+        createRecoveryVersion: Bool
+    ) async throws -> String {
+        let normalized = try MarkdownEditorCodec().normalize(text)
+        _ = try await sharedStore.saveReaderCopy(
+            id: materialID,
+            text: normalized,
+            title: title,
+            createRecoveryVersion: createRecoveryVersion
+        )
+        try synchronizeReadCopies(materialID: materialID)
+        return normalized
     }
 
     public func requestDownload(
         materialID: UUID,
         isICloud: Bool
     ) async throws -> LibraryMaterial {
-        guard let material = try snapshot(isICloud: isICloud).materials.first(
+        guard let material = try await snapshot(isICloud: isICloud).materials.first(
             where: { $0.id == materialID }
         ) else {
             throw StudyNotesIOSError.materialNotFound
@@ -156,7 +275,7 @@ public actor IOSLibraryStore {
     public func removeOffline(
         materialID: UUID,
         isICloud: Bool
-    ) throws -> LibraryMaterial {
+    ) async throws -> LibraryMaterial {
         let offlineURL = offlinePackageURL(for: materialID)
         if fileManager.fileExists(atPath: offlineURL.path) {
             try fileManager.removeItem(at: offlineURL)
@@ -165,7 +284,7 @@ public actor IOSLibraryStore {
         if fileManager.fileExists(atPath: onDemandURL.path) {
             try fileManager.removeItem(at: onDemandURL)
         }
-        guard let material = try snapshot(isICloud: isICloud).materials.first(
+        guard let material = try await snapshot(isICloud: isICloud).materials.first(
             where: { $0.id == materialID }
         ) else {
             throw StudyNotesIOSError.materialNotFound
@@ -176,8 +295,8 @@ public actor IOSLibraryStore {
     public func loadDocument(
         materialID: UUID,
         isICloud: Bool
-    ) throws -> MaterialDocument {
-        guard let material = try snapshot(isICloud: isICloud).materials.first(
+    ) async throws -> MaterialDocument {
+        guard let material = try await snapshot(isICloud: isICloud).materials.first(
             where: { $0.id == materialID }
         ) else {
             throw StudyNotesIOSError.materialNotFound
@@ -400,8 +519,8 @@ public actor IOSLibraryStore {
     public func scanTextForSearch(
         materialID: UUID,
         isICloud: Bool
-    ) -> String {
-        guard let document = try? loadDocument(
+    ) async -> String {
+        guard let document = try? await loadDocument(
             materialID: materialID,
             isICloud: isICloud
         ) else {
@@ -419,6 +538,49 @@ public actor IOSLibraryStore {
                 .flatMap(\.messages)
                 .map(\.content)
                 .joined(separator: "\n")
+    }
+
+    private func iosFolder(_ folder: KnowledgeFolder) -> IOSFolder {
+        IOSFolder(
+            knowledgeBaseID: folder.knowledgeBaseID,
+            name: folder.name,
+            path: folder.path,
+            parentPath: folder.parentPath
+        )
+    }
+
+    private func synchronizeReadCopies(materialID: UUID) throws {
+        guard let rootPackage = try locatePackage(materialID: materialID) else {
+            return
+        }
+        let rootManifest = try loadManifest(at: rootPackage)
+        let rootContentURL = try resolveContentURL(
+            in: rootPackage,
+            manifest: rootManifest
+        )
+        let rootContent = try Data(contentsOf: rootContentURL)
+        let rootManifestData = try Data(
+            contentsOf: rootPackage.appending(path: "manifest.json")
+        )
+
+        for packageURL in [
+            offlinePackageURL(for: materialID),
+            onDemandPackageURL(for: materialID)
+        ] where fileManager.fileExists(atPath: packageURL.path) {
+            let localManifest = try loadManifest(at: packageURL)
+            let localContentURL = try resolveContentURL(
+                in: packageURL,
+                manifest: localManifest
+            )
+            try StudyNotesFileSupport.writeAtomically(
+                rootContent,
+                to: localContentURL
+            )
+            try StudyNotesFileSupport.writeAtomically(
+                rootManifestData,
+                to: packageURL.appending(path: "manifest.json")
+            )
+        }
     }
 
     private func prepareRoot() throws {

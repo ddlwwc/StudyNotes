@@ -41,6 +41,10 @@ struct RootView: View {
         .sheet(isPresented: $model.showingProviderSettings) {
             AIProviderSettingsView(model: model)
         }
+        .sheet(isPresented: $model.showingSettings) {
+            SettingsView(model: model)
+        }
+        .preferredColorScheme(preferredColorScheme)
         .overlay(alignment: .top) {
             if let notice = model.noticeMessage {
                 ToastBanner(
@@ -70,6 +74,17 @@ struct RootView: View {
             Text(model.errorMessage ?? "")
         }
         .animation(.easeInOut(duration: 0.2), value: model.noticeMessage)
+    }
+
+    private var preferredColorScheme: ColorScheme? {
+        switch model.readingPreferences.theme {
+        case .system:
+            nil
+        case .light:
+            .light
+        case .dark:
+            .dark
+        }
     }
 }
 

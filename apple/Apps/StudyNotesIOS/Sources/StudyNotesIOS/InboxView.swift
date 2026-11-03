@@ -31,7 +31,7 @@ struct InboxView: View {
                         )
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 40)
-                        .background(Color.white)
+                        .background(SNColor.surface)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                     } else {
                         ForEach(model.inboxItems) { item in
@@ -112,7 +112,7 @@ struct InboxView: View {
         }
         .padding(.horizontal, 12)
         .frame(height: 44)
-        .background(Color.white)
+        .background(SNColor.surface)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay {
             RoundedRectangle(cornerRadius: 8)
@@ -159,7 +159,7 @@ struct InboxView: View {
                 Text("收件箱只负责轻量收集")
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(SNColor.ink)
-                Text("知识库选择、文件夹移动与标签整理在 Mac 完成。")
+                Text("可在资料库移动材料或整理文件夹；标签编辑仍在 Mac 完成。")
                     .font(.system(size: 10))
                     .foregroundStyle(SNColor.muted)
             }
@@ -199,7 +199,7 @@ private struct QuickCollectCard: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, minHeight: 88, alignment: .leading)
-        .background(Color.white)
+        .background(SNColor.surface)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay {
             RoundedRectangle(cornerRadius: 8)
@@ -235,7 +235,7 @@ private struct InboxItemRow: View {
             status
         }
         .padding(12)
-        .background(Color.white)
+        .background(SNColor.surface)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay {
             RoundedRectangle(cornerRadius: 8)

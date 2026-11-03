@@ -3,6 +3,8 @@ import StudyNotesKit
 
 struct StudyPanel: View {
     @Bindable var model: WorkspaceModel
+    @Environment(\.openSettings) private var openSettings
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var followUpPrompt = ""
     @State private var conversationToRename: AIConversation?
     @State private var conversationName = ""
@@ -18,7 +20,7 @@ struct StudyPanel: View {
                 Spacer()
 
                 Button {
-                    withAnimation(.easeInOut(duration: 0.18)) {
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
                         model.isStudyPanelVisible = false
                     }
                 } label: {
@@ -189,7 +191,7 @@ struct StudyPanel: View {
                 Spacer()
 
                 Button {
-                    model.isShowingAIConfiguration = true
+                    openAISettings()
                 } label: {
                     Image(systemName: "gearshape")
                 }
@@ -204,7 +206,7 @@ struct StudyPanel: View {
                     description: "API Key 只保存在 Apple 钥匙串。"
                 )
                 Button("打开供应商设置") {
-                    model.isShowingAIConfiguration = true
+                    openAISettings()
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(SNColor.blue)
@@ -355,6 +357,11 @@ struct StudyPanel: View {
                 }
             }
         }
+    }
+
+    private func openAISettings() {
+        model.settingsPage = .ai
+        openSettings()
     }
 }
 

@@ -91,20 +91,8 @@ private struct SnapshotSidebar: View {
                 SnapshotSidebarRow(
                     title: "学习科学",
                     systemImage: "books.vertical",
-                    count: "6"
-                )
-                SnapshotSidebarRow(
-                    title: "基础",
-                    systemImage: "folder",
-                    count: "3",
-                    isSelected: true,
-                    indentation: 1
-                )
-                SnapshotSidebarRow(
-                    title: "图论",
-                    systemImage: "folder",
-                    count: "2",
-                    indentation: 2
+                    count: "6",
+                    isSelected: true
                 )
 
                 Rectangle()
@@ -150,6 +138,9 @@ private struct SnapshotSidebar: View {
                         .foregroundStyle(SNColor.text)
                     Spacer()
                     Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 11))
+                        .foregroundStyle(SNColor.muted)
+                    Image(systemName: "gearshape")
                         .font(.system(size: 11))
                         .foregroundStyle(SNColor.muted)
                 }
@@ -253,12 +244,52 @@ private struct SnapshotMaterialList: View {
             }
             .padding(.horizontal, 12)
 
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("文件夹树")
+                        .font(.sn(9, weight: .medium))
+                        .foregroundStyle(SNColor.muted)
+                    Spacer()
+                    Image(systemName: "folder.badge.plus")
+                        .font(.system(size: 9))
+                        .foregroundStyle(SNColor.muted)
+                }
+                .padding(.horizontal, 13)
+                .frame(height: 28)
+
+                SnapshotFolderRow(title: "基础", count: "3", isSelected: true)
+                SnapshotFolderRow(title: "图论", count: "2", depth: 1)
+            }
+            .padding(.bottom, 5)
+
+            Rectangle()
+                .fill(SNColor.border)
+                .frame(height: 1)
+
             HStack {
-                Text("全部 3")
+                Text("当前层文件夹")
+                    .font(.sn(9, weight: .medium))
+                    .foregroundStyle(SNColor.muted)
+                Spacer()
+                Text("1")
+                    .font(.sn(9))
+                    .foregroundStyle(SNColor.muted)
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 27)
+
+            SnapshotFolderRow(title: "图论", count: "2")
+
+            Rectangle()
+                .fill(SNColor.border)
+                .frame(height: 1)
+
+            HStack {
+                Text("全部 2")
                     .font(.sn(11, weight: .medium))
                     .foregroundStyle(SNColor.blue)
                 Spacer()
-                Text("最近更新")
+                Text("当前层 · 按名称")
                     .font(.sn(10))
                     .foregroundStyle(SNColor.muted)
             }
@@ -291,6 +322,36 @@ private struct SnapshotMaterialList: View {
                 .fill(SNColor.border)
                 .frame(width: 1)
         }
+    }
+}
+
+private struct SnapshotFolderRow: View {
+    let title: String
+    let count: String
+    var depth = 0
+    var isSelected = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Color.clear
+                .frame(width: CGFloat(depth) * 13)
+            Image(systemName: depth == 0 ? "chevron.right" : "folder")
+                .font(.system(size: 8))
+                .frame(width: 12)
+            Image(systemName: "folder")
+                .font(.system(size: 10))
+            Text(title)
+                .font(.sn(10, weight: isSelected ? .medium : .regular))
+                .lineLimit(1)
+            Spacer()
+            Text(count)
+                .font(.sn(9))
+                .foregroundStyle(SNColor.muted)
+        }
+        .foregroundStyle(isSelected ? SNColor.blue : SNColor.text)
+        .padding(.horizontal, 13)
+        .frame(height: 28)
+        .background(isSelected ? SNColor.blueSoft : Color.clear)
     }
 }
 
@@ -568,7 +629,7 @@ private struct SnapshotStudyPanel: View {
                         Spacer()
                         Label("解释选段", systemImage: "sparkles")
                             .font(.sn(10, weight: .medium))
-                            .foregroundStyle(SNColor.white)
+                            .foregroundStyle(SNColor.onAccent)
                             .padding(.horizontal, 12)
                             .frame(height: 30)
                             .background(SNColor.blue)

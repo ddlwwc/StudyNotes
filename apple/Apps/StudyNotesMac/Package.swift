@@ -28,6 +28,10 @@ let package = Package(
         .executableTarget(
             name: "StudyNotesMacSnapshot",
             dependencies: ["StudyNotesMacUI"]
+        ),
+        .testTarget(
+            name: "StudyNotesMacUITests",
+            dependencies: ["StudyNotesMacUI"]
         )
     ]
 )

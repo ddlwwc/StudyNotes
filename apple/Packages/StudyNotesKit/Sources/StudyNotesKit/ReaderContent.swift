@@ -204,9 +204,14 @@ public enum ReaderContentBuilder {
           </article>
           <script>
             window.studyNotesMediaURLs = \(mediaJSON);
-            document.querySelectorAll('img[data-media-key]').forEach((image) => {
-              const mapped = window.studyNotesMediaURLs[image.dataset.mediaKey];
-              if (mapped) image.src = mapped;
+            document.querySelectorAll('[data-media-key]').forEach((element) => {
+              const mapped = window.studyNotesMediaURLs[element.dataset.mediaKey];
+              if (!mapped) return;
+              if (element.tagName === 'IMG') element.src = mapped;
+              else if (element.tagName === 'A') {
+                element.href = mapped;
+                element.download = element.textContent || '附件';
+              }
             });
             window.studyNotesCurrentSelection = function() {
               const selection = window.getSelection();
@@ -571,6 +576,11 @@ private enum MarkdownHTMLRenderer {
         escaped = escaped.replacingOccurrences(
             of: #"<img alt="([^"]*)" src="media://([^"]+)">"#,
             with: #"<img alt="$1" data-media-key="$2" src="">"#,
+            options: .regularExpression
+        )
+        escaped = escaped.replacingOccurrences(
+            of: #"<a href="media://([^"]+)">([^<]+)</a>"#,
+            with: #"<a data-media-key="$1" href="" download="$2">$2</a>"#,
             options: .regularExpression
         )
         escaped = escaped.replacingOccurrences(

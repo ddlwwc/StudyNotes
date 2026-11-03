@@ -736,6 +736,21 @@ public actor StudyNotesStore {
 
     @discardableResult
     public func saveReaderCopy(id: UUID, text: String) throws -> TextRevision {
+        try saveReaderCopy(
+            id: id,
+            text: text,
+            title: nil,
+            createRecoveryVersion: true
+        )
+    }
+
+    @discardableResult
+    public func saveReaderCopy(
+        id: UUID,
+        text: String,
+        title: String?,
+        createRecoveryVersion: Bool
+    ) throws -> TextRevision {
         let rootURL = try availableRootURL()
         try prepareRootDirectories(at: rootURL)
 
@@ -755,14 +770,39 @@ public actor StudyNotesStore {
                 throw StudyNotesError.materialNotPublishable
             }
             try Data(text.utf8).write(to: contentURL, options: .atomic)
-            let revision = try appendRevision(
-                text: text,
+            let existingRevisions = try revisions(
                 packageURL: located.packageURL,
                 materialID: id
             )
+            let revision: TextRevision
+            if createRecoveryVersion {
+                revision = try appendRevision(
+                    text: text,
+                    packageURL: located.packageURL,
+                    materialID: id
+                )
+            } else if let current = existingRevisions.first(
+                where: { $0.id == located.manifest.contentVersionID }
+            ) {
+                revision = current
+            } else {
+                revision = try appendRevision(
+                    text: text,
+                    packageURL: located.packageURL,
+                    materialID: id
+                )
+            }
             var manifest = located.manifest
+            if let title {
+                let normalizedTitle = title.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+                if !normalizedTitle.isEmpty {
+                    manifest.title = normalizedTitle
+                }
+            }
             manifest.contentVersionID = revision.id
-            manifest.updatedAt = revision.createdAt
+            manifest.updatedAt = Date()
             manifest.contentFingerprint = ContentFingerprint.sha256(text)
             try writeManifest(manifest, to: located.packageURL)
             return revision
@@ -3495,7 +3535,7 @@ private struct MaterialManifest: Codable, Equatable, Sendable {
     let id: UUID
     var knowledgeBaseID: UUID?
     let kind: StudyMaterialKind
-    let title: String
+    var title: String
     let createdAt: Date
     var updatedAt: Date
     var folderPath: String

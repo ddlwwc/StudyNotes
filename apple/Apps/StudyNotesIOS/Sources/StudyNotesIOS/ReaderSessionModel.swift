@@ -1,6 +1,15 @@
 import Foundation
 import Observation
 import StudyNotesIOSCore
+import enum StudyNotesKit.ContentFingerprint
+import enum StudyNotesKit.MarkdownEditorAction
+import struct StudyNotesKit.MarkdownEditorCodec
+import enum StudyNotesKit.MarkdownEditorSaveResult
+import struct StudyNotesKit.MarkdownEditorSaveRequest
+import class StudyNotesKit.MarkdownEditorSession
+import struct StudyNotesKit.MarkdownEditorSnapshot
+import class StudyNotesKit.NoteMediaCoordinator
+import enum StudyNotesKit.NoteMediaReferenceScanner
 
 struct AIRequestDraft: Sendable {
     let action: String
@@ -11,7 +20,8 @@ struct AIRequestDraft: Sendable {
 @MainActor
 @Observable
 final class ReaderSessionModel {
-    let document: MaterialDocument
+    var document: MaterialDocument
+    var draftMarkdown: String
     var annotations: [StudyAnnotation] = []
     var conversations: [AIConversation] = []
     var providers: [AIProvider]
@@ -25,9 +35,15 @@ final class ReaderSessionModel {
     var lastRequest: AIRequestDraft?
     var noticeMessage: String?
     var errorMessage: String?
+    var markdownError: String?
+    var isSavingMarkdown = false
+    var editorSession: MarkdownEditorSession?
+    var mediaURLs: [String: URL] = [:]
 
     @ObservationIgnored private let libraryStore: IOSLibraryStore
     @ObservationIgnored private let providerStore: AIProviderStore
+    @ObservationIgnored private let isICloud: Bool
+    @ObservationIgnored private let mediaCoordinator: NoteMediaCoordinator?
     @ObservationIgnored private let client = OpenAICompatibleClient()
     @ObservationIgnored private var streamTask: Task<Void, Never>?
 
@@ -36,13 +52,18 @@ final class ReaderSessionModel {
         libraryStore: IOSLibraryStore,
         providerStore: AIProviderStore,
         providers: [AIProvider],
-        selectedProviderID: UUID?
+        selectedProviderID: UUID?,
+        isICloud: Bool,
+        mediaCoordinator: NoteMediaCoordinator? = nil
     ) async throws {
         self.document = document
         self.libraryStore = libraryStore
         self.providerStore = providerStore
+        self.isICloud = isICloud
+        self.mediaCoordinator = mediaCoordinator
         self.providers = providers
         self.providerID = selectedProviderID ?? providers.first?.id
+        self.draftMarkdown = document.sourceText ?? ""
         try await reload()
     }
 
@@ -50,11 +71,18 @@ final class ReaderSessionModel {
         providers.first { $0.id == providerID } ?? providers.first
     }
 
-    var textHTML: String {
+    var isMarkdownEditable: Bool {
+        document.material.kind == .note
+            || document.material.kind == .markdown
+    }
+
+    func textHTML(preferences: IOSReadingPreferences) -> String {
         MarkdownHTMLRenderer.render(
             source: document.sourceText ?? "",
             title: document.material.title,
-            kind: document.material.kind
+            kind: document.material.kind,
+            preferences: preferences,
+            mediaURLs: mediaURLs
         )
     }
 
@@ -91,6 +119,18 @@ final class ReaderSessionModel {
         conversations = try await libraryStore.loadConversations(
             materialID: document.material.id
         )
+        await resolveMediaURLs()
+    }
+
+    func resolveMediaURLs() async {
+        guard let mediaCoordinator else {
+            mediaURLs = [:]
+            return
+        }
+        let objectKeys = NoteMediaReferenceScanner.objectKeys(
+            in: document.sourceText ?? ""
+        )
+        mediaURLs = await mediaCoordinator.inlineURLMap(for: objectKeys)
     }
 
     func saveTextAnnotation(
@@ -200,11 +240,138 @@ final class ReaderSessionModel {
         focusBlockPath = anchor.blockPath
     }
 
+    func beginEditingMarkdown(initialDraft: String? = nil) {
+        guard isMarkdownEditable else {
+            return
+        }
+        if editorSession?.materialID == document.material.id {
+            return
+        }
+        let diskMarkdown = document.sourceText ?? ""
+        draftMarkdown = initialDraft ?? diskMarkdown
+        markdownError = nil
+        let decoded = try? MarkdownEditorCodec().decode(draftMarkdown)
+        editorSession = MarkdownEditorSession(
+            snapshot: MarkdownEditorSnapshot(
+                materialID: document.material.id,
+                title: document.material.title,
+                markdown: draftMarkdown,
+                fingerprint: ContentFingerprint.sha256(diskMarkdown),
+                compatibilityBlocks: decoded?.compatibilityBlocks ?? []
+            )
+        ) { [weak self] request in
+            guard let self else {
+                return .failed(reason: "阅读会话已关闭。")
+            }
+            return await self.persistMarkdownEditor(request)
+        }
+    }
+
+    @discardableResult
+    func finishMarkdownEditing() async -> Bool {
+        guard let editorSession else {
+            return true
+        }
+        await editorSession.endEditing()
+        guard editorSession.saveState.status == .saved,
+              editorSession.titleConflict == nil,
+              editorSession.errorMessage == nil else {
+            markdownError = editorSession.errorMessage
+                ?? "当前编辑内容尚未保存。"
+            return false
+        }
+        self.editorSession = nil
+        return true
+    }
+
+    func prepareEditorAction(
+        _ action: MarkdownEditorAction
+    ) async -> Bool {
+        guard let editorSession else {
+            return true
+        }
+        switch await editorSession.prepareForAction(action) {
+        case .allowed:
+            return true
+        case let .blocked(reason):
+            markdownError = reason
+            return false
+        }
+    }
+
+    func resolveMarkdownTitleConflict(
+        usingManifestTitle: Bool
+    ) async {
+        await editorSession?.resolveTitleConflict(
+            usingManifestTitle: usingManifestTitle
+        )
+    }
+
+    func reloadMarkdownFromDisk() async {
+        guard let editorSession else {
+            return
+        }
+        do {
+            document = try await libraryStore.loadDocument(
+                materialID: document.material.id,
+                isICloud: isICloud
+            )
+            let markdown = document.sourceText ?? ""
+            let decoded = try MarkdownEditorCodec().decode(markdown)
+            editorSession.replaceSnapshot(
+                MarkdownEditorSnapshot(
+                    materialID: document.material.id,
+                    title: document.material.title,
+                    markdown: markdown,
+                    fingerprint: ContentFingerprint.sha256(markdown),
+                    compatibilityBlocks: decoded.compatibilityBlocks
+                )
+            )
+            draftMarkdown = markdown
+        } catch {
+            markdownError = error.localizedDescription
+        }
+    }
+
+    func keepLocalMarkdownVersion() async {
+        await editorSession?.overrideConflictAndSave()
+    }
+
+    func saveMarkdown() async -> Bool {
+        guard isMarkdownEditable, !isSavingMarkdown else {
+            return false
+        }
+        isSavingMarkdown = true
+        markdownError = nil
+        defer { isSavingMarkdown = false }
+        do {
+            draftMarkdown = try await libraryStore.saveMarkdown(
+                materialID: document.material.id,
+                text: draftMarkdown,
+                title: document.material.title,
+                createRecoveryVersion: true
+            )
+            document = try await libraryStore.loadDocument(
+                materialID: document.material.id,
+                isICloud: isICloud
+            )
+            try await reload()
+            noticeMessage = "笔记已保存"
+            return true
+        } catch {
+            markdownError = error.localizedDescription
+            return false
+        }
+    }
+
     func startAI(
         action: String,
         context: AIContext,
         prompt: String
     ) async {
+        guard await prepareEditorAction(.aiSummarize) else {
+            return
+        }
         let request = AIRequestDraft(
             action: action,
             context: context,
@@ -347,6 +514,45 @@ final class ReaderSessionModel {
                 }
                 persistConversation()
             }
+        }
+    }
+
+    private func persistMarkdownEditor(
+        _ request: MarkdownEditorSaveRequest
+    ) async -> MarkdownEditorSaveResult {
+        do {
+            let current = try await libraryStore.loadDocument(
+                materialID: request.materialID,
+                isICloud: isICloud
+            )
+            let currentFingerprint = ContentFingerprint.sha256(
+                current.sourceText ?? ""
+            )
+            guard currentFingerprint == request.expectedFingerprint else {
+                return .conflict(currentFingerprint: currentFingerprint)
+            }
+            draftMarkdown = try await libraryStore.saveMarkdown(
+                materialID: request.materialID,
+                text: request.markdown,
+                title: request.title,
+                createRecoveryVersion: request.createRecoveryVersion
+            )
+            document = try await libraryStore.loadDocument(
+                materialID: request.materialID,
+                isICloud: isICloud
+            )
+            try await reload()
+            noticeMessage = request.createRecoveryVersion
+                ? "笔记已保存并保留恢复版本"
+                : "笔记已保存"
+            let markdown = document.sourceText ?? request.markdown
+            return .saved(
+                title: request.title,
+                markdown: markdown,
+                fingerprint: ContentFingerprint.sha256(markdown)
+            )
+        } catch {
+            return .failed(reason: error.localizedDescription)
         }
     }
 

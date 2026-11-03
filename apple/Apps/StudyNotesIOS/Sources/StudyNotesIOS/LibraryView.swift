@@ -4,179 +4,188 @@ import StudyNotesIOSCore
 
 struct LibraryView: View {
     @Bindable var model: IOSAppModel
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    private var isRegularWidth: Bool {
+        horizontalSizeClass == .regular
+    }
 
     var body: some View {
+        Group {
+            if isRegularWidth {
+                regularWorkspace
+            } else {
+                compactWorkspace
+            }
+        }
+        .onAppear(perform: syncLayout)
+        .onChange(of: horizontalSizeClass) {
+            syncLayout()
+        }
+    }
+
+    private var regularWorkspace: some View {
+        HStack(spacing: 0) {
+            NavigationStack {
+                LibraryRootPane(model: model)
+                    .navigationTitle("资料库")
+                    .navigationBarTitleDisplayMode(.inline)
+            }
+            .frame(width: 220)
+
+            Divider()
+
+            NavigationStack {
+                DirectoryPane(model: model)
+            }
+            .frame(minWidth: 280, idealWidth: 330, maxWidth: 370)
+
+            Divider()
+
+            NavigationStack {
+                MaterialDetailPane(model: model)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .background(SNColor.page)
+    }
+
+    private var compactWorkspace: some View {
         NavigationStack {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
-                    syncCard
-
-                    if !model.snapshot.materials.isEmpty {
-                        recentSection
-                    }
-
-                    SectionTitle(
-                        title: "知识库",
-                        detail: "\(model.snapshot.knowledgeBases.count) 个"
-                    )
-
-                    if model.snapshot.knowledgeBases.isEmpty {
-                        emptyLibrary
-                    } else {
-                        ForEach(model.snapshot.knowledgeBases) { knowledgeBase in
-                            NavigationLink {
-                                KnowledgeBaseView(
-                                    model: model,
-                                    knowledgeBase: knowledgeBase
-                                )
+            if model.workspace.materialID != nil {
+                MaterialDetailPane(model: model)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button {
+                                model.navigateBack()
                             } label: {
-                                KnowledgeBaseRow(
-                                    knowledgeBase: knowledgeBase,
-                                    materials: model.snapshot.materials.filter {
-                                        $0.manifest.knowledgeBaseID == knowledgeBase.id
-                                    }
-                                )
+                                Label("返回", systemImage: "chevron.left")
                             }
-                            .buttonStyle(.plain)
                         }
                     }
-
-                    storageCard
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                .padding(.bottom, 32)
-            }
-            .background(SNColor.page)
-            .navigationTitle("资料库")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        Task { await model.reloadAll() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
+            } else if selectedKnowledgeBase != nil {
+                DirectoryPane(model: model)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button {
+                                model.navigateBack()
+                            } label: {
+                                Label("返回", systemImage: "chevron.left")
+                            }
+                        }
                     }
-                    .disabled(model.isLoading)
-                    .accessibilityLabel("刷新资料库")
-                }
-            }
-            .refreshable {
-                await model.reloadAll()
-            }
-            .navigationDestination(item: $model.readerRoute) { route in
-                MaterialDestinationView(
-                    model: model,
-                    materialID: route.id
-                )
+            } else {
+                LibraryRootPane(model: model)
+                    .navigationTitle("资料库")
             }
         }
     }
 
-    private var syncCard: some View {
-        HStack(spacing: 10) {
-            Image(systemName: model.isICloud ? "icloud.fill" : "iphone")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(model.isICloud ? SNColor.green : SNColor.primary)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(model.rootState.label)
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .foregroundStyle(SNColor.ink)
-                Text(
-                    model.isICloud
-                        ? "目录与元数据已同步，正文按需下载"
-                        : "当前使用本地演练目录"
-                )
-                .font(.system(size: 10))
-                .foregroundStyle(SNColor.muted)
-            }
-            Spacer()
-            if !model.isICloud {
-                Button("连接 iCloud") {
-                    Task { await model.retryICloud() }
-                }
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(SNColor.primary)
-            }
+    private var selectedKnowledgeBase: KnowledgeBaseSummary? {
+        guard let id = model.workspace.knowledgeBaseID else {
+            return nil
         }
-        .padding(12)
-        .background(Color.white)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(SNColor.border, lineWidth: 1)
-        }
+        return model.snapshot.knowledgeBases.first { $0.id == id }
     }
 
-    private var recentSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            SectionTitle(title: "最近阅读", detail: "最近更新")
-            ForEach(Array(model.snapshot.materials.prefix(3))) { material in
-                NavigationLink {
-                    MaterialDestinationView(
-                        model: model,
-                        materialID: material.id
+    private func syncLayout() {
+        model.updateWorkspaceLayout(isRegular: isRegularWidth)
+    }
+}
+
+private struct LibraryRootPane: View {
+    @Bindable var model: IOSAppModel
+
+    var body: some View {
+        List {
+            Section {
+                HStack(spacing: 10) {
+                    Image(
+                        systemName: model.isICloud
+                            ? "icloud.fill"
+                            : "iphone"
                     )
-                } label: {
-                    RecentMaterialCard(material: material)
+                    .foregroundStyle(
+                        model.isICloud ? SNColor.green : SNColor.primary
+                    )
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(model.rootState.label)
+                            .font(.system(size: 12, weight: .medium))
+                        Text(
+                            model.isICloud
+                                ? "目录与元数据已同步，正文按需下载"
+                                : "当前使用本地目录"
+                        )
+                        .font(.system(size: 10))
+                        .foregroundStyle(SNColor.muted)
+                    }
                 }
-                .buttonStyle(.plain)
+            }
+
+            Section("我的知识库") {
+                if model.snapshot.knowledgeBases.isEmpty {
+                    ContentUnavailableView(
+                        "还没有知识库",
+                        systemImage: "books.vertical",
+                        description: Text("知识库由 Mac 创建，iOS 可整理其中的文件夹与材料。")
+                    )
+                } else {
+                    ForEach(model.snapshot.knowledgeBases) { knowledgeBase in
+                        Button {
+                            model.selectKnowledgeBase(knowledgeBase.id)
+                        } label: {
+                            KnowledgeBaseRow(
+                                knowledgeBase: knowledgeBase,
+                                materials: model.snapshot.materials.filter {
+                                    $0.manifest.knowledgeBaseID == knowledgeBase.id
+                                },
+                                folders: model.snapshot.folders.filter {
+                                    $0.knowledgeBaseID == knowledgeBase.id
+                                }
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            Section {
+                Button {
+                    model.showingSettings = true
+                } label: {
+                    Label("设置", systemImage: "gearshape")
+                        .foregroundStyle(SNColor.ink)
+                }
+            } footer: {
+                Text("学习目录、AI、发布边界、凭据与阅读偏好。")
             }
         }
-    }
-
-    private var emptyLibrary: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "books.vertical")
-                .font(.system(size: 28, weight: .light))
-                .foregroundStyle(SNColor.muted)
-            Text("还没有知识库")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(SNColor.text)
-            Text("在 Mac 创建知识库后，这里会显示目录元数据。")
-                .font(.system(size: 10.5))
-                .foregroundStyle(SNColor.muted)
+        .listStyle(.insetGrouped)
+        .refreshable {
+            await model.reloadAll()
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 44)
-        .background(Color.white)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(SNColor.border, lineWidth: 1)
-        }
-    }
-
-    private var storageCard: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "internaldrive")
-                .font(.system(size: 15))
-                .foregroundStyle(SNColor.text)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("离线保存")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(SNColor.ink)
-                Text(
-                    "\(model.snapshot.materials.count(where: { $0.accessState == .offline })) 份材料已保存到本机"
-                )
-                .font(.system(size: 10))
-                .foregroundStyle(SNColor.muted)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    Task { await model.reloadAll() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .disabled(model.isLoading)
+                .accessibilityLabel("刷新资料库")
             }
-            Spacer()
         }
-        .padding(12)
-        .background(SNColor.nav)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
 private struct KnowledgeBaseRow: View {
     let knowledgeBase: KnowledgeBaseSummary
     let materials: [LibraryMaterial]
+    let folders: [IOSFolder]
 
     var body: some View {
         HStack(spacing: 11) {
-            Image(systemName: "folder.fill")
-                .font(.system(size: 15, weight: .semibold))
+            Image(systemName: "books.vertical.fill")
                 .foregroundStyle(SNColor.primary)
                 .frame(width: 34, height: 34)
                 .background(SNColor.primarySoft)
@@ -185,71 +194,430 @@ private struct KnowledgeBaseRow: View {
                 Text(knowledgeBase.name)
                     .font(.system(size: 13.5, weight: .semibold))
                     .foregroundStyle(SNColor.ink)
-                    .lineLimit(1)
-                Text("\(materials.count) 份材料 · 正文按需下载")
-                    .font(.system(size: 9.5))
+                Text("\(materials.count) 份材料 · \(folders.count) 个文件夹")
+                    .font(.system(size: 10))
                     .foregroundStyle(SNColor.muted)
-                    .lineLimit(1)
             }
             Spacer()
             Image(systemName: "chevron.right")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(SNColor.muted)
         }
-        .padding(.horizontal, 12)
-        .frame(height: 54)
-        .background(Color.white)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(SNColor.border, lineWidth: 1)
-        }
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
     }
 }
 
-private struct RecentMaterialCard: View {
-    let material: LibraryMaterial
+private struct DirectoryPane: View {
+    @Bindable var model: IOSAppModel
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: kindIcon)
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(SNColor.primary)
-                .frame(width: 62, height: 70)
-                .background(SNColor.primarySoft)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .top) {
-                    Text(material.title)
-                        .font(.system(size: 14.5, weight: .semibold))
-                        .foregroundStyle(SNColor.ink)
-                        .lineLimit(2)
-                    Spacer(minLength: 4)
-                    AccessStatePill(state: material.accessState)
-                }
-                Text("\(material.kind.label) · \(material.knowledgeBaseName)")
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(SNColor.muted)
-                    .lineLimit(1)
-                if !material.tags.isEmpty {
-                    Text(material.tags.map { "#\($0)" }.joined(separator: " "))
-                        .font(.system(size: 9))
-                        .foregroundStyle(SNColor.primary)
-                        .lineLimit(1)
-                }
+        Group {
+            if let knowledgeBase = selectedKnowledgeBase {
+                DirectoryBrowser(
+                    model: model,
+                    knowledgeBase: knowledgeBase,
+                    folderPath: model.workspace.folderPath
+                )
+            } else {
+                ContentUnavailableView(
+                    "选择一个知识库",
+                    systemImage: "books.vertical",
+                    description: Text("文件夹和材料会显示在这里。")
+                )
             }
-        }
-        .padding(12)
-        .frame(minHeight: 94)
-        .background(Color.white)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(SNColor.border, lineWidth: 1)
         }
     }
 
-    private var kindIcon: String {
+    private var selectedKnowledgeBase: KnowledgeBaseSummary? {
+        guard let id = model.workspace.knowledgeBaseID else {
+            return nil
+        }
+        return model.snapshot.knowledgeBases.first { $0.id == id }
+    }
+}
+
+private struct DirectoryBrowser: View {
+    @Bindable var model: IOSAppModel
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    let knowledgeBase: KnowledgeBaseSummary
+    let folderPath: String
+
+    @State private var folderEditor: FolderEditorRequest?
+    @State private var moveDialog: MoveDialogRequest?
+    @State private var folderToDelete: FolderNode?
+    @State private var showingDeleteConfirmation = false
+
+    private var title: String {
+        if folderPath.isEmpty {
+            return knowledgeBase.name
+        }
+        return model.folder(
+            at: folderPath,
+            in: knowledgeBase
+        )?.name ?? knowledgeBase.name
+    }
+
+    private var childFolders: [FolderNode] {
+        model.childFolders(
+            in: knowledgeBase,
+            folderPath: folderPath
+        )
+    }
+
+    private var materials: [LibraryMaterial] {
+        model.materials(
+            in: knowledgeBase,
+            folderPath: folderPath
+        )
+    }
+
+    var body: some View {
+        List {
+            Section {
+                breadcrumb
+            }
+
+            if !childFolders.isEmpty {
+                Section("文件夹") {
+                    ForEach(childFolders) { folder in
+                        folderRow(folder)
+                    }
+                }
+            }
+
+            Section("材料") {
+                if materials.isEmpty, childFolders.isEmpty {
+                    ContentUnavailableView(
+                        "文件夹为空",
+                        systemImage: "folder",
+                        description: Text("使用右上角菜单新建文件夹或 Markdown 笔记。")
+                    )
+                } else if materials.isEmpty {
+                    Text("当前文件夹没有直接材料。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(SNColor.muted)
+                } else {
+                    ForEach(materials) { material in
+                        materialRow(material)
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button("新建文件夹", systemImage: "folder.badge.plus") {
+                        folderEditor = FolderEditorRequest(
+                            mode: .create(parentPath: folderPath)
+                        )
+                    }
+                    Button(
+                        "新建 Markdown 笔记",
+                        systemImage: "square.and.pencil"
+                    ) {
+                        Task {
+                            await model.createMarkdownNote(
+                                in: knowledgeBase.id,
+                                folderPath: folderPath
+                            )
+                        }
+                    }
+                    if let folder = model.folder(
+                        at: folderPath,
+                        in: knowledgeBase
+                    ) {
+                        Divider()
+                        Button("重命名文件夹", systemImage: "pencil") {
+                            folderEditor = FolderEditorRequest(
+                                mode: .rename(folder)
+                            )
+                        }
+                        Button("移动到…", systemImage: "folder.badge.gearshape") {
+                            presentFolderMove(folder)
+                        }
+                        Button(
+                            "删除文件夹",
+                            systemImage: "trash",
+                            role: .destructive
+                        ) {
+                            requestDelete(folder)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .accessibilityLabel("整理菜单")
+            }
+        }
+        .sheet(item: $folderEditor) { request in
+            FolderNameSheet(
+                model: model,
+                knowledgeBase: knowledgeBase,
+                request: request
+            )
+        }
+        .sheet(item: $moveDialog) { dialog in
+            MoveDestinationSheet(
+                title: dialog.title,
+                destinations: dialog.destinations,
+                onMove: dialog.onMove
+            )
+        }
+        .alert(
+            "删除文件夹？",
+            isPresented: $showingDeleteConfirmation,
+            presenting: folderToDelete
+        ) { folder in
+            Button("取消", role: .cancel) {}
+            Button("删除", role: .destructive) {
+                Task {
+                    await model.deleteFolder(
+                        folder,
+                        knowledgeBaseID: knowledgeBase.id
+                    )
+                }
+            }
+        } message: { folder in
+            Text("“\(folder.name)”及其子文件夹会被删除，包含的材料会移入回收站。")
+        }
+    }
+
+    @ViewBuilder
+    private var breadcrumb: some View {
+        let content = HStack(spacing: 6) {
+            Button(knowledgeBase.name) {
+                model.selectFolder("")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(SNColor.primary)
+            if !folderPath.isEmpty {
+                Text("/")
+                    .foregroundStyle(SNColor.muted)
+                Text(folderPath)
+                    .font(.system(size: 11))
+                    .foregroundStyle(SNColor.muted)
+                    .lineLimit(1)
+            }
+            Spacer()
+        }
+        .font(.system(size: 11, weight: .medium))
+
+        if horizontalSizeClass == .regular {
+            content.dropDestination(for: String.self) { items, _ in
+                drop(items, into: "")
+            }
+        } else {
+            content
+        }
+    }
+
+    private func drop(_ items: [String], into path: String) -> Bool {
+        guard let token = items.first else {
+            return false
+        }
+        let accepted = model.canDrop(
+            token,
+            into: path,
+            knowledgeBaseID: knowledgeBase.id
+        )
+        if accepted {
+            Task {
+                _ = await model.handleDrop(
+                    token,
+                    into: path,
+                    knowledgeBaseID: knowledgeBase.id
+                )
+            }
+        }
+        return accepted
+    }
+
+    @ViewBuilder
+    private func folderRow(_ folder: FolderNode) -> some View {
+        if horizontalSizeClass == .regular {
+            folderRowContent(folder)
+                .draggable(folderDragToken(folder))
+                .dropDestination(for: String.self) { items, _ in
+                    drop(items, into: folder.path)
+                }
+                .contextMenu {
+                    folderMenu(folder)
+                }
+        } else {
+            folderRowContent(folder)
+                .contextMenu {
+                    folderMenu(folder)
+                }
+        }
+    }
+
+    private func folderRowContent(_ folder: FolderNode) -> some View {
+        Button {
+            model.selectFolder(folder.path)
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "folder")
+                    .foregroundStyle(SNColor.primary)
+                Text(folder.name)
+                    .foregroundStyle(SNColor.ink)
+                Spacer()
+                Text("\(folder.materialCount)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(SNColor.muted)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(SNColor.muted)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func folderMenu(_ folder: FolderNode) -> some View {
+        Button("新建子文件夹", systemImage: "folder.badge.plus") {
+            folderEditor = FolderEditorRequest(
+                mode: .create(parentPath: folder.path)
+            )
+        }
+        Button("重命名", systemImage: "pencil") {
+            folderEditor = FolderEditorRequest(mode: .rename(folder))
+        }
+        Button("移动到…", systemImage: "folder.badge.gearshape") {
+            presentFolderMove(folder)
+        }
+        Button("新建 Markdown 笔记", systemImage: "square.and.pencil") {
+            Task {
+                await model.createMarkdownNote(
+                    in: knowledgeBase.id,
+                    folderPath: folder.path
+                )
+            }
+        }
+        Divider()
+        Button("删除文件夹", systemImage: "trash", role: .destructive) {
+            requestDelete(folder)
+        }
+    }
+
+    @ViewBuilder
+    private func materialRow(_ material: LibraryMaterial) -> some View {
+        if horizontalSizeClass == .regular {
+            materialRowContent(material)
+                .draggable("material:\(material.id.uuidString)")
+                .contextMenu {
+                    materialMenu(material)
+                }
+        } else {
+            materialRowContent(material)
+                .contextMenu {
+                    materialMenu(material)
+                }
+        }
+    }
+
+    private func materialRowContent(_ material: LibraryMaterial) -> some View {
+        Button {
+            model.selectMaterial(material.id)
+        } label: {
+            MaterialListRow(material: material)
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func materialMenu(_ material: LibraryMaterial) -> some View {
+        Button("打开", systemImage: "book") {
+            model.selectMaterial(material.id)
+        }
+        Button("移动到…", systemImage: "folder.badge.gearshape") {
+            presentMaterialMove(material)
+        }
+        Divider()
+        Button(
+            "移入回收站",
+            systemImage: "trash",
+            role: .destructive
+        ) {
+            Task {
+                await model.moveMaterialToRecycleBin(material.id)
+            }
+        }
+    }
+
+    private func folderDragToken(_ folder: FolderNode) -> String {
+        "folder:\(knowledgeBase.id.uuidString):\(folder.path)"
+    }
+
+    private func presentFolderMove(_ folder: FolderNode) {
+        let destinations = model.moveDestinations(
+            for: knowledgeBase.id
+        ).filter {
+            IOSWorkspaceState.isValidFolderMove(
+                sourcePath: folder.path,
+                targetParentPath: $0.folderPath
+            )
+        }
+        moveDialog = MoveDialogRequest(
+            title: "移动“\(folder.name)”",
+            destinations: destinations
+        ) { destination in
+            try await model.moveFolderByForm(
+                folder,
+                knowledgeBaseID: knowledgeBase.id,
+                toParentPath: destination.folderPath
+            )
+        }
+    }
+
+    private func presentMaterialMove(_ material: LibraryMaterial) {
+        moveDialog = MoveDialogRequest(
+            title: "移动“\(material.title)”",
+            destinations: model.materialMoveDestinations()
+        ) { destination in
+            try await model.moveMaterial(
+                material.id,
+                toKnowledgeBaseID: destination.knowledgeBaseID,
+                folderPath: destination.folderPath
+            )
+        }
+    }
+
+    private func requestDelete(_ folder: FolderNode) {
+        folderToDelete = folder
+        showingDeleteConfirmation = true
+    }
+}
+
+private struct MaterialListRow: View {
+    let material: LibraryMaterial
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: materialIcon)
+                .foregroundStyle(SNColor.primary)
+                .frame(width: 26)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(material.title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(SNColor.ink)
+                    .lineLimit(2)
+                Text(material.kind.label)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(SNColor.muted)
+            }
+            Spacer()
+            AccessStatePill(state: material.accessState)
+        }
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+    }
+
+    private var materialIcon: String {
         switch material.kind {
         case .image:
             "photo"
@@ -258,7 +626,224 @@ private struct RecentMaterialCard: View {
         case .note:
             "note.text"
         default:
-            "book.closed"
+            "doc.text"
+        }
+    }
+}
+
+private struct MaterialDetailPane: View {
+    @Bindable var model: IOSAppModel
+
+    var body: some View {
+        if let materialID = model.workspace.materialID {
+            MaterialDestinationView(
+                model: model,
+                materialID: materialID
+            )
+            .id(materialID)
+        } else {
+            ContentUnavailableView(
+                "选择学习材料",
+                systemImage: "book.closed",
+                description: Text("阅读与编辑会显示在这里，不打开重复页面。")
+            )
+            .navigationTitle("阅读")
+        }
+    }
+}
+
+private struct FolderEditorRequest: Identifiable {
+    enum Mode {
+        case create(parentPath: String)
+        case rename(FolderNode)
+    }
+
+    let id = UUID()
+    let mode: Mode
+}
+
+private struct FolderNameSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Bindable var model: IOSAppModel
+    let knowledgeBase: KnowledgeBaseSummary
+    let request: FolderEditorRequest
+
+    @State private var name = ""
+    @State private var errorMessage: String?
+    @State private var isSaving = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("文件夹名称") {
+                    TextField("名称", text: $name)
+                        .textInputAutocapitalization(.never)
+                    if let errorMessage {
+                        Text(errorMessage)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(isSaving ? "保存中" : "保存") {
+                        save()
+                    }
+                    .disabled(
+                        isSaving
+                            || name.trimmingCharacters(
+                                in: .whitespacesAndNewlines
+                            ).isEmpty
+                    )
+                }
+            }
+            .onAppear(perform: configure)
+        }
+    }
+
+    private var title: String {
+        switch request.mode {
+        case .create:
+            "新建文件夹"
+        case .rename:
+            "重命名文件夹"
+        }
+    }
+
+    private func configure() {
+        guard name.isEmpty else {
+            return
+        }
+        if case let .rename(folder) = request.mode {
+            name = folder.name
+        }
+    }
+
+    private func save() {
+        isSaving = true
+        errorMessage = nil
+        Task {
+            do {
+                switch request.mode {
+                case let .create(parentPath):
+                    _ = try await model.createFolder(
+                        named: name,
+                        in: knowledgeBase.id,
+                        parentPath: parentPath
+                    )
+                case let .rename(folder):
+                    _ = try await model.renameFolder(
+                        folder,
+                        knowledgeBaseID: knowledgeBase.id,
+                        to: name
+                    )
+                }
+                dismiss()
+            } catch {
+                errorMessage = error.localizedDescription
+                isSaving = false
+            }
+        }
+    }
+}
+
+private struct MoveDialogRequest: Identifiable {
+    let id = UUID()
+    let title: String
+    let destinations: [WorkspaceMoveDestination]
+    let onMove: (WorkspaceMoveDestination) async throws -> Void
+}
+
+private struct MoveDestinationSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let title: String
+    let destinations: [WorkspaceMoveDestination]
+    let onMove: (WorkspaceMoveDestination) async throws -> Void
+
+    @State private var selectedID: String?
+    @State private var errorMessage: String?
+    @State private var isMoving = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    if destinations.isEmpty {
+                        Text("没有可用的目标位置。")
+                            .foregroundStyle(SNColor.muted)
+                    } else {
+                        ForEach(destinations) { destination in
+                            Button {
+                                selectedID = destination.id
+                            } label: {
+                                HStack {
+                                    Image(systemName: "folder")
+                                        .foregroundStyle(SNColor.primary)
+                                    Text(destination.title)
+                                        .foregroundStyle(SNColor.ink)
+                                    Spacer()
+                                    if selectedID == destination.id {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundStyle(SNColor.primary)
+                                    }
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                } footer: {
+                    if let errorMessage {
+                        Text(errorMessage)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(isMoving ? "移动中" : "移动") {
+                        move()
+                    }
+                    .disabled(isMoving || selectedDestination == nil)
+                }
+            }
+            .onAppear {
+                if selectedID == nil {
+                    selectedID = destinations.first?.id
+                }
+            }
+        }
+    }
+
+    private var selectedDestination: WorkspaceMoveDestination? {
+        destinations.first { $0.id == selectedID }
+    }
+
+    private func move() {
+        guard let selectedDestination else {
+            return
+        }
+        isMoving = true
+        errorMessage = nil
+        Task {
+            do {
+                try await onMove(selectedDestination)
+                dismiss()
+            } catch {
+                errorMessage = error.localizedDescription
+                isMoving = false
+            }
         }
     }
 }
@@ -273,7 +858,8 @@ struct MaterialDestinationView: View {
     var body: some View {
         Group {
             if let material = model.material(id: materialID),
-               material.accessState == .downloaded || material.accessState == .offline {
+               material.accessState == .downloaded
+                || material.accessState == .offline {
                 ReaderView(model: model, materialID: materialID)
             } else if isPreparing {
                 VStack(spacing: 12) {
@@ -305,18 +891,20 @@ struct MaterialDestinationView: View {
             } else {
                 ProgressView()
                     .task {
-                        await prepare()
+                        guard !didStart else {
+                            return
+                        }
+                        didStart = true
+                        if let material = model.material(id: materialID),
+                           material.accessState == .metadataOnly {
+                            await prepare()
+                        }
                     }
             }
         }
-        .task {
-            guard !didStart else {
-                return
-            }
-            didStart = true
-            if let material = model.material(id: materialID),
-               material.accessState == .metadataOnly {
-                await prepare()
+        .onAppear {
+            if model.workspace.materialID != materialID {
+                model.selectMaterial(materialID)
             }
         }
     }
@@ -330,7 +918,8 @@ struct MaterialDestinationView: View {
         await model.download(materialID: materialID)
         isPreparing = false
         if let material = model.material(id: materialID),
-           material.accessState == .metadataOnly || model.errorMessage != nil {
+           material.accessState == .metadataOnly
+            || model.errorMessage != nil {
             loadError = model.errorMessage ?? "正文下载失败。"
             model.errorMessage = nil
         }
@@ -378,164 +967,6 @@ struct AccessStatePill: View {
                 systemImage: "exclamationmark.circle"
             )
         }
-    }
-}
-
-struct KnowledgeBaseView: View {
-    @Bindable var model: IOSAppModel
-    let knowledgeBase: KnowledgeBaseSummary
-
-    private var materials: [LibraryMaterial] {
-        model.snapshot.materials.filter {
-            $0.manifest.knowledgeBaseID == knowledgeBase.id
-        }
-    }
-
-    private var folders: [FolderNode] {
-        LibraryTreeBuilder.folders(
-            for: knowledgeBase.id,
-            in: model.snapshot.materials
-        )
-    }
-
-    private var rootMaterials: [LibraryMaterial] {
-        materials.filter { $0.folderPath.isEmpty }
-    }
-
-    var body: some View {
-        List {
-            if !folders.isEmpty {
-                Section("文件夹") {
-                    ForEach(folders) { folder in
-                        NavigationLink {
-                            FolderView(
-                                model: model,
-                                knowledgeBase: knowledgeBase,
-                                folder: folder
-                            )
-                        } label: {
-                            Label {
-                                HStack {
-                                    Text(folder.name)
-                                    Spacer()
-                                    Text("\(folder.materialCount)")
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(SNColor.muted)
-                                }
-                            } icon: {
-                                Image(systemName: "folder")
-                                    .foregroundStyle(SNColor.primary)
-                            }
-                        }
-                    }
-                }
-            }
-
-            Section("材料") {
-                if rootMaterials.isEmpty && folders.isEmpty {
-                    ContentUnavailableView(
-                        "没有学习材料",
-                        systemImage: "books.vertical",
-                        description: Text("此知识库的目录元数据为空。")
-                    )
-                } else {
-                    ForEach(rootMaterials) { material in
-                        NavigationLink {
-                            MaterialDestinationView(
-                                model: model,
-                                materialID: material.id
-                            )
-                        } label: {
-                            MaterialListRow(material: material)
-                        }
-                    }
-                }
-            }
-        }
-        .listStyle(.insetGrouped)
-        .navigationTitle(knowledgeBase.name)
-        .navigationBarTitleDisplayMode(.large)
-    }
-}
-
-private struct FolderView: View {
-    @Bindable var model: IOSAppModel
-    let knowledgeBase: KnowledgeBaseSummary
-    let folder: FolderNode
-
-    private var materials: [LibraryMaterial] {
-        model.snapshot.materials.filter {
-            $0.manifest.knowledgeBaseID == knowledgeBase.id
-                && $0.folderPath == folder.path
-        }
-    }
-
-    var body: some View {
-        List {
-            if !folder.children.isEmpty {
-                Section("子文件夹") {
-                    ForEach(folder.children) { child in
-                        NavigationLink {
-                            FolderView(
-                                model: model,
-                                knowledgeBase: knowledgeBase,
-                                folder: child
-                            )
-                        } label: {
-                            Label {
-                                HStack {
-                                    Text(child.name)
-                                    Spacer()
-                                    Text("\(child.materialCount)")
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(SNColor.muted)
-                                }
-                            } icon: {
-                                Image(systemName: "folder")
-                                    .foregroundStyle(SNColor.primary)
-                            }
-                        }
-                    }
-                }
-            }
-            Section("材料") {
-                ForEach(materials) { material in
-                    NavigationLink {
-                        MaterialDestinationView(
-                            model: model,
-                            materialID: material.id
-                        )
-                    } label: {
-                        MaterialListRow(material: material)
-                    }
-                }
-            }
-        }
-        .navigationTitle(folder.name)
-    }
-}
-
-private struct MaterialListRow: View {
-    let material: LibraryMaterial
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: material.kind == .image ? "photo" : "doc.text")
-                .foregroundStyle(SNColor.primary)
-                .frame(width: 28)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(material.title)
-                    .font(.system(size: 13, weight: .medium))
-                    .lineLimit(2)
-                Text("\(material.kind.label) · \(material.tags.map { "#\($0)" }.joined(separator: " "))")
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(SNColor.muted)
-                    .lineLimit(1)
-            }
-            Spacer()
-            AccessStatePill(state: material.accessState)
-        }
-        .padding(.vertical, 3)
     }
 }
 #endif

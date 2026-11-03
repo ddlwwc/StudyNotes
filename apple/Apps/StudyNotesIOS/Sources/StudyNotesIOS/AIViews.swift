@@ -305,7 +305,7 @@ struct AISheet: View {
             .foregroundStyle(SNColor.muted)
         }
         .padding(14)
-        .background(Color.white)
+        .background(SNColor.surface)
     }
 
     private var conversationBody: some View {
@@ -339,7 +339,7 @@ struct AISheet: View {
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(10)
-                                .background(Color.white)
+                                .background(SNColor.surface)
                                 .clipShape(RoundedRectangle(cornerRadius: 8))
                                 .overlay {
                                     RoundedRectangle(cornerRadius: 8)
@@ -450,7 +450,7 @@ struct AISheet: View {
             }
         }
         .padding(12)
-        .background(Color.white)
+        .background(SNColor.surface)
     }
 
     private var requestContext: AIContext {

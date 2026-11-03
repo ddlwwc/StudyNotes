@@ -2,8 +2,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | 已确认技术基线 |
-| 日期 | 2026-11-02 |
+| 状态 | 已确认技术基线，工作区与编辑器设计已更新 |
+| 日期 | 2026-11-03 |
 | 范围 | Mac、iOS、Web 发布站与发布 API |
 
 相关文档：
@@ -19,10 +19,11 @@ StudyNotes 是按个人单实例、本地优先和低运维成本设计的跨端
 关键约束：
 
 - Mac 与 iOS 使用原生 Swift 客户端，共享领域与服务代码，不共享页面实现。
-- 用户数据以 iCloud Drive 文件为真相，SQLite 只是设备本地可重建索引。
+- 正文与组织元数据以 iCloud Drive 文件为真相，SQLite 只是设备本地可重建索引；Markdown 笔记的大媒体以稳定对象引用指向私有七牛云。
 - Web 发布站与本地资料库生命周期独立，Mac 是唯一发布客户端。
 - Web 使用 Next.js 全栈 TypeScript、MySQL 和七牛云，不建设读者账号。
 - AI 请求由 Apple 客户端直连用户配置的 OpenAI 兼容供应商。
+- 笔记媒体接口使用共享 Bearer 密钥，发布与文章管理接口继续使用 Ed25519 签名。
 - Web 应用由现有同机反向代理转发到 `127.0.0.1:8090`，仓库不管理反向代理。
 - MySQL 不设独立备份；本地只保存发布映射，不保存可恢复数据库的发布账本。
 
@@ -34,6 +35,7 @@ StudyNotes 是按个人单实例、本地优先和低运维成本设计的跨端
 | Mac / iOS UI | SwiftUI，局部嵌入 AppKit / UIKit |
 | PDF | PDFKit |
 | Markdown / HTML 阅读 | 共享 Swift 内容模块 + WKWebView |
+| Markdown 富文本编辑 | 构建期打包、运行于本地 WKWebView 的共享编辑器内核 |
 | Apple 依赖管理 | Swift Package Manager |
 | Apple 本地索引 | GRDB、SQLite、FTS5 |
 | Web | Next.js App Router、React、TypeScript |
@@ -85,6 +87,7 @@ StudyNotes/
 - `Domain`：学习材料、标注、发布映射等领域模型和纯规则。
 - `Persistence`：iCloud 文件协调、材料包读写、GRDB 索引和冲突处理。
 - `Reader`：Markdown/HTML 渲染、WKWebView 桥接、PDFKit 适配和标注覆盖层。
+- `Editor`：共享富文本 WebKit 容器、原生桥接、Markdown 往返和安全保存。
 - `Services`：AI、网页抓取、发布、导出和周期提醒。
 - `UI`：跨端共享的 SwiftUI 组件、样式与展示模型。
 
@@ -101,6 +104,7 @@ StudyNotes/
             └── <material-id>.studyitem/
                 ├── manifest.json
                 ├── source/
+                │   └── media/           # 旧版本地媒体；新笔记媒体使用稳定云端引用
                 ├── content/
                 ├── annotations/
                 │   └── <annotation-id>.json
@@ -119,6 +123,8 @@ StudyNotes/
 - 标注和 AI 会话按对象拆分文件，降低并发编辑时的文件冲突范围。
 - `revisions/` 保存产品要求的最近 10 个文字版本。
 - `rendered.html`、缩略图、全文索引和预览全部只存在设备本地缓存。
+- Markdown 笔记的新图片和附件以 `media://qiniu/<objectKey>` 引用私有七牛云，不复制进材料包。
+- 待上传媒体队列和已查看媒体缓存放在 Application Support，不进入 iCloud。
 
 ### 4.3 文件与索引一致性
 
@@ -140,6 +146,15 @@ iOS 默认只取得目录和 `manifest.json`，正文通过 iCloud 按需下载�
 - Reader Runtime 不修改正文 DOM，不直接访问 iCloud 或数据库；持久化始终由 Swift 或 Web 应用层负责。
 - PDF 原文永不修改，标注保存在材料包中，由 PDFKit 与自定义覆盖层渲染。
 - 内容变化导致锚点失败时，标注保留为“位置待恢复标注”。
+
+### 4.5 Markdown 编辑
+
+- Markdown 笔记和 Markdown 文档可在阅读区切换为所见即所得编辑。
+- 平台无关的 JavaScript 编辑器核心在构建期打包，运行时只加载本地资源。
+- 编辑器内部文档树不持久化；Swift 层接收序列化后的 Markdown，并继续以原子替换写入材料包。
+- 编辑器支持高级 Markdown 源文本模式。未知语法以兼容块保留，无法无损序列化时拒绝保存。
+- 自动保存由 Swift 层统一调度，负责指纹检查、文件协调、版本生成、搜索重建和标注重解析。
+- AI、发布、导出和版本操作前必须等待当前编辑会话完成保存。
 
 ## 5. AI 客户端
 
@@ -178,6 +193,8 @@ app/
 | `article_versions` | 不可变发布正文、`source_version_id`、内容指纹和版本元数据 |
 | `publish_requests` | 发布密钥 ID、客户端请求 ID、首次处理结果和幂等状态 |
 | `media_assets` | 七牛云对象键、内容哈希、媒体类型、大小和引用关系 |
+| `library_media_assets` | Markdown 笔记媒体的对象键、内容哈希、类型、大小、状态和校验时间 |
+| `library_media_cleanup_jobs` | 笔记媒体的引用扫描、延迟清理和失败重试 |
 | `article_search` | 仅包含公共文章当前版本的标题、正文、标签和公开研读层全文索引 |
 
 MySQL 是 Web 发布内容的唯一权威状态。iCloud 中的 `manifest.json` 只保存 `articleId`、公开 URL、最后发布版本、可见性和内容指纹等映射，不保存发布版本正文或完整版本链。
@@ -197,6 +214,8 @@ SHA256(REQUEST_BODY)
 请求包含密钥 ID、时间戳、随机数和签名。服务端只保存公钥，拒绝过期时间戳、重复随机数和错误签名。API Key、七牛云永久密钥和数据库凭据不得进入 Apple 客户端。
 
 当前部署允许公网 HTTP 链路，因此 Ed25519 只用于防止长期写凭据泄露与请求伪造，不能保护正文传输。公开和未列出文章均视为非机密内容。
+
+笔记媒体接口不沿用 Ed25519：Mac 与 iOS 共用一段设置页配置、钥匙串保存的 Bearer 密钥，服务端保存其哈希。第一版不区分设备和作用域，轮换密钥会使全部设备失效。允许 HTTP 意味着该密钥可能在链路上被截获，客户端只提示风险，不阻止配置。
 
 ### 6.4 URL 与可见性
 
@@ -224,6 +243,17 @@ SHA256(REQUEST_BODY)
 
 ### 6.7 媒体
 
+笔记媒体：
+
+1. Apple 客户端使用共享 Bearer 密钥取得短时、限对象上传凭据。
+2. 客户端把待上传文件放入 Application Support 队列并显示本地预览。
+3. 上传成功后，服务端验证对象存在性、大小、类型和内容哈希，并登记为可用。
+4. Markdown 只保存 `media://qiniu/<objectKey>`；渲染时按对象键换取短时下载 URL。
+5. 签名 URL、待上传队列和已查看媒体缓存不进入 iCloud。
+6. 清理任务先扫描当前正文和历史版本引用，确认无引用后删除七牛对象。
+
+发布媒体：
+
 1. Mac 通过签名请求获取短时、限用途七牛云上传凭据。
 2. Mac 将媒体直接上传到七牛云私有 Bucket。
 3. 发布提交只携带对象键、内容哈希和引用关系。
@@ -232,9 +262,24 @@ SHA256(REQUEST_BODY)
 
 七牛云永久密钥只保存在 Web 服务端。
 
+笔记媒体和发布媒体使用不同对象前缀、数据表和清理生命周期。发布时由服务端登记或复制笔记对象到发布媒体命名空间，避免删除笔记破坏已发布版本。
+
+### 6.8 笔记媒体接口
+
+OpenAPI 需要新增以下能力：
+
+- 申请笔记媒体上传凭据。
+- 校验并完成笔记媒体上传。
+- 按对象键换取短时读取 URL。
+- 扫描笔记媒体引用。
+- 清理用户确认的无引用笔记媒体。
+- 查询笔记媒体服务与存储配置状态。
+
+笔记媒体接口使用共享 Bearer 密钥；发布与文章管理接口继续使用发布密钥的 Ed25519 签名、时间戳、随机数和请求体摘要验证。
+
 ## 7. 跨端契约
 
-- `contracts/openapi.yaml` 是 Mac → Web 发布 API 的唯一 HTTP 契约。
+- `contracts/openapi.yaml` 是 Apple 客户端 → StudyNotes Web 服务与发布 API 的唯一 HTTP 契约。
 - `contracts/studyitem.schema.json` 是 `manifest.json` 的唯一结构定义。
 - `contracts/reader-runtime/` 是 Apple 与 Web 共用的标注几何和文本锚定实现。
 - Swift 请求模型由 OpenAPI 生成或校验，不手写第二套路径和字段语义。
@@ -244,7 +289,7 @@ SHA256(REQUEST_BODY)
 ## 8. 部署与运维
 
 ```text
-Browser / Mac
+Browser / Mac / iOS
       |
 Existing Nginx
       |
@@ -270,8 +315,10 @@ Next.js Standalone ─── MySQL
 | --- | --- |
 | Swift Domain / Persistence | Swift Testing；使用临时目录模拟 iCloud 文件协调与冲突副本 |
 | Apple Reader | Swift Testing + 代表性 HTML/PDF 固定样本，验证锚点恢复与缩放 |
-| Apple UI | XCTest / XCUITest 覆盖导入、阅读、标注、AI 和发布主流程 |
+| Apple Editor | 固定 Markdown 样本库验证往返、未知语法、中文输入、撤销和保存冲突 |
+| Apple UI | XCTest / XCUITest 覆盖栏宽、文件夹拖放、编辑、媒体、导入、阅读、标注、AI 和发布主流程 |
 | Web Domain / API | Vitest；签名、幂等、版本冲突、可见性和搜索事务 |
+| Web 媒体 | 使用内存存储和模拟七牛适配器验证 Bearer 鉴权、登记、校验、读取、去重与延迟清理 |
 | Web 数据库 | GitHub Actions MySQL 服务，执行 migration 和集成测试 |
 | Web 页面 | Playwright；公开页、未列出页、搜索、导出与响应式布局 |
 | 跨端契约 | OpenAPI / JSON Schema 校验，以及 Reader Runtime 固定锚点用例 |

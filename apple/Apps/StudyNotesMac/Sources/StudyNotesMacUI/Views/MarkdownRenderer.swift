@@ -1,8 +1,10 @@
+import StudyNotesKit
 import SwiftUI
 
 struct MarkdownRenderer: View {
     let markdown: String
     var blockSpacing: CGFloat = 18
+    var preferences = ReadingPreferences()
 
     private var blocks: [MarkdownBlock] {
         MarkdownBlock.parse(markdown)
@@ -29,14 +31,14 @@ struct MarkdownRenderer: View {
                 .padding(.top, level <= 2 ? 8 : 2)
         case let .paragraph(text):
             inlineText(text)
-                .font(.snReading(16))
-                .lineSpacing(8)
+                .font(.snReading(preferences.fontSize))
+                .lineSpacing(readingLineSpacing)
                 .foregroundStyle(SNColor.text)
                 .fixedSize(horizontal: false, vertical: true)
         case let .quote(text):
             inlineText(text)
-                .font(.snReading(15))
-                .lineSpacing(6)
+                .font(.snReading(max(12, preferences.fontSize - 1)))
+                .lineSpacing(readingLineSpacing)
                 .foregroundStyle(SNColor.text)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.leading, 15)
@@ -54,27 +56,32 @@ struct MarkdownRenderer: View {
                     .fill(SNColor.blue)
                     .frame(width: 5, height: 5)
                 inlineText(text)
-                    .font(.sn(14))
-                    .lineSpacing(5)
+                    .font(.sn(max(12, preferences.fontSize - 2)))
+                    .lineSpacing(readingLineSpacing)
                     .foregroundStyle(SNColor.text)
                     .fixedSize(horizontal: false, vertical: true)
             }
         case let .numbered(number, text):
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text("\(number).")
-                    .font(.sn(14, weight: .medium))
+                    .font(.sn(max(12, preferences.fontSize - 2), weight: .medium))
                     .foregroundStyle(SNColor.blue)
                     .frame(width: 20, alignment: .trailing)
                 inlineText(text)
-                    .font(.sn(14))
-                    .lineSpacing(5)
+                    .font(.sn(max(12, preferences.fontSize - 2)))
+                    .lineSpacing(readingLineSpacing)
                     .foregroundStyle(SNColor.text)
                     .fixedSize(horizontal: false, vertical: true)
             }
         case let .code(text):
             ScrollView(.horizontal) {
                 Text(text)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(
+                        .custom(
+                            preferences.codeFont,
+                            size: max(11, preferences.fontSize - 4)
+                        )
+                    )
                     .foregroundStyle(SNColor.ink)
                     .padding(14)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -106,16 +113,24 @@ struct MarkdownRenderer: View {
     }
 
     private func headingSize(_ level: Int) -> CGFloat {
+        let base = preferences.fontSize
         switch level {
         case 1:
-            26
+            return base + 10
         case 2:
-            21
+            return base + 5
         case 3:
-            18
+            return base + 2
         default:
-            16
+            return base
         }
+    }
+
+    private var readingLineSpacing: CGFloat {
+        max(
+            3,
+            preferences.fontSize * (preferences.lineHeight - 1)
+        )
     }
 }
 

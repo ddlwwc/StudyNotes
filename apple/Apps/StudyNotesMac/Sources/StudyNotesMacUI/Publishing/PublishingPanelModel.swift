@@ -10,11 +10,13 @@ final class PublishingPanelModel {
 
     var serverURLText: String {
         didSet {
-            PublishingServerSettings.save(serverURLText)
+            try? settingsStore.update {
+                $0.publishingServerURL = serverURLText
+            }
         }
     }
     var registrationSecret = ""
-    var visibility: PublishVisibility = .publicArticle
+    var visibility: PublishVisibility
     var rollbackTargetText = ""
 
     private(set) var credential: PublishingCredential?
@@ -25,6 +27,7 @@ final class PublishingPanelModel {
     private(set) var hasError = false
 
     @ObservationIgnored private let keyService: PublishingKeyService
+    @ObservationIgnored private let settingsStore: AppSettingsStore
     @ObservationIgnored private var preview: PublishPreview?
     @ObservationIgnored private var tags: [String] = []
     @ObservationIgnored private var saveMapping: MappingSaver?
@@ -38,9 +41,13 @@ final class PublishingPanelModel {
 
     init(
         credentialStore: any PublishingCredentialStoring =
-            KeychainPublishingCredentialStore()
+            KeychainPublishingCredentialStore(),
+        settingsStore: AppSettingsStore = AppSettingsStore()
     ) {
-        self.serverURLText = PublishingServerSettings.load()
+        let settings = settingsStore.load()
+        self.settingsStore = settingsStore
+        self.serverURLText = settings.publishingServerURL
+        self.visibility = settings.defaultPublishVisibility
         self.keyService = PublishingKeyService(store: credentialStore)
         do {
             credential = try keyService.current()
@@ -151,6 +158,20 @@ final class PublishingPanelModel {
                 statusMessage = "新密钥已生成，但公钥登记失败；可再次点击“登记现有公钥”。\(error.localizedDescription)"
                 hasError = true
             }
+        }
+    }
+
+    func revokeKey() async {
+        await run {
+            guard let credential else {
+                return
+            }
+            let client = try makeClient()
+            try await client.revokeKey(credential: credential)
+            try keyService.store.delete()
+            self.credential = nil
+            statusMessage = "发布公钥已撤销，本机私钥已删除。"
+            hasError = false
         }
     }
 
@@ -501,18 +522,5 @@ private extension PublishVisibility {
         case .unlisted:
             .unlisted
         }
-    }
-}
-
-private enum PublishingServerSettings {
-    private static let key = "StudyNotes.Publishing.ServerURL"
-
-    static func load() -> String {
-        UserDefaults.standard.string(forKey: key)
-            ?? "http://127.0.0.1:8090"
-    }
-
-    static func save(_ value: String) {
-        UserDefaults.standard.set(value, forKey: key)
     }
 }
