@@ -17,6 +17,8 @@ public enum SNColor {
     public static let greenSoft = Color(red: 0.910, green: 1.0, blue: 0.918)
     public static let red = Color(red: 0.961, green: 0.247, blue: 0.247)
     public static let redSoft = Color(red: 1.0, green: 0.933, blue: 0.933)
+    public static let orange = Color(red: 0.902, green: 0.494, blue: 0.133)
+    public static let orangeSoft = Color(red: 1.0, green: 0.957, blue: 0.902)
     public static let purpleSoft = Color(red: 0.961, green: 0.949, blue: 1.0)
 }
 

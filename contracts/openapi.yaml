@@ -1,0 +1,753 @@
+openapi: 3.1.0
+info:
+  title: StudyNotes Publish API
+  version: 1.0.0
+  description: |
+    Mac 到 Web 的唯一发布 HTTP 契约。所有写操作以及发布状态查询都必须使用
+    Ed25519 请求签名；OpenAPI 同时用于运行时请求边界校验。
+servers:
+  - url: http://127.0.0.1:8090
+paths:
+  /api/v1/health:
+    get:
+      operationId: health
+      responses:
+        "200":
+          description: Web 服务与仓储可用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /api/v1/publish-keys:
+    post:
+      operationId: registerPublishKey
+      description: 使用仅部署环境持有的注册密钥登记 Ed25519 公钥。
+      parameters:
+        - $ref: "#/components/parameters/RegistrationSecret"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishKeyRegistrationRequest"
+      responses:
+        "201":
+          description: 公钥登记成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishKeyResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/v1/publish-keys/{kid}:
+    delete:
+      operationId: revokePublishKey
+      parameters:
+        - $ref: "#/components/parameters/Kid"
+        - $ref: "#/components/parameters/SignatureKeyId"
+        - $ref: "#/components/parameters/SignatureTimestamp"
+        - $ref: "#/components/parameters/SignatureNonce"
+        - $ref: "#/components/parameters/Signature"
+        - $ref: "#/components/parameters/ContentSha256"
+      responses:
+        "204":
+          description: 公钥已撤销
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/v1/media/upload-token:
+    post:
+      operationId: createMediaUploadToken
+      parameters:
+        - $ref: "#/components/parameters/SignatureKeyId"
+        - $ref: "#/components/parameters/SignatureTimestamp"
+        - $ref: "#/components/parameters/SignatureNonce"
+        - $ref: "#/components/parameters/Signature"
+        - $ref: "#/components/parameters/ContentSha256"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MediaUploadTokenRequest"
+      responses:
+        "200":
+          description: 短时、限对象上传凭据
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MediaUploadTokenResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /api/v1/publish:
+    post:
+      operationId: publishArticle
+      parameters:
+        - $ref: "#/components/parameters/SignatureKeyId"
+        - $ref: "#/components/parameters/SignatureTimestamp"
+        - $ref: "#/components/parameters/SignatureNonce"
+        - $ref: "#/components/parameters/Signature"
+        - $ref: "#/components/parameters/ContentSha256"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishRequest"
+      responses:
+        "200":
+          description: 现有请求或内容对应的发布结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishResponse"
+        "201":
+          description: 首次创建文章或发布版本
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /api/v1/articles/{articleId}/visibility:
+    post:
+      operationId: changeArticleVisibility
+      parameters:
+        - $ref: "#/components/parameters/ArticleId"
+        - $ref: "#/components/parameters/SignatureKeyId"
+        - $ref: "#/components/parameters/SignatureTimestamp"
+        - $ref: "#/components/parameters/SignatureNonce"
+        - $ref: "#/components/parameters/Signature"
+        - $ref: "#/components/parameters/ContentSha256"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VisibilityRequest"
+      responses:
+        "200":
+          description: 可见性已切换
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VisibilityResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/v1/articles/{articleId}/withdraw:
+    post:
+      operationId: withdrawArticle
+      parameters:
+        - $ref: "#/components/parameters/ArticleId"
+        - $ref: "#/components/parameters/SignatureKeyId"
+        - $ref: "#/components/parameters/SignatureTimestamp"
+        - $ref: "#/components/parameters/SignatureNonce"
+        - $ref: "#/components/parameters/Signature"
+        - $ref: "#/components/parameters/ContentSha256"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WithdrawRequest"
+      responses:
+        "200":
+          description: 文章已下架
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VisibilityResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/v1/articles/{articleId}/rollback:
+    post:
+      operationId: rollbackArticle
+      parameters:
+        - $ref: "#/components/parameters/ArticleId"
+        - $ref: "#/components/parameters/SignatureKeyId"
+        - $ref: "#/components/parameters/SignatureTimestamp"
+        - $ref: "#/components/parameters/SignatureNonce"
+        - $ref: "#/components/parameters/Signature"
+        - $ref: "#/components/parameters/ContentSha256"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RollbackRequest"
+      responses:
+        "200":
+          description: 当前版本指针已切换
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RollbackResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /api/v1/articles/{articleId}/status:
+    get:
+      operationId: getPublishStatus
+      parameters:
+        - $ref: "#/components/parameters/ArticleId"
+        - $ref: "#/components/parameters/SignatureKeyId"
+        - $ref: "#/components/parameters/SignatureTimestamp"
+        - $ref: "#/components/parameters/SignatureNonce"
+        - $ref: "#/components/parameters/Signature"
+        - $ref: "#/components/parameters/ContentSha256"
+      responses:
+        "200":
+          description: 轻量发布映射
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishStatusResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/v1/articles/{articleId}:
+    delete:
+      operationId: deleteArticle
+      parameters:
+        - $ref: "#/components/parameters/ArticleId"
+        - $ref: "#/components/parameters/SignatureKeyId"
+        - $ref: "#/components/parameters/SignatureTimestamp"
+        - $ref: "#/components/parameters/SignatureNonce"
+        - $ref: "#/components/parameters/Signature"
+        - $ref: "#/components/parameters/ContentSha256"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteRequest"
+      responses:
+        "200":
+          description: 数据库文章、版本与搜索投影已提交删除，无引用媒体进入可重试清理
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    RegistrationSecret:
+      name: x-studynotes-registration-secret
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 16
+    SignatureKeyId:
+      name: x-studynotes-key-id
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9_-]{8,128}$"
+    SignatureTimestamp:
+      name: x-studynotes-timestamp
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: "^[0-9]{10}$"
+    SignatureNonce:
+      name: x-studynotes-nonce
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9_-]{16,128}$"
+    Signature:
+      name: x-studynotes-signature
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 64
+        maxLength: 128
+    ContentSha256:
+      name: x-studynotes-content-sha256
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: "^sha256:[a-f0-9]{64}$"
+    ArticleId:
+      name: articleId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9]{16,32}$"
+    Kid:
+      name: kid
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9_-]{8,128}$"
+  responses:
+    Error:
+      description: 请求失败
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        message:
+          type: string
+          description: 健康检查失败时给出可理解的原因
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        details: {}
+    PublicKeyJwk:
+      type: object
+      additionalProperties: false
+      required: [kty, crv, x]
+      properties:
+        kty:
+          const: OKP
+        crv:
+          const: Ed25519
+        x:
+          type: string
+          minLength: 32
+          maxLength: 128
+        kid:
+          type: string
+        use:
+          const: sig
+        alg:
+          const: EdDSA
+    PublishKeyRegistrationRequest:
+      type: object
+      additionalProperties: false
+      required: [kid, publicKeyJwk]
+      properties:
+        kid:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{8,128}$"
+        publicKeyJwk:
+          $ref: "#/components/schemas/PublicKeyJwk"
+    PublishKeyResponse:
+      type: object
+      additionalProperties: false
+      required: [kid, status, createdAt]
+      properties:
+        kid:
+          type: string
+        status:
+          enum: [ACTIVE, REVOKED]
+        createdAt:
+          type: string
+          format: date-time
+    Annotation:
+      type: object
+      additionalProperties: false
+      required: [id, quote]
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        quote:
+          type: string
+          minLength: 1
+          maxLength: 5000
+        note:
+          type: string
+          maxLength: 20000
+          default: ""
+        blockId:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: DOM id 或由点号分隔的块路径
+        blockPath:
+          oneOf:
+            - type: string
+              minLength: 1
+              maxLength: 256
+            - type: array
+              minItems: 1
+              maxItems: 32
+              items:
+                type: integer
+                minimum: 0
+          description: 推荐的首层到目标块索引路径
+        createdAt:
+          type: string
+          format: date-time
+    AiAppendixItem:
+      type: object
+      additionalProperties: false
+      required: [id, title, body]
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        title:
+          type: string
+          minLength: 1
+          maxLength: 500
+        body:
+          type: string
+          minLength: 1
+          maxLength: 100000
+    MediaReference:
+      type: object
+      additionalProperties: false
+      required: [objectKey, contentHash, contentType, size, reference]
+      properties:
+        objectKey:
+          type: string
+          minLength: 1
+          maxLength: 512
+          pattern: "^[A-Za-z0-9][A-Za-z0-9/_.-]+$"
+        contentHash:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+        contentType:
+          type: string
+          maxLength: 128
+          pattern: "^(image|application|audio|video)/"
+        size:
+          type: integer
+          minimum: 1
+          maximum: 52428800
+        reference:
+          type: string
+          minLength: 1
+          maxLength: 1024
+    PublishRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+        - sourceMaterialId
+        - expectedVersion
+        - visibility
+        - title
+        - bodyHtml
+        - publishAnnotations
+        - publishAi
+      properties:
+        requestId:
+          type: string
+          minLength: 16
+          maxLength: 128
+          pattern: "^[A-Za-z0-9_-]+$"
+        articleId:
+          type: string
+          pattern: "^[A-Za-z0-9]{16,32}$"
+        sourceMaterialId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        sourceVersionId:
+          type:
+            - string
+            - "null"
+          maxLength: 128
+        expectedVersion:
+          type: integer
+          minimum: 0
+        visibility:
+          enum: [PUBLIC, UNLISTED]
+        title:
+          type: string
+          minLength: 1
+          maxLength: 300
+        summary:
+          type: string
+          maxLength: 2000
+          default: ""
+        bodyHtml:
+          type: string
+          minLength: 1
+          maxLength: 2000000
+          description: 正文图片只能使用 data-object-key 标识受控媒体
+        tags:
+          type: array
+          maxItems: 30
+          default: []
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+        publishAnnotations:
+          type: boolean
+          default: false
+        publishAi:
+          type: boolean
+          default: false
+        annotations:
+          type: array
+          maxItems: 200
+          default: []
+          items:
+            $ref: "#/components/schemas/Annotation"
+        aiAppendix:
+          type: array
+          maxItems: 50
+          default: []
+          items:
+            $ref: "#/components/schemas/AiAppendixItem"
+        mediaRefs:
+          type: array
+          maxItems: 100
+          default: []
+          items:
+            $ref: "#/components/schemas/MediaReference"
+    PublishResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - articleId
+        - visibility
+        - publicUrl
+        - unlistedUrl
+        - version
+        - versionId
+        - fingerprint
+        - publishedAt
+        - createdArticle
+        - createdVersion
+        - reusedVersion
+        - idempotent
+      properties:
+        articleId:
+          type: string
+        visibility:
+          enum: [PUBLIC, UNLISTED, WITHDRAWN]
+        publicUrl:
+          type: string
+        unlistedUrl:
+          type: string
+        version:
+          type: integer
+        versionId:
+          type: string
+        fingerprint:
+          type: string
+        publishedAt:
+          type: string
+          format: date-time
+        createdArticle:
+          type: boolean
+        createdVersion:
+          type: boolean
+        reusedVersion:
+          type: boolean
+        idempotent:
+          type: boolean
+    VisibilityRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, expectedVersion, visibility]
+      properties:
+        requestId:
+          type: string
+          minLength: 16
+          maxLength: 128
+          pattern: "^[A-Za-z0-9_-]+$"
+        expectedVersion:
+          type: integer
+          minimum: 0
+        visibility:
+          enum: [PUBLIC, UNLISTED]
+    WithdrawRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, expectedVersion]
+      properties:
+        requestId:
+          type: string
+          minLength: 16
+          maxLength: 128
+          pattern: "^[A-Za-z0-9_-]+$"
+        expectedVersion:
+          type: integer
+          minimum: 0
+    RollbackRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, expectedVersion, targetVersion]
+      properties:
+        requestId:
+          type: string
+          minLength: 16
+          maxLength: 128
+          pattern: "^[A-Za-z0-9_-]+$"
+        expectedVersion:
+          type: integer
+          minimum: 0
+        targetVersion:
+          type: integer
+          minimum: 1
+    VisibilityResponse:
+      type: object
+      additionalProperties: false
+      required: [articleId, visibility, currentVersion, idempotent]
+      properties:
+        articleId:
+          type: string
+        visibility:
+          enum: [PUBLIC, UNLISTED, WITHDRAWN]
+        currentVersion:
+          type: integer
+        idempotent:
+          type: boolean
+    RollbackResponse:
+      type: object
+      additionalProperties: false
+      required: [articleId, currentVersion, versionId, fingerprint, idempotent]
+      properties:
+        articleId:
+          type: string
+        currentVersion:
+          type: integer
+        versionId:
+          type: string
+        fingerprint:
+          type: string
+        idempotent:
+          type: boolean
+    DeleteRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, expectedVersion]
+      properties:
+        requestId:
+          type: string
+          minLength: 16
+          maxLength: 128
+          pattern: "^[A-Za-z0-9_-]+$"
+        expectedVersion:
+          type: integer
+          minimum: 0
+    DeleteResponse:
+      type: object
+      additionalProperties: false
+      required: [articleId, deleted]
+      properties:
+        articleId:
+          type: string
+        deleted:
+          const: true
+    PublishStatusResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - articleId
+        - sourceMaterialId
+        - visibility
+        - currentVersion
+        - publicUrl
+        - unlistedUrl
+        - fingerprint
+        - updatedAt
+      properties:
+        articleId:
+          type: string
+        sourceMaterialId:
+          type: string
+        visibility:
+          enum: [PUBLIC, UNLISTED, WITHDRAWN]
+        currentVersion:
+          type:
+            - integer
+            - "null"
+        publicUrl:
+          type: string
+        unlistedUrl:
+          type: string
+        fingerprint:
+          type:
+            - string
+            - "null"
+        updatedAt:
+          type: string
+          format: date-time
+    MediaUploadTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [objectKey, contentHash, contentType, size]
+      properties:
+        objectKey:
+          type: string
+          minLength: 1
+          maxLength: 512
+          pattern: "^[A-Za-z0-9][A-Za-z0-9/_.-]+$"
+        contentHash:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+        contentType:
+          type: string
+          maxLength: 128
+          pattern: "^(image|application|audio|video)/"
+        size:
+          type: integer
+          minimum: 1
+          maximum: 52428800
+    MediaUploadTokenResponse:
+      type: object
+      additionalProperties: false
+      required: [uploadUrl, token, objectKey, expiresAt, method]
+      properties:
+        uploadUrl:
+          type: string
+        token:
+          type: string
+        objectKey:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        method:
+          enum: [PUT, POST]

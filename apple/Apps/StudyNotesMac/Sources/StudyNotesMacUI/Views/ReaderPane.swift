@@ -13,11 +13,8 @@ struct ReaderPane: View {
             Group {
                 if model.selectedMaterialIDs.count > 1 {
                     MultiSelectionReaderView(model: model)
-                } else if let note = model.selectedNote {
-                    ReaderDocumentView(
-                        note: note,
-                        knowledgeBaseName: knowledgeBaseName(for: note.summary.knowledgeBaseID)
-                    )
+                } else if let document = model.selectedDocument {
+                    MaterialReaderView(model: model, document: document)
                 } else {
                     emptyContent
                 }
@@ -63,6 +60,8 @@ struct ReaderPane: View {
 
 private struct ReaderTopBar: View {
     @Bindable var model: WorkspaceModel
+    @State private var showingOutline = false
+    @State private var showingSearch = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -80,23 +79,72 @@ private struct ReaderTopBar: View {
             ReaderToolButton(
                 title: "目录",
                 systemImage: "list.bullet.rectangle",
-                isEnabled: false,
-                help: "目录功能尚未接入"
-            ) {}
+                isEnabled: !(model.selectedDocument?.headings.isEmpty ?? true),
+                help: "目录"
+            ) {
+                showingOutline.toggle()
+            }
+            .popover(isPresented: $showingOutline, arrowEdge: .bottom) {
+                outlinePopover
+            }
 
             ReaderToolButton(
                 title: "搜索",
                 systemImage: "magnifyingglass",
-                isEnabled: false,
-                help: "文档内搜索尚未接入"
-            ) {}
+                isEnabled: model.selectedDocument != nil,
+                help: "文档内搜索"
+            ) {
+                showingSearch.toggle()
+            }
+            .popover(isPresented: $showingSearch, arrowEdge: .bottom) {
+                searchPopover
+            }
 
             ReaderToolButton(
                 title: "编辑副本",
                 systemImage: "square.and.pencil",
-                isEnabled: false,
-                help: "阅读副本编辑尚未接入"
-            ) {}
+                isEnabled: model.selectedDocument?.summary.kind.isTextDocument == true,
+                help: "编辑阅读副本"
+            ) {
+                model.isShowingEditReaderCopy = true
+            }
+
+            ReaderToolButton(
+                title: "版本",
+                systemImage: "clock.arrow.circlepath",
+                isEnabled: model.selectedDocument?.summary.kind.isTextDocument == true,
+                help: "查看最近 10 个文字版本"
+            ) {
+                Task {
+                    await model.loadRevisions()
+                    model.isShowingVersions = true
+                }
+            }
+
+            if let selection = model.readerSelection,
+               !selection.quote.isEmpty || selection.rect != nil {
+                ReaderToolButton(
+                    title: "标注选段",
+                    systemImage: "highlighter",
+                    isEnabled: true,
+                    help: "创建或更新当前选区的标注"
+                ) {
+                    model.presentAnnotationForCurrentSelection()
+                }
+
+                if !selection.quote.isEmpty {
+                    ReaderToolButton(
+                        title: "AI 解释",
+                        systemImage: "sparkles",
+                        isEnabled: model.canExplainSelection,
+                        help: model.canExplainSelection
+                            ? "确认后向所选 AI 供应商发送选段"
+                            : "请先配置 AI 供应商"
+                    ) {
+                        model.prepareSelectionExplanation()
+                    }
+                }
+            }
 
             Rectangle()
                 .fill(SNColor.border)
@@ -106,7 +154,7 @@ private struct ReaderTopBar: View {
             ReaderToolButton(
                 title: model.isStudyPanelVisible ? "收起研读层" : "显示研读层",
                 systemImage: "sidebar.right",
-                isEnabled: model.selectedNote != nil,
+                isEnabled: model.selectedDocument != nil,
                 help: model.isStudyPanelVisible ? "收起研读层" : "显示研读层"
             ) {
                 withAnimation(.easeInOut(duration: 0.18)) {
@@ -125,19 +173,97 @@ private struct ReaderTopBar: View {
     }
 
     private var breadcrumb: String {
-        if let note = model.selectedNote {
+        if let document = model.selectedDocument {
             let knowledgeBase = model.knowledgeBases.first {
-                $0.id == note.summary.knowledgeBaseID
+                $0.id == document.summary.knowledgeBaseID
             }
-            if note.summary.deletedAt != nil {
-                return "回收站 / \(note.summary.title)"
+            if document.summary.deletedAt != nil {
+                return "回收站 / \(document.summary.title)"
             }
-            return "\(knowledgeBase?.name ?? "收件箱") / \(note.summary.title)"
+            return "\(knowledgeBase?.name ?? "收件箱") / \(document.summary.title)"
         }
         if model.selectedMaterialIDs.count > 1 {
             return "\(model.selectedMaterialIDs.count) 篇材料"
         }
         return model.scopeTitle
+    }
+
+    private var outlinePopover: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("目录")
+                .font(.sn(12, weight: .semibold))
+                .foregroundStyle(SNColor.ink)
+                .padding(12)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(model.selectedDocument?.headings ?? []) { heading in
+                        HStack(spacing: 4) {
+                            Button {
+                                model.readerHeadingJumpID = heading.id
+                                showingOutline = false
+                            } label: {
+                                Text(heading.title)
+                                    .font(.sn(11))
+                                    .foregroundStyle(SNColor.text)
+                                    .lineLimit(2)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.leading, CGFloat(max(0, heading.level - 1)) * 12)
+                                    .padding(.vertical, 6)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                model.prepareSectionSummary(heading: heading)
+                                showingOutline = false
+                            } label: {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(SNColor.blue)
+                                    .frame(width: 24, height: 24)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(model.selectedProvider == nil)
+                            .help("总结本节")
+                        }
+                    }
+                }
+                .padding(8)
+            }
+        }
+        .frame(width: 280, height: 340)
+    }
+
+    private var searchPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("文内搜索")
+                .font(.sn(12, weight: .semibold))
+                .foregroundStyle(SNColor.ink)
+
+            TextField("输入关键词", text: $model.documentSearchText)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit {
+                    model.documentSearchText += " "
+                }
+
+            Text("搜索只作用于当前阅读视图，不会创建标注或修改原文。")
+                .font(.sn(9))
+                .foregroundStyle(SNColor.muted)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Spacer()
+                Button("关闭") {
+                    model.documentSearchText = ""
+                    showingSearch = false
+                }
+            }
+        }
+        .padding(14)
+        .frame(width: 300)
     }
 }
 

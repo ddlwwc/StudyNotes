@@ -168,30 +168,46 @@ struct WorkspaceToolbarActions: View {
             .disabled(!model.canCreateNote || model.isPerformingAction)
             .help(model.canCreateNote ? "新建 Markdown 笔记" : "请先连接学习目录")
 
-            if !model.hasSelection {
-                Button {} label: {
-                    Label("导入", systemImage: "square.and.arrow.down")
-                        .font(.sn(11))
-                }
-                .disabled(true)
-                .help("导入功能尚未接入")
-
-                Button {} label: {
-                    Label("AI 研读", systemImage: "sparkles")
-                        .font(.sn(11))
-                }
-                .disabled(true)
-                .help("AI 研读尚未配置")
-
-                Button {} label: {
-                    Label("发布", systemImage: "paperplane")
-                        .font(.sn(11))
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(SNColor.blue)
-                .disabled(true)
-                .help("发布功能尚未接入")
+            Button {
+                model.presentImportSheet()
+            } label: {
+                Label("导入", systemImage: "square.and.arrow.down")
+                    .font(.sn(11))
             }
+            .disabled(!model.isConnected || model.isPerformingAction)
+            .help("导入 Markdown、HTML、PDF、图片或网页文章")
+
+            Button {
+                if model.selectedProvider == nil {
+                    model.isShowingAIConfiguration = true
+                } else if model.selectedDocument != nil {
+                    model.prepareMaterialSummary()
+                }
+            } label: {
+                Label("AI 研读", systemImage: "sparkles")
+                    .font(.sn(11))
+            }
+            .disabled(model.selectedDocument == nil && !model.providerProfiles.isEmpty)
+            .help(
+                model.selectedProvider == nil
+                    ? "配置 AI 供应商"
+                    : "总结整篇材料"
+            )
+
+            Button {
+                model.preparePublishPreview()
+            } label: {
+                Label("发布", systemImage: "paperplane")
+                    .font(.sn(11))
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(SNColor.blue)
+            .disabled(!model.canPreviewPublish || model.isPerformingAction)
+            .help(
+                model.canPreviewPublish
+                    ? "预览公开正文与私人研读层范围"
+                    : "只有文章类材料可以发布"
+            )
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
@@ -233,13 +249,13 @@ struct WorkspaceSnapshotHeader: View {
             Spacer()
 
             HStack(spacing: 6) {
-                SnapshotActionPill(title: "导入", systemImage: "square.and.arrow.down", isEnabled: false)
+                SnapshotActionPill(title: "导入", systemImage: "square.and.arrow.down", isEnabled: true)
                 SnapshotActionPill(title: "新建笔记", systemImage: "square.and.pencil", isEnabled: true)
-                SnapshotActionPill(title: "AI 研读", systemImage: "sparkles", isEnabled: false)
+                SnapshotActionPill(title: "AI 研读", systemImage: "sparkles", isEnabled: true)
                 SnapshotActionPill(
                     title: "发布",
                     systemImage: "paperplane",
-                    isEnabled: false,
+                    isEnabled: true,
                     isPrimary: true
                 )
             }

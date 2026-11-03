@@ -1,4 +1,6 @@
 import Foundation
+import ImageIO
+import PDFKit
 
 public enum StudyNotesError: Error, Equatable, Sendable, LocalizedError {
     case knowledgeBaseNotFound
@@ -12,6 +14,11 @@ public enum StudyNotesError: Error, Equatable, Sendable, LocalizedError {
     case materialAlreadyExists
     case unsupportedSchemaVersion(Int)
     case fileCoordinationFailed
+    case materialNotPublishable
+    case annotationNotFound
+    case conversationNotFound
+    case revisionNotFound
+    case invalidLinkedMaterial
 
     public var errorDescription: String? {
         switch self {
@@ -37,6 +44,16 @@ public enum StudyNotesError: Error, Equatable, Sendable, LocalizedError {
             "学习材料包使用了不受支持的格式版本：\(version)。"
         case .fileCoordinationFailed:
             "无法协调文件访问，请稍后重试。"
+        case .materialNotPublishable:
+            "只有 Markdown、HTML 或网页文章可以进入发布预览。"
+        case .annotationNotFound:
+            "没有找到对应的标注。"
+        case .conversationNotFound:
+            "没有找到对应的 AI 研读会话。"
+        case .revisionNotFound:
+            "没有找到对应的文字版本。"
+        case .invalidLinkedMaterial:
+            "关联材料不存在，或不能关联自身。"
         }
     }
 }
@@ -46,19 +63,34 @@ public actor StudyNotesStore {
 
     private let rootProvider: any StudyNotesRootProviding
     private let fileManager: FileManager
+    private let explicitDerivedDataURL: URL?
     private let fileCoordinator = NSFileCoordinator(filePresenter: nil)
+    private var searchIndex: StudyNotesSearchIndex?
 
     public init(rootURL: URL, fileManager: FileManager = .default) {
         self.rootProvider = FixedStudyNotesRootProvider(status: .available(.local(rootURL)))
         self.fileManager = fileManager
+        self.explicitDerivedDataURL = nil
     }
 
     public init(
         rootProvider: any StudyNotesRootProviding,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        derivedDataURL: URL? = nil
     ) {
         self.rootProvider = rootProvider
         self.fileManager = fileManager
+        self.explicitDerivedDataURL = derivedDataURL
+    }
+
+    public init(
+        rootURL: URL,
+        derivedDataURL: URL,
+        fileManager: FileManager = .default
+    ) {
+        self.rootProvider = FixedStudyNotesRootProvider(status: .available(.local(rootURL)))
+        self.fileManager = fileManager
+        self.explicitDerivedDataURL = derivedDataURL
     }
 
     public func rootStatus() -> StudyNotesRootStatus {
@@ -438,6 +470,9 @@ public actor StudyNotesStore {
                 from: inboxScan.packages,
                 placement: .inbox
             )
+            let inboxDraftMaterials = try scanInboxDrafts(
+                in: inboxURL(at: rootURL)
+            ).map(inboxDraftSummary)
 
             let recycleBinScan = try scanMaterialPackages(
                 in: recycleBinURL(at: rootURL),
@@ -449,14 +484,14 @@ public actor StudyNotesStore {
             )
 
             let tags = sortedUniqueTags(
-                (materials + inboxMaterials).flatMap(\.tags)
+                (materials + inboxMaterials + inboxDraftMaterials).flatMap(\.tags)
             )
 
             return LibraryIndex(
                 knowledgeBases: knowledgeBases,
                 materials: sortedMaterials(materials),
                 folders: folders.sorted(by: folderSort),
-                inboxMaterials: sortedMaterials(inboxMaterials),
+                inboxMaterials: sortedMaterials(inboxMaterials + inboxDraftMaterials),
                 recycledMaterials: sortedRecycledMaterials(recycledMaterials),
                 tags: tags
             )
@@ -484,6 +519,754 @@ public actor StudyNotesStore {
                 summary: try summary(for: locatedMaterial),
                 markdown: markdown
             )
+        }
+    }
+
+    public func loadMaterialDocument(id: UUID) throws -> MaterialDocument {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+
+        return try coordinatedRead(at: rootURL) {
+            if let draft = try locateInboxDraft(id: id, rootURL: rootURL) {
+                return try loadInboxDraftDocument(draft)
+            }
+            guard let located = try locateMaterial(
+                id: id,
+                rootURL: rootURL,
+                includeRecycled: true
+            ) else {
+                throw StudyNotesError.materialNotFound
+            }
+            let packageURL = located.packageURL
+            let manifest = located.manifest
+            let contentURL = contentFileURL(
+                kind: manifest.kind,
+                packageURL: packageURL
+            )
+            let markdown: String
+            if let contentURL,
+               fileManager.fileExists(atPath: contentURL.path) {
+                markdown = try String(contentsOf: contentURL, encoding: .utf8)
+            } else {
+                markdown = ""
+            }
+            let mediaURLs = mediaFileURLs(in: packageURL)
+            let content = ReaderContentBuilder.build(
+                markdown: markdown,
+                title: manifest.title,
+                mediaURLs: mediaURLs
+            )
+            let sourceFileURL = manifest.sourceFileName.map {
+                packageURL
+                    .appending(path: "source", directoryHint: .isDirectory)
+                    .appending(path: $0)
+            }
+            let pdfDocument: PDFDocument?
+            if manifest.kind == .pdf,
+               let sourceFileURL,
+               let data = try? Data(contentsOf: sourceFileURL) {
+                pdfDocument = PDFDocument(data: data)
+            } else {
+                pdfDocument = nil
+            }
+            if manifest.kind == .pdf, pdfDocument == nil {
+                throw StudyNotesContentError.invalidPDF
+            }
+            let hasTextLayer = pdfDocument.map { document in
+                (0..<document.pageCount).contains {
+                    !(document.page(at: $0)?.string ?? "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .isEmpty
+                }
+            }
+            return MaterialDocument(
+                summary: try summary(for: located),
+                markdown: markdown,
+                renderedHTML: content.html,
+                headings: content.headings,
+                sourceURL: packageURL,
+                sourceFileURL: sourceFileURL,
+                mediaURLs: mediaURLs,
+                pageCount: pdfDocument?.pageCount,
+                hasTextLayer: hasTextLayer
+            )
+        }
+    }
+
+    public func importFiles(
+        at fileURLs: [URL],
+        knowledgeBaseID: UUID?,
+        folderPath: String = "",
+        tags: [String] = []
+    ) throws -> MaterialImportBatch {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+        let normalizedFolderPath = try normalizedFolderPath(folderPath)
+
+        return try coordinatedWrite(at: rootURL) {
+            if let knowledgeBaseID {
+                try requireKnowledgeBase(id: knowledgeBaseID, rootURL: rootURL)
+                try requireFolder(
+                    path: normalizedFolderPath,
+                    knowledgeBaseID: knowledgeBaseID,
+                    rootURL: rootURL
+                )
+            } else {
+                guard normalizedFolderPath.isEmpty else {
+                    throw StudyNotesError.invalidFolderPath
+                }
+            }
+
+            var results: [MaterialImportResult] = []
+            for fileURL in fileURLs {
+                let data = try Data(contentsOf: fileURL)
+                let fileExtension = fileURL.pathExtension.lowercased()
+                let request = try importRequest(
+                    data: data,
+                    fileExtension: fileExtension,
+                    fallbackTitle: fileURL.deletingPathExtension().lastPathComponent
+                )
+                let fingerprint = ContentFingerprint.sha256(data)
+                if let duplicate = try findDuplicate(
+                    fingerprint: fingerprint,
+                    rootURL: rootURL
+                ) {
+                    results.append(
+                        MaterialImportResult(
+                            summary: duplicate,
+                            isDuplicate: true,
+                            duplicateOf: duplicate.id
+                        )
+                    )
+                    continue
+                }
+
+                let imported = try createImportedPackage(
+                    request: request,
+                    sourceData: data,
+                    sourceFileName: "original.\(fileExtension)",
+                    fingerprint: fingerprint,
+                    knowledgeBaseID: knowledgeBaseID,
+                    folderPath: normalizedFolderPath,
+                    tags: tags,
+                    rootURL: rootURL
+                )
+                results.append(
+                    MaterialImportResult(
+                        summary: imported,
+                        isDuplicate: false,
+                        duplicateOf: nil
+                    )
+                )
+            }
+            return MaterialImportBatch(results: results)
+        }
+    }
+
+    public func importWebArticle(
+        _ draft: WebArticleDraft,
+        title: String,
+        markdown: String,
+        knowledgeBaseID: UUID?,
+        folderPath: String = "",
+        tags: [String] = []
+    ) throws -> MaterialImportResult {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+        let normalizedFolderPath = try normalizedFolderPath(folderPath)
+
+        return try coordinatedWrite(at: rootURL) {
+            if let knowledgeBaseID {
+                try requireKnowledgeBase(id: knowledgeBaseID, rootURL: rootURL)
+                try requireFolder(
+                    path: normalizedFolderPath,
+                    knowledgeBaseID: knowledgeBaseID,
+                    rootURL: rootURL
+                )
+            } else {
+                guard normalizedFolderPath.isEmpty else {
+                    throw StudyNotesError.invalidFolderPath
+                }
+            }
+
+            let sourceData = Data(draft.rawHTML.utf8)
+            let fingerprint = ContentFingerprint.sha256(sourceData)
+            if let duplicate = try findDuplicate(
+                fingerprint: fingerprint,
+                rootURL: rootURL
+            ) {
+                return MaterialImportResult(
+                    summary: duplicate,
+                    isDuplicate: true,
+                    duplicateOf: duplicate.id
+                )
+            }
+            let normalizedMarkdown = localizeWebMediaReferences(
+                markdown,
+                media: draft.media
+            )
+            let request = ImportRequest(
+                kind: .webArticle,
+                title: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? draft.title
+                    : title,
+                markdown: normalizedMarkdown,
+                originalSourceURL: draft.sourceURL,
+                media: draft.media,
+                mediaFailures: draft.mediaFailures
+            )
+            let summary = try createImportedPackage(
+                request: request,
+                sourceData: sourceData,
+                sourceFileName: "article.html",
+                fingerprint: fingerprint,
+                knowledgeBaseID: knowledgeBaseID,
+                folderPath: normalizedFolderPath,
+                tags: tags,
+                rootURL: rootURL
+            )
+            return MaterialImportResult(
+                summary: summary,
+                isDuplicate: false,
+                duplicateOf: nil,
+                mediaFailures: draft.mediaFailures.map(\.sourceURL.absoluteString)
+            )
+        }
+    }
+
+    @discardableResult
+    public func saveReaderCopy(id: UUID, text: String) throws -> TextRevision {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+
+        return try coordinatedWrite(at: rootURL) {
+            guard let located = try locateMaterial(
+                id: id,
+                rootURL: rootURL,
+                includeRecycled: false
+            ), located.manifest.kind.isTextDocument else {
+                throw StudyNotesError.materialNotFound
+            }
+            let contentURL = contentFileURL(
+                kind: located.manifest.kind,
+                packageURL: located.packageURL
+            )
+            guard let contentURL else {
+                throw StudyNotesError.materialNotPublishable
+            }
+            try Data(text.utf8).write(to: contentURL, options: .atomic)
+            let revision = try appendRevision(
+                text: text,
+                packageURL: located.packageURL,
+                materialID: id
+            )
+            var manifest = located.manifest
+            manifest.contentVersionID = revision.id
+            manifest.updatedAt = revision.createdAt
+            manifest.contentFingerprint = ContentFingerprint.sha256(text)
+            try writeManifest(manifest, to: located.packageURL)
+            return revision
+        }
+    }
+
+    public func loadTextRevisions(id: UUID) throws -> [TextRevision] {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+
+        return try coordinatedRead(at: rootURL) {
+            guard let located = try locateMaterial(
+                id: id,
+                rootURL: rootURL,
+                includeRecycled: true
+            ) else {
+                throw StudyNotesError.materialNotFound
+            }
+            return try revisions(
+                packageURL: located.packageURL,
+                materialID: id
+            )
+        }
+    }
+
+    @discardableResult
+    public func restoreRevision(id: UUID, revisionID: UUID) throws -> TextRevision {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+
+        return try coordinatedWrite(at: rootURL) {
+            guard let located = try locateMaterial(
+                id: id,
+                rootURL: rootURL,
+                includeRecycled: false
+            ) else {
+                throw StudyNotesError.materialNotFound
+            }
+            guard let revision = try revisions(
+                packageURL: located.packageURL,
+                materialID: id
+            ).first(where: { $0.id == revisionID }),
+            let contentURL = contentFileURL(
+                kind: located.manifest.kind,
+                packageURL: located.packageURL
+            ) else {
+                throw StudyNotesError.revisionNotFound
+            }
+            try Data(revision.text.utf8).write(to: contentURL, options: .atomic)
+            let restoredRevision = try appendRevision(
+                text: revision.text,
+                packageURL: located.packageURL,
+                materialID: id
+            )
+            var manifest = located.manifest
+            manifest.contentVersionID = restoredRevision.id
+            manifest.updatedAt = restoredRevision.createdAt
+            manifest.contentFingerprint = ContentFingerprint.sha256(revision.text)
+            try writeManifest(manifest, to: located.packageURL)
+            return restoredRevision
+        }
+    }
+
+    @discardableResult
+    public func setLinkedMaterials(
+        for materialID: UUID,
+        linkedMaterialIDs: [UUID]
+    ) throws -> StudyMaterialSummary {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+
+        return try coordinatedWrite(at: rootURL) {
+            guard let located = try locateMaterial(
+                id: materialID,
+                rootURL: rootURL,
+                includeRecycled: false
+            ) else {
+                throw StudyNotesError.materialNotFound
+            }
+            let uniqueIDs = unique(linkedMaterialIDs).filter { $0 != materialID }
+            for linkedID in uniqueIDs {
+                guard try locateMaterial(
+                    id: linkedID,
+                    rootURL: rootURL,
+                    includeRecycled: false
+                ) != nil else {
+                    throw StudyNotesError.invalidLinkedMaterial
+                }
+            }
+            var manifest = located.manifest
+            manifest.linkedMaterialIDs = uniqueIDs
+            manifest.updatedAt = Date()
+            try writeManifest(manifest, to: located.packageURL)
+            var updated = located
+            updated.manifest = manifest
+            return try summary(for: updated)
+        }
+    }
+
+    public func loadAnnotations(materialID: UUID) throws -> [MaterialAnnotation] {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+
+        return try coordinatedRead(at: rootURL) {
+            if try locateInboxDraft(id: materialID, rootURL: rootURL) != nil {
+                return []
+            }
+            guard let located = try locateMaterial(
+                id: materialID,
+                rootURL: rootURL,
+                includeRecycled: true
+            ) else {
+                throw StudyNotesError.materialNotFound
+            }
+            let annotations = try loadAnnotationFiles(
+                packageURL: located.packageURL,
+                materialID: materialID
+            )
+            let text = try readerText(
+                packageURL: located.packageURL,
+                kind: located.manifest.kind
+            )
+            return annotations.map { annotation in
+                var resolved = annotation
+                resolved.status = resolvedAnnotationStatus(
+                    annotation,
+                    text: text,
+                    packageURL: located.packageURL,
+                    kind: located.manifest.kind
+                )
+                return resolved
+            }
+        }
+    }
+
+    public func upsertAnnotation(
+        _ annotation: MaterialAnnotation
+    ) throws -> MaterialAnnotation {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+
+        return try coordinatedWrite(at: rootURL) {
+            guard let located = try locateMaterial(
+                id: annotation.materialID,
+                rootURL: rootURL,
+                includeRecycled: false
+            ) else {
+                throw StudyNotesError.materialNotFound
+            }
+            var annotations = try loadAnnotationFiles(
+                packageURL: located.packageURL,
+                materialID: annotation.materialID
+            )
+            var value = annotation
+            if let existingIndex = annotations.firstIndex(where: {
+                sameAnchorLocation($0.anchor, annotation.anchor)
+            }) {
+                let existing = annotations[existingIndex]
+                value = MaterialAnnotation(
+                    id: existing.id,
+                    materialID: existing.materialID,
+                    anchor: annotation.anchor,
+                    quote: annotation.quote,
+                    note: annotation.note,
+                    status: .active,
+                    createdAt: existing.createdAt,
+                    updatedAt: Date()
+                )
+                annotations[existingIndex] = value
+            } else {
+                annotations.append(value)
+            }
+            try writeAnnotation(value, packageURL: located.packageURL)
+            return value
+        }
+    }
+
+    public func rebindAnnotation(
+        id annotationID: UUID,
+        materialID: UUID,
+        anchor: AnnotationAnchor
+    ) throws -> MaterialAnnotation {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+        return try coordinatedWrite(at: rootURL) {
+            guard let located = try locateMaterial(
+                id: materialID,
+                rootURL: rootURL,
+                includeRecycled: false
+            ) else {
+                throw StudyNotesError.materialNotFound
+            }
+            var annotations = try loadAnnotationFiles(
+                packageURL: located.packageURL,
+                materialID: materialID
+            )
+            guard let index = annotations.firstIndex(where: { $0.id == annotationID }) else {
+                throw StudyNotesError.annotationNotFound
+            }
+            annotations[index].anchor = anchor
+            annotations[index].status = .active
+            annotations[index].updatedAt = Date()
+            try writeAnnotation(annotations[index], packageURL: located.packageURL)
+            return annotations[index]
+        }
+    }
+
+    public func deleteAnnotation(id: UUID, materialID: UUID) throws {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+        try coordinatedWrite(at: rootURL) {
+            guard let located = try locateMaterial(
+                id: materialID,
+                rootURL: rootURL,
+                includeRecycled: false
+            ) else {
+                throw StudyNotesError.materialNotFound
+            }
+            let fileURL = located.packageURL
+                .appending(path: "annotations", directoryHint: .isDirectory)
+                .appending(path: "\(id.uuidString).json")
+            guard fileManager.fileExists(atPath: fileURL.path) else {
+                throw StudyNotesError.annotationNotFound
+            }
+            try fileManager.removeItem(at: fileURL)
+        }
+    }
+
+    public func loadConversations(materialID: UUID) throws -> [AIConversation] {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+        return try coordinatedRead(at: rootURL) {
+            if try locateInboxDraft(id: materialID, rootURL: rootURL) != nil {
+                return []
+            }
+            guard let located = try locateMaterial(
+                id: materialID,
+                rootURL: rootURL,
+                includeRecycled: true
+            ) else {
+                throw StudyNotesError.materialNotFound
+            }
+            return try conversationFiles(packageURL: located.packageURL)
+        }
+    }
+
+    @discardableResult
+    public func saveConversation(_ conversation: AIConversation) throws -> AIConversation {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+        return try coordinatedWrite(at: rootURL) {
+            guard let located = try locateMaterial(
+                id: conversation.materialID,
+                rootURL: rootURL,
+                includeRecycled: false
+            ) else {
+                throw StudyNotesError.materialNotFound
+            }
+            let directory = located.packageURL
+                .appending(path: "ai", directoryHint: .isDirectory)
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            var value = conversation
+            value.updatedAt = Date()
+            try encode(value).write(
+                to: directory.appending(path: "\(value.id.uuidString).json"),
+                options: .atomic
+            )
+            return value
+        }
+    }
+
+    public func deleteConversation(id: UUID, materialID: UUID) throws {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+        try coordinatedWrite(at: rootURL) {
+            guard let located = try locateMaterial(
+                id: materialID,
+                rootURL: rootURL,
+                includeRecycled: false
+            ) else {
+                throw StudyNotesError.materialNotFound
+            }
+            let fileURL = located.packageURL
+                .appending(path: "ai", directoryHint: .isDirectory)
+                .appending(path: "\(id.uuidString).json")
+            guard fileManager.fileExists(atPath: fileURL.path) else {
+                throw StudyNotesError.conversationNotFound
+            }
+            try fileManager.removeItem(at: fileURL)
+        }
+    }
+
+    public func promoteAIResult(
+        conversationID: UUID,
+        messageID: UUID,
+        materialID: UUID,
+        target: AIPromotionTarget,
+        knowledgeBaseID: UUID?,
+        folderPath: String = ""
+    ) throws -> AIPromotionResult {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+        return try coordinatedWrite(at: rootURL) {
+            guard let located = try locateMaterial(
+                id: materialID,
+                rootURL: rootURL,
+                includeRecycled: false
+            ) else {
+                throw StudyNotesError.materialNotFound
+            }
+            guard let conversation = try conversationFiles(
+                packageURL: located.packageURL
+            ).first(where: { $0.id == conversationID }) else {
+                throw StudyNotesError.conversationNotFound
+            }
+            guard let message = conversation.messages.first(where: { $0.id == messageID }) else {
+                throw StudyNotesError.conversationNotFound
+            }
+            let title = conversation.title.isEmpty
+                ? "AI 研读结果"
+                : conversation.title
+            switch target {
+            case .note, .material:
+                let note = try createMarkdownPackage(
+                    title: title,
+                    markdown: message.content,
+                    knowledgeBaseID: knowledgeBaseID,
+                    folderPath: folderPath,
+                    tags: ["AI 研读"],
+                    rootURL: rootURL
+                )
+                return AIPromotionResult(
+                    target: target,
+                    material: note.summary,
+                    annotation: nil
+                )
+            case .annotation:
+                guard let anchor = conversation.originAnchor else {
+                    throw StudyNotesError.annotationNotFound
+                }
+                var annotations = try loadAnnotationFiles(
+                    packageURL: located.packageURL,
+                    materialID: materialID
+                )
+                let annotation: MaterialAnnotation
+                if let existingIndex = annotations.firstIndex(where: {
+                    sameAnchorLocation($0.anchor, anchor)
+                }) {
+                    let existing = annotations[existingIndex]
+                    annotation = MaterialAnnotation(
+                        id: existing.id,
+                        materialID: materialID,
+                        anchor: anchor,
+                        quote: anchor.excerpt,
+                        note: message.content,
+                        status: .active,
+                        createdAt: existing.createdAt,
+                        updatedAt: Date()
+                    )
+                    annotations[existingIndex] = annotation
+                } else {
+                    annotation = MaterialAnnotation(
+                        materialID: materialID,
+                        anchor: anchor,
+                        quote: anchor.excerpt,
+                        note: message.content
+                    )
+                }
+                try writeAnnotation(annotation, packageURL: located.packageURL)
+                return AIPromotionResult(
+                    target: target,
+                    material: located.manifest.summary(
+                        knowledgeBaseID: located.manifest.knowledgeBaseID,
+                        folderPath: located.package.folderPath,
+                        conflictCopies: []
+                    ),
+                    annotation: annotation
+                )
+            }
+        }
+    }
+
+    public func search(
+        _ query: String,
+        filter: SearchFilter = SearchFilter()
+    ) async throws -> [SearchHit] {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+        let documents = try searchableDocuments(rootURL: rootURL)
+        let index = try ensureSearchIndex(rootURL: rootURL)
+        return try await index.search(
+            query: query,
+            filter: filter,
+            documents: documents
+        )
+    }
+
+    public func publishPreview(
+        materialID: UUID,
+        includeAnnotations: Bool = false,
+        includeAI: Bool = false
+    ) throws -> PublishPreview {
+        let document = try loadMaterialDocument(id: materialID)
+        guard document.summary.kind.canPublish else {
+            throw StudyNotesError.materialNotPublishable
+        }
+        let annotations = includeAnnotations
+            ? try loadAnnotations(materialID: materialID)
+                .filter { $0.status == .active }
+                .map {
+                    PublishedAnnotation(
+                        id: $0.id,
+                        quote: $0.quote,
+                        note: $0.note,
+                        anchor: $0.anchor
+                    )
+                }
+            : []
+        let conversations = try loadConversations(materialID: materialID)
+        let appendix = includeAI
+            ? conversations.flatMap { conversation in
+                conversation.messages.compactMap { message in
+                    message.role == .assistant
+                        ? "### \(conversation.title)\n\n\(message.content)"
+                        : nil
+                }
+            }.joined(separator: "\n\n")
+            : ""
+        let html = ReaderContentBuilder.publicationHTML(
+            title: document.summary.title,
+            markdown: document.markdown,
+            annotations: annotations,
+            aiAppendix: appendix.isEmpty ? nil : appendix
+        )
+        let fingerprint = ContentFingerprint.sha256(
+            [
+                html,
+                includeAnnotations ? "annotations" : "",
+                includeAI ? "ai" : ""
+            ].joined(separator: "\n")
+        )
+        let media = try publishMediaItems(packageURL: document.sourceURL)
+        return PublishPreview(
+            materialID: materialID,
+            title: document.summary.title,
+            html: html,
+            contentFingerprint: fingerprint,
+            includeAnnotations: includeAnnotations,
+            includeAI: includeAI,
+            annotations: annotations,
+            aiAppendix: appendix.isEmpty ? nil : appendix,
+            media: media,
+            mapping: document.summary.publishMapping
+        )
+    }
+
+    public func savePublishMapping(
+        materialID: UUID,
+        mapping: PublishMapping
+    ) throws -> StudyMaterialSummary {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+        return try coordinatedWrite(at: rootURL) {
+            guard let located = try locateMaterial(
+                id: materialID,
+                rootURL: rootURL,
+                includeRecycled: false
+            ) else {
+                throw StudyNotesError.materialNotFound
+            }
+            guard located.manifest.kind.canPublish else {
+                throw StudyNotesError.materialNotPublishable
+            }
+            var manifest = located.manifest
+            manifest.publishMapping = mapping
+            manifest.updatedAt = Date()
+            try writeManifest(manifest, to: located.packageURL)
+            var updated = located
+            updated.manifest = manifest
+            return try summary(for: updated)
+        }
+    }
+
+    @discardableResult
+    public func clearPublishMapping(
+        materialID: UUID
+    ) throws -> StudyMaterialSummary {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+        return try coordinatedWrite(at: rootURL) {
+            guard let located = try locateMaterial(
+                id: materialID,
+                rootURL: rootURL,
+                includeRecycled: false
+            ) else {
+                throw StudyNotesError.materialNotFound
+            }
+            var manifest = located.manifest
+            manifest.publishMapping = nil
+            manifest.updatedAt = Date()
+            try writeManifest(manifest, to: located.packageURL)
+            var updated = located
+            updated.manifest = manifest
+            return try summary(for: updated)
         }
     }
 
@@ -518,8 +1301,34 @@ public actor StudyNotesStore {
                 manifest: MaterialManifest,
                 conflicts: [(sourceURL: URL, destinationURL: URL)]
             )] = []
+            var draftPlans: [(
+                draft: InboxDraftPackage,
+                destinationURL: URL,
+                manifest: MaterialManifest
+            )] = []
+            let destinationDirectory = try destinationDirectory(
+                knowledgeBaseID: knowledgeBaseID,
+                folderPath: normalizedFolderPath,
+                rootURL: rootURL
+            )
 
             for id in uniqueIDs {
+                if let draft = try locateInboxDraft(id: id, rootURL: rootURL) {
+                    let destinationURL = destinationDirectory.appending(
+                        path: "\(id.uuidString).studyitem",
+                        directoryHint: .isDirectory
+                    )
+                    guard !fileManager.fileExists(atPath: destinationURL.path) else {
+                        throw StudyNotesError.materialAlreadyExists
+                    }
+                    let manifest = try inboxDraftMaterialManifest(
+                        draft,
+                        knowledgeBaseID: knowledgeBaseID,
+                        folderPath: normalizedFolderPath
+                    )
+                    draftPlans.append((draft, destinationURL, manifest))
+                    continue
+                }
                 guard let located = try locateMaterial(
                     id: id,
                     rootURL: rootURL,
@@ -528,11 +1337,6 @@ public actor StudyNotesStore {
                     throw StudyNotesError.materialNotFound
                 }
 
-                let destinationDirectory = try destinationDirectory(
-                    knowledgeBaseID: knowledgeBaseID,
-                    folderPath: normalizedFolderPath,
-                    rootURL: rootURL
-                )
                 let destinationURL = destinationDirectory.appending(
                     path: located.packageURL.lastPathComponent,
                     directoryHint: .isDirectory
@@ -568,7 +1372,18 @@ public actor StudyNotesStore {
             }
 
             var completedMoves: [CompletedPackageMove] = []
+            var materializedDraftDestinations: [URL] = []
+            var materializedDraftSources: [URL] = []
             do {
+                for plan in draftPlans {
+                    try materializeInboxDraft(
+                        plan.draft,
+                        destinationURL: plan.destinationURL,
+                        manifest: plan.manifest
+                    )
+                    materializedDraftDestinations.append(plan.destinationURL)
+                    materializedDraftSources.append(plan.draft.packageURL)
+                }
                 for plan in plans {
                     try writeManifest(plan.manifest, to: plan.located.packageURL)
                     do {
@@ -606,7 +1421,13 @@ public actor StudyNotesStore {
                 }
             } catch {
                 rollbackMoves(completedMoves)
+                for destinationURL in materializedDraftDestinations {
+                    try? fileManager.removeItem(at: destinationURL)
+                }
                 throw error
+            }
+            for sourceURL in materializedDraftSources {
+                try? fileManager.removeItem(at: sourceURL)
             }
 
             return uniqueIDs
@@ -909,6 +1730,7 @@ public actor StudyNotesStore {
     ) throws -> MarkdownNote {
         let now = Date()
         let materialID = UUID()
+        let revisionID = UUID()
         let manifest = MaterialManifest(
             schemaVersion: StudyNotesKit.schemaVersion,
             id: materialID,
@@ -920,7 +1742,11 @@ public actor StudyNotesStore {
             folderPath: folderPath,
             tags: normalizedTags(tags),
             deletedAt: nil,
-            originalLocation: nil
+            originalLocation: nil,
+            sourceFileName: "original.md",
+            contentVersionID: revisionID,
+            sourceFingerprint: ContentFingerprint.sha256(markdown),
+            contentFingerprint: ContentFingerprint.sha256(markdown)
         )
         let destinationDirectory = try destinationDirectory(
             knowledgeBaseID: knowledgeBaseID,
@@ -939,17 +1765,31 @@ public actor StudyNotesStore {
         let contentURL = temporaryURL
             .appending(path: "content", directoryHint: .isDirectory)
             .appending(path: "note.md")
+        let sourceURL = temporaryURL
+            .appending(path: "source", directoryHint: .isDirectory)
+            .appending(path: "original.md")
+        let revisionURL = temporaryURL
+            .appending(path: "revisions", directoryHint: .isDirectory)
+            .appending(path: "\(revisionID.uuidString).md")
 
-        try fileManager.createDirectory(
-            at: contentURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
+        for directory in [
+            contentURL.deletingLastPathComponent(),
+            sourceURL.deletingLastPathComponent(),
+            revisionURL.deletingLastPathComponent()
+        ] {
+            try fileManager.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+        }
         do {
             try encode(manifest).write(
                 to: temporaryURL.appending(path: "manifest.json"),
                 options: .atomic
             )
             try Data(markdown.utf8).write(to: contentURL, options: .atomic)
+            try Data(markdown.utf8).write(to: sourceURL, options: .atomic)
+            try Data(markdown.utf8).write(to: revisionURL, options: .atomic)
             try fileManager.moveItem(at: temporaryURL, to: destinationURL)
         } catch {
             try? fileManager.removeItem(at: temporaryURL)
@@ -964,6 +1804,663 @@ public actor StudyNotesStore {
             ),
             markdown: markdown
         )
+    }
+
+    private func importRequest(
+        data: Data,
+        fileExtension: String,
+        fallbackTitle: String
+    ) throws -> ImportRequest {
+        let normalizedExtension = fileExtension.lowercased()
+        switch normalizedExtension {
+        case "md", "markdown", "mdown":
+            guard let markdown = String(data: data, encoding: .utf8) else {
+                throw StudyNotesContentError.unreadableFile
+            }
+            return ImportRequest(
+                kind: .markdown,
+                title: titleForImportedMarkdown(markdown, fallback: fallbackTitle),
+                markdown: markdown
+            )
+        case "html", "htm":
+            guard let html = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .isoLatin1) else {
+                throw StudyNotesContentError.unreadableFile
+            }
+            let markdown = HTMLTextExtractor.htmlToMarkdown(
+                HTMLTextExtractor.extractReadableHTML(html)
+            )
+            guard !markdown.isEmpty else {
+                throw StudyNotesContentError.invalidWebArticle
+            }
+            return ImportRequest(
+                kind: .html,
+                title: HTMLTextExtractor.title(from: html) ?? fallbackTitle,
+                markdown: markdown
+            )
+        case "pdf":
+            guard PDFDocument(data: data) != nil else {
+                throw StudyNotesContentError.invalidPDF
+            }
+            return ImportRequest(
+                kind: .pdf,
+                title: fallbackTitle,
+                markdown: ""
+            )
+        case "png", "jpg", "jpeg", "gif", "webp", "heic", "avif", "tif", "tiff", "bmp":
+            guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  CGImageSourceCreateImageAtIndex(source, 0, nil) != nil else {
+                throw StudyNotesContentError.invalidImage
+            }
+            return ImportRequest(
+                kind: .image,
+                title: fallbackTitle,
+                markdown: ""
+            )
+        default:
+            throw StudyNotesContentError.unsupportedFileType(normalizedExtension)
+        }
+    }
+
+    private func titleForImportedMarkdown(_ markdown: String, fallback: String) -> String {
+        let heading = markdown
+            .split(separator: "\n")
+            .first { $0.trimmingCharacters(in: .whitespaces).hasPrefix("# ") }
+            .map {
+                String($0.trimmingCharacters(in: .whitespaces).dropFirst(2))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        return heading?.isEmpty == false ? heading! : fallback
+    }
+
+    private func createImportedPackage(
+        request: ImportRequest,
+        sourceData: Data,
+        sourceFileName: String,
+        fingerprint: String,
+        knowledgeBaseID: UUID?,
+        folderPath: String,
+        tags: [String],
+        rootURL: URL
+    ) throws -> StudyMaterialSummary {
+        let now = Date()
+        let materialID = UUID()
+        let revisionID = UUID()
+        let manifest = MaterialManifest(
+            schemaVersion: StudyNotesKit.schemaVersion,
+            id: materialID,
+            knowledgeBaseID: knowledgeBaseID,
+            kind: request.kind,
+            title: request.title.trimmingCharacters(in: .whitespacesAndNewlines),
+            createdAt: now,
+            updatedAt: now,
+            folderPath: folderPath,
+            tags: normalizedTags(tags),
+            deletedAt: nil,
+            originalLocation: nil,
+            originalSourceURL: request.originalSourceURL,
+            sourceFileName: sourceFileName,
+            contentVersionID: revisionID,
+            sourceFingerprint: fingerprint,
+            contentFingerprint: ContentFingerprint.sha256(request.markdown)
+        )
+        let destinationDirectory = try destinationDirectory(
+            knowledgeBaseID: knowledgeBaseID,
+            folderPath: folderPath,
+            rootURL: rootURL
+        )
+        let destinationURL = destinationDirectory.appending(
+            path: "\(materialID.uuidString).studyitem",
+            directoryHint: .isDirectory
+        )
+        guard !fileManager.fileExists(atPath: destinationURL.path) else {
+            throw StudyNotesError.materialAlreadyExists
+        }
+        let temporaryURL = destinationDirectory.appending(
+            path: ".tmp-\(materialID.uuidString)",
+            directoryHint: .isDirectory
+        )
+        let sourceURL = temporaryURL
+            .appending(path: "source", directoryHint: .isDirectory)
+            .appending(path: sourceFileName)
+        let contentURL = temporaryURL
+            .appending(path: "content", directoryHint: .isDirectory)
+            .appending(path: request.kind == .note ? "note.md" : "readable.md")
+        let revisionURL = temporaryURL
+            .appending(path: "revisions", directoryHint: .isDirectory)
+            .appending(path: "\(revisionID.uuidString).md")
+
+        do {
+            for directory in [
+                sourceURL.deletingLastPathComponent(),
+                contentURL.deletingLastPathComponent(),
+                revisionURL.deletingLastPathComponent()
+            ] {
+                try fileManager.createDirectory(
+                    at: directory,
+                    withIntermediateDirectories: true
+                )
+            }
+            try sourceData.write(to: sourceURL, options: .atomic)
+            if request.kind.isTextDocument {
+                try Data(request.markdown.utf8).write(to: contentURL, options: .atomic)
+                try Data(request.markdown.utf8).write(to: revisionURL, options: .atomic)
+            }
+            if !request.media.isEmpty {
+                let mediaDirectory = temporaryURL
+                    .appending(path: "source", directoryHint: .isDirectory)
+                    .appending(path: "media", directoryHint: .isDirectory)
+                try fileManager.createDirectory(
+                    at: mediaDirectory,
+                    withIntermediateDirectories: true
+                )
+                for item in request.media {
+                    try item.data.write(
+                        to: mediaDirectory.appending(path: item.fileName),
+                        options: .atomic
+                    )
+                }
+            }
+            try encode(manifest).write(
+                to: temporaryURL.appending(path: "manifest.json"),
+                options: .atomic
+            )
+            try fileManager.moveItem(at: temporaryURL, to: destinationURL)
+        } catch {
+            try? fileManager.removeItem(at: temporaryURL)
+            throw error
+        }
+
+        return manifest.summary(
+            knowledgeBaseID: knowledgeBaseID,
+            folderPath: folderPath,
+            conflictCopies: []
+        )
+    }
+
+    private func findDuplicate(
+        fingerprint: String,
+        rootURL: URL
+    ) throws -> StudyMaterialSummary? {
+        for knowledgeBase in try loadKnowledgeBases(rootURL: rootURL) {
+            let scan = try scanMaterialPackages(
+                in: knowledgeBaseURL(id: knowledgeBase.id, rootURL: rootURL),
+                knowledgeBaseID: knowledgeBase.id
+            )
+            if let package = scan.packages.first(where: {
+                $0.manifest?.sourceFingerprint == fingerprint
+            }), let manifest = package.manifest {
+                return manifest.summary(
+                    knowledgeBaseID: knowledgeBase.id,
+                    folderPath: package.folderPath,
+                    conflictCopies: []
+                )
+            }
+        }
+        let inbox = try scanMaterialPackages(
+            in: inboxURL(at: rootURL),
+            knowledgeBaseID: nil
+        )
+        if let package = inbox.packages.first(where: {
+            $0.manifest?.sourceFingerprint == fingerprint
+        }), let manifest = package.manifest {
+            return manifest.summary(
+                knowledgeBaseID: nil,
+                folderPath: package.folderPath,
+                conflictCopies: []
+            )
+        }
+        return nil
+    }
+
+    private func contentFileURL(
+        kind: StudyMaterialKind,
+        packageURL: URL
+    ) -> URL? {
+        guard kind.isTextDocument else {
+            return nil
+        }
+        return packageURL
+            .appending(path: "content", directoryHint: .isDirectory)
+            .appending(path: kind == .note ? "note.md" : "readable.md")
+    }
+
+    private func mediaFileURLs(in packageURL: URL) -> [String: URL] {
+        let directory = packageURL
+            .appending(path: "source", directoryHint: .isDirectory)
+            .appending(path: "media", directoryHint: .isDirectory)
+        guard let files = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return [:]
+        }
+        return Dictionary(uniqueKeysWithValues: files.map { ($0.lastPathComponent, $0) })
+    }
+
+    private func readerText(
+        packageURL: URL,
+        kind: StudyMaterialKind
+    ) throws -> String {
+        if let contentURL = contentFileURL(kind: kind, packageURL: packageURL),
+           fileManager.fileExists(atPath: contentURL.path) {
+            return try String(contentsOf: contentURL, encoding: .utf8)
+        }
+        guard kind == .pdf else {
+            return ""
+        }
+        let sourceURL = packageURL
+            .appending(path: "source", directoryHint: .isDirectory)
+            .appending(path: "original.pdf")
+        guard let document = PDFDocument(url: sourceURL) else {
+            throw StudyNotesContentError.invalidPDF
+        }
+        return (0..<document.pageCount)
+            .compactMap { document.page(at: $0)?.string }
+            .joined(separator: "\n")
+    }
+
+    private func revisions(
+        packageURL: URL,
+        materialID: UUID
+    ) throws -> [TextRevision] {
+        let directory = packageURL
+            .appending(path: "revisions", directoryHint: .isDirectory)
+        guard fileManager.fileExists(atPath: directory.path) else {
+            return []
+        }
+        let files = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.creationDateKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        )
+        return try files
+            .filter { $0.pathExtension.lowercased() == "md" }
+            .compactMap { url -> TextRevision? in
+                guard let id = UUID(uuidString: url.deletingPathExtension().lastPathComponent) else {
+                    return nil
+                }
+                let values = try url.resourceValues(
+                    forKeys: [.creationDateKey, .contentModificationDateKey]
+                )
+                return TextRevision(
+                    id: id,
+                    materialID: materialID,
+                    createdAt: values.creationDate ?? values.contentModificationDate ?? .distantPast,
+                    text: try String(contentsOf: url, encoding: .utf8)
+                )
+            }
+            .sorted {
+                if $0.createdAt == $1.createdAt {
+                    return $0.id.uuidString > $1.id.uuidString
+                }
+                return $0.createdAt > $1.createdAt
+            }
+    }
+
+    private func appendRevision(
+        text: String,
+        packageURL: URL,
+        materialID: UUID
+    ) throws -> TextRevision {
+        let id = UUID()
+        let directory = packageURL
+            .appending(path: "revisions", directoryHint: .isDirectory)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let fileURL = directory.appending(path: "\(id.uuidString).md")
+        try Data(text.utf8).write(to: fileURL, options: .atomic)
+        let revision = TextRevision(
+            id: id,
+            materialID: materialID,
+            createdAt: Date(),
+            text: text
+        )
+        let all = try revisions(packageURL: packageURL, materialID: materialID)
+        for oldRevision in all.dropFirst(10) {
+            try? fileManager.removeItem(
+                at: directory.appending(
+                    path: "\(oldRevision.id.uuidString).md"
+                )
+            )
+        }
+        return revision
+    }
+
+    private func loadAnnotationFiles(
+        packageURL: URL,
+        materialID: UUID
+    ) throws -> [MaterialAnnotation] {
+        let directory = packageURL
+            .appending(path: "annotations", directoryHint: .isDirectory)
+        guard fileManager.fileExists(atPath: directory.path) else {
+            return []
+        }
+        let files = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+        var annotations: [MaterialAnnotation] = []
+        for url in files where url.pathExtension.lowercased() == "json" {
+            let data: Data
+            do {
+                data = try Data(contentsOf: url)
+            } catch {
+                preserveUnreadableStudyArtifact(
+                    at: url,
+                    packageURL: packageURL,
+                    layer: "annotations",
+                    reason: error.localizedDescription
+                )
+                continue
+            }
+            do {
+                let annotation = try decoder.decode(MaterialAnnotation.self, from: data)
+                guard annotation.materialID == materialID else {
+                    preserveUnreadableStudyArtifact(
+                        at: url,
+                        data: data,
+                        packageURL: packageURL,
+                        layer: "annotations",
+                        reason: "标注 materialID 与材料包不一致。"
+                    )
+                    continue
+                }
+                annotations.append(annotation)
+            } catch {
+                preserveUnreadableStudyArtifact(
+                    at: url,
+                    data: data,
+                    packageURL: packageURL,
+                    layer: "annotations",
+                    reason: error.localizedDescription
+                )
+            }
+        }
+        return annotations.sorted {
+            if $0.createdAt == $1.createdAt {
+                return $0.id.uuidString < $1.id.uuidString
+            }
+            return $0.createdAt > $1.createdAt
+        }
+    }
+
+    private func writeAnnotation(
+        _ annotation: MaterialAnnotation,
+        packageURL: URL
+    ) throws {
+        let directory = packageURL
+            .appending(path: "annotations", directoryHint: .isDirectory)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        try encode(annotation).write(
+            to: directory.appending(path: "\(annotation.id.uuidString).json"),
+            options: .atomic
+        )
+    }
+
+    private func resolvedAnnotationStatus(
+        _ annotation: MaterialAnnotation,
+        text: String,
+        packageURL: URL,
+        kind: StudyMaterialKind
+    ) -> AnnotationStatus {
+        switch annotation.anchor.kind {
+        case .text, .pdfText:
+            return TextAnchorResolver.range(for: annotation.anchor, in: text) == nil
+                ? AnnotationStatus.unresolved
+                : AnnotationStatus.active
+        case .imageRect:
+            return annotation.anchor.rect == nil
+                ? AnnotationStatus.unresolved
+                : AnnotationStatus.active
+        case .pdfPageRect:
+            guard let pageIndex = annotation.anchor.pageIndex,
+                  annotation.anchor.rect != nil else {
+                return .unresolved
+            }
+            guard kind == .pdf else {
+                return .unresolved
+            }
+            let sourceURL = packageURL
+                .appending(path: "source", directoryHint: .isDirectory)
+                .appending(path: "original.pdf")
+            guard let document = PDFDocument(url: sourceURL),
+                  (0..<document.pageCount).contains(pageIndex) else {
+                return .unresolved
+            }
+            return .active
+        }
+    }
+
+    private func sameAnchorLocation(
+        _ left: AnnotationAnchor,
+        _ right: AnnotationAnchor
+    ) -> Bool {
+        guard left.kind == right.kind else {
+            return false
+        }
+        if let leftRect = left.rect, let rightRect = right.rect {
+            return left.pageIndex == right.pageIndex
+                && abs(leftRect.x - rightRect.x) < 0.005
+                && abs(leftRect.y - rightRect.y) < 0.005
+                && abs(leftRect.width - rightRect.width) < 0.005
+                && abs(leftRect.height - rightRect.height) < 0.005
+        }
+        guard left.excerpt == right.excerpt else {
+            return false
+        }
+        if let leftOffset = left.offset, let rightOffset = right.offset {
+            return abs(leftOffset - rightOffset) <= 2
+        }
+        return left.prefix == right.prefix && left.suffix == right.suffix
+    }
+
+    private func conversationFiles(packageURL: URL) throws -> [AIConversation] {
+        let directory = packageURL
+            .appending(path: "ai", directoryHint: .isDirectory)
+        guard fileManager.fileExists(atPath: directory.path) else {
+            return []
+        }
+        let files = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+        var conversations: [AIConversation] = []
+        for url in files where url.pathExtension.lowercased() == "json" {
+            let data: Data
+            do {
+                data = try Data(contentsOf: url)
+            } catch {
+                preserveUnreadableStudyArtifact(
+                    at: url,
+                    packageURL: packageURL,
+                    layer: "ai",
+                    reason: error.localizedDescription
+                )
+                continue
+            }
+            do {
+                conversations.append(try decoder.decode(AIConversation.self, from: data))
+            } catch {
+                preserveUnreadableStudyArtifact(
+                    at: url,
+                    data: data,
+                    packageURL: packageURL,
+                    layer: "ai",
+                    reason: error.localizedDescription
+                )
+            }
+        }
+        return conversations.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    private func preserveUnreadableStudyArtifact(
+        at fileURL: URL,
+        data: Data? = nil,
+        packageURL: URL,
+        layer: String,
+        reason: String
+    ) {
+        let conflictDirectory = layer.isEmpty
+            ? packageURL.appending(path: "conflicts", directoryHint: .isDirectory)
+            : packageURL
+                .appending(path: layer, directoryHint: .isDirectory)
+                .appending(path: "conflicts", directoryHint: .isDirectory)
+        do {
+            try fileManager.createDirectory(
+                at: conflictDirectory,
+                withIntermediateDirectories: true
+            )
+            let suffix = "\(Int(Date().timeIntervalSince1970))-\(UUID().uuidString.prefix(8))"
+            let baseName = fileURL.deletingPathExtension().lastPathComponent
+            let preservedURL = conflictDirectory.appending(
+                path: "\(baseName).\(suffix).unreadable.json"
+            )
+            let preservedData = try data ?? Data(contentsOf: fileURL)
+            try preservedData.write(to: preservedURL, options: .atomic)
+            try Data(reason.utf8).write(
+                to: preservedURL
+                    .deletingPathExtension()
+                    .appendingPathExtension("error.txt"),
+                options: .atomic
+            )
+        } catch {
+            // Preserve other readable study data even if the diagnostic copy fails.
+        }
+    }
+
+    private func searchableDocuments(rootURL: URL) throws -> [SearchableDocument] {
+        var packages: [(ScannedPackage, UUID?)] = []
+        for knowledgeBase in try loadKnowledgeBases(rootURL: rootURL) {
+            let scan = try scanMaterialPackages(
+                in: knowledgeBaseURL(id: knowledgeBase.id, rootURL: rootURL),
+                knowledgeBaseID: knowledgeBase.id
+            )
+            packages.append(contentsOf: scan.packages.map { ($0, knowledgeBase.id) })
+        }
+        let inbox = try scanMaterialPackages(
+            in: inboxURL(at: rootURL),
+            knowledgeBaseID: nil
+        )
+        packages.append(contentsOf: inbox.packages.map { ($0, nil) })
+
+        return try packages.compactMap { package, knowledgeBaseID in
+            guard let manifest = package.manifest else {
+                return nil
+            }
+            let text = try readerText(
+                packageURL: package.packageURL,
+                kind: manifest.kind
+            )
+            let annotations = try loadAnnotationFiles(
+                packageURL: package.packageURL,
+                materialID: manifest.id
+            )
+            .map { [$0.quote, $0.note].joined(separator: "\n") }
+            .joined(separator: "\n")
+            let ai = try conversationFiles(packageURL: package.packageURL)
+                .flatMap(\.messages)
+                .map(\.content)
+                .joined(separator: "\n")
+            return SearchableDocument(
+                materialID: manifest.id,
+                knowledgeBaseID: knowledgeBaseID,
+                kind: manifest.kind,
+                title: manifest.title,
+                body: text,
+                annotations: annotations,
+                ai: ai,
+                tags: manifest.tags,
+                updatedAt: manifest.updatedAt
+            )
+        }
+    }
+
+    private func ensureSearchIndex(rootURL: URL) throws -> StudyNotesSearchIndex {
+        if let searchIndex {
+            return searchIndex
+        }
+        let databaseURL: URL
+        if let explicitDerivedDataURL {
+            databaseURL = explicitDerivedDataURL
+        } else {
+            let applicationSupport = try fileManager.url(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            )
+            databaseURL = applicationSupport
+                .appending(path: "StudyNotes", directoryHint: .isDirectory)
+                .appending(path: "Index", directoryHint: .isDirectory)
+                .appending(
+                    path: "\(ContentFingerprint.sha256(rootURL.path).prefix(20)).sqlite"
+                )
+        }
+        let index = StudyNotesSearchIndex(databaseURL: databaseURL)
+        searchIndex = index
+        return index
+    }
+
+    private func publishMediaItems(packageURL: URL) throws -> [PublishMediaItem] {
+        let directory = packageURL
+            .appending(path: "source", directoryHint: .isDirectory)
+            .appending(path: "media", directoryHint: .isDirectory)
+        guard fileManager.fileExists(atPath: directory.path) else {
+            return []
+        }
+        return try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles]
+        )
+        .map { url in
+            let data = try Data(contentsOf: url)
+            let values = try url.resourceValues(forKeys: [.fileSizeKey])
+            return PublishMediaItem(
+                id: url.lastPathComponent,
+                fileName: url.lastPathComponent,
+                localPath: url.path,
+                contentHash: ContentFingerprint.sha256(data),
+                mediaType: mediaType(forFileName: url.lastPathComponent),
+                byteCount: values.fileSize ?? data.count,
+                state: .pendingCredentials
+            )
+        }
+        .sorted { $0.fileName < $1.fileName }
+    }
+
+    private func mediaType(forFileName fileName: String) -> String {
+        switch URL(fileURLWithPath: fileName).pathExtension.lowercased() {
+        case "png":
+            "image/png"
+        case "gif":
+            "image/gif"
+        case "webp":
+            "image/webp"
+        case "heic":
+            "image/heic"
+        case "avif":
+            "image/avif"
+        default:
+            "image/jpeg"
+        }
+    }
+
+    private func localizeWebMediaReferences(
+        _ markdown: String,
+        media: [WebArticleMedia]
+    ) -> String {
+        var result = markdown
+        for item in media {
+            result = result.replacingOccurrences(
+                of: item.sourceURL.absoluteString,
+                with: "media://\(item.fileName)"
+            )
+        }
+        return result
     }
 
     private func availableRootURL() throws -> URL {
@@ -1228,6 +2725,208 @@ public actor StudyNotesStore {
             }
         }
         return false
+    }
+
+    private func scanInboxDrafts(in containerURL: URL) throws -> [InboxDraftPackage] {
+        guard fileManager.fileExists(atPath: containerURL.path) else {
+            return []
+        }
+        let children = try fileManager.contentsOfDirectory(
+            at: containerURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        var drafts: [InboxDraftPackage] = []
+        for childURL in children where
+            childURL.pathExtension == "inboxitem" && isRegularDirectory(childURL) {
+            let manifestURL = childURL.appending(path: "manifest.json")
+            do {
+                let data = try Data(contentsOf: manifestURL)
+                let manifest = try decoder.decode(
+                    CrossPlatformInboxManifest.self,
+                    from: data
+                )
+                guard fileManager.fileExists(
+                    atPath: childURL.appending(path: manifest.payloadFile).path
+                ) else {
+                    preserveUnreadableStudyArtifact(
+                        at: manifestURL,
+                        data: data,
+                        packageURL: childURL,
+                        layer: "",
+                        reason: "收件箱草稿缺少载荷文件 \(manifest.payloadFile)。"
+                    )
+                    continue
+                }
+                drafts.append(
+                    InboxDraftPackage(packageURL: childURL, manifest: manifest)
+                )
+            } catch {
+                preserveUnreadableStudyArtifact(
+                    at: manifestURL,
+                    packageURL: childURL,
+                    layer: "",
+                    reason: error.localizedDescription
+                )
+            }
+        }
+        return drafts.sorted { $0.manifest.createdAt > $1.manifest.createdAt }
+    }
+
+    private func locateInboxDraft(
+        id: UUID,
+        rootURL: URL
+    ) throws -> InboxDraftPackage? {
+        try scanInboxDrafts(in: inboxURL(at: rootURL)).first {
+            $0.manifest.id == id
+        }
+    }
+
+    private func inboxDraftSummary(_ draft: InboxDraftPackage) -> StudyMaterialSummary {
+        StudyMaterialSummary(
+            id: draft.manifest.id,
+            knowledgeBaseID: nil,
+            kind: draft.studyMaterialKind,
+            title: draft.manifest.title,
+            updatedAt: draft.manifest.createdAt,
+            conflictCopies: [],
+            folderPath: "",
+            tags: [],
+            originalSourceURL: draft.originalSourceURL
+        )
+    }
+
+    private func loadInboxDraftDocument(
+        _ draft: InboxDraftPackage
+    ) throws -> MaterialDocument {
+        let payloadURL = draft.packageURL.appending(path: draft.manifest.payloadFile)
+        let data = try Data(contentsOf: payloadURL)
+        let markdown: String
+        switch draft.manifest.kind {
+        case .url:
+            let value = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? draft.manifest.title
+            markdown = "# \(draft.manifest.title)\n\n[打开原始链接](\(value))"
+        case .text:
+            markdown = String(data: data, encoding: .utf8) ?? ""
+        case .image:
+            markdown = ""
+        }
+        let mediaURLs = draft.manifest.kind == .image
+            ? [draft.manifest.payloadFile: payloadURL]
+            : [:]
+        let content = ReaderContentBuilder.build(
+            markdown: markdown,
+            title: draft.manifest.title,
+            mediaURLs: mediaURLs
+        )
+        return MaterialDocument(
+            summary: inboxDraftSummary(draft),
+            markdown: markdown,
+            renderedHTML: content.html,
+            headings: content.headings,
+            sourceURL: draft.packageURL,
+            sourceFileURL: draft.manifest.kind == .image ? payloadURL : nil,
+            mediaURLs: mediaURLs
+        )
+    }
+
+    private func inboxDraftMaterialManifest(
+        _ draft: InboxDraftPackage,
+        knowledgeBaseID: UUID?,
+        folderPath: String
+    ) throws -> MaterialManifest {
+        let payload = try Data(contentsOf: draft.payloadURL)
+        let payloadExtension = draft.payloadURL.pathExtension.lowercased()
+        let kind = draft.studyMaterialKind
+        return MaterialManifest(
+            schemaVersion: StudyNotesKit.schemaVersion,
+            id: draft.manifest.id,
+            knowledgeBaseID: knowledgeBaseID,
+            kind: kind,
+            title: draft.manifest.title,
+            createdAt: draft.manifest.createdAt,
+            updatedAt: Date(),
+            folderPath: folderPath,
+            tags: [],
+            deletedAt: nil,
+            originalLocation: nil,
+            originalSourceURL: draft.originalSourceURL,
+            sourceFileName: kind == .image && !payloadExtension.isEmpty
+                ? "original.\(payloadExtension)"
+                : nil,
+            contentVersionID: UUID(),
+            sourceFingerprint: ContentFingerprint.sha256(payload),
+            contentFingerprint: String(data: payload, encoding: .utf8).map {
+                ContentFingerprint.sha256(Data($0.utf8))
+            }
+        )
+    }
+
+    private func materializeInboxDraft(
+        _ draft: InboxDraftPackage,
+        destinationURL: URL,
+        manifest: MaterialManifest
+    ) throws {
+        let parentURL = destinationURL.deletingLastPathComponent()
+        let temporaryURL = parentURL.appending(
+            path: ".tmp-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        try fileManager.createDirectory(
+            at: temporaryURL,
+            withIntermediateDirectories: false
+        )
+        do {
+            let contentDirectory = temporaryURL.appending(
+                path: "content",
+                directoryHint: .isDirectory
+            )
+            let sourceDirectory = temporaryURL.appending(
+                path: "source",
+                directoryHint: .isDirectory
+            )
+            try fileManager.createDirectory(
+                at: contentDirectory,
+                withIntermediateDirectories: true
+            )
+            let payload = try Data(contentsOf: draft.payloadURL)
+            if manifest.kind == .image {
+                try fileManager.createDirectory(
+                    at: sourceDirectory,
+                    withIntermediateDirectories: true
+                )
+                try payload.write(
+                    to: sourceDirectory.appending(path: manifest.sourceFileName ?? "original"),
+                    options: .atomic
+                )
+            } else {
+                let markdown: String
+                switch draft.manifest.kind {
+                case .url:
+                    let value = String(data: payload, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        ?? draft.manifest.title
+                    markdown = "# \(draft.manifest.title)\n\n[打开原始链接](\(value))"
+                case .text, .image:
+                    markdown = String(data: payload, encoding: .utf8) ?? ""
+                }
+                try Data(markdown.utf8).write(
+                    to: contentDirectory.appending(
+                        path: manifest.kind == .note ? "note.md" : "readable.md"
+                    ),
+                    options: .atomic
+                )
+            }
+            try encode(manifest).write(
+                to: temporaryURL.appending(path: "manifest.json"),
+                options: .atomic
+            )
+            try fileManager.moveItem(at: temporaryURL, to: destinationURL)
+        } catch {
+            try? fileManager.removeItem(at: temporaryURL)
+            throw error
+        }
     }
 
     private func scanMaterialPackages(
@@ -1783,16 +3482,11 @@ public actor StudyNotesStore {
     }
 
     private var encoder: JSONEncoder {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return encoder
+        CrossPlatformJSON.encoder()
     }
 
     private var decoder: JSONDecoder {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return decoder
+        CrossPlatformJSON.decoder()
     }
 }
 
@@ -1808,6 +3502,13 @@ private struct MaterialManifest: Codable, Equatable, Sendable {
     var tags: [String]
     var deletedAt: Date?
     var originalLocation: MaterialOriginalLocation?
+    var linkedMaterialIDs: [UUID]
+    var originalSourceURL: URL?
+    var sourceFileName: String?
+    var contentVersionID: UUID?
+    var sourceFingerprint: String?
+    var contentFingerprint: String?
+    var publishMapping: PublishMapping?
 
     init(
         schemaVersion: Int,
@@ -1820,7 +3521,14 @@ private struct MaterialManifest: Codable, Equatable, Sendable {
         folderPath: String,
         tags: [String],
         deletedAt: Date?,
-        originalLocation: MaterialOriginalLocation?
+        originalLocation: MaterialOriginalLocation?,
+        linkedMaterialIDs: [UUID] = [],
+        originalSourceURL: URL? = nil,
+        sourceFileName: String? = nil,
+        contentVersionID: UUID? = nil,
+        sourceFingerprint: String? = nil,
+        contentFingerprint: String? = nil,
+        publishMapping: PublishMapping? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.id = id
@@ -1833,6 +3541,13 @@ private struct MaterialManifest: Codable, Equatable, Sendable {
         self.tags = tags
         self.deletedAt = deletedAt
         self.originalLocation = originalLocation
+        self.linkedMaterialIDs = linkedMaterialIDs
+        self.originalSourceURL = originalSourceURL
+        self.sourceFileName = sourceFileName
+        self.contentVersionID = contentVersionID
+        self.sourceFingerprint = sourceFingerprint
+        self.contentFingerprint = contentFingerprint
+        self.publishMapping = publishMapping
     }
 
     init(from decoder: Decoder) throws {
@@ -1851,6 +3566,16 @@ private struct MaterialManifest: Codable, Equatable, Sendable {
             MaterialOriginalLocation.self,
             forKey: .originalLocation
         )
+        linkedMaterialIDs = try container.decodeIfPresent(
+            [UUID].self,
+            forKey: .linkedMaterialIDs
+        ) ?? []
+        originalSourceURL = try container.decodeIfPresent(URL.self, forKey: .originalSourceURL)
+        sourceFileName = try container.decodeIfPresent(String.self, forKey: .sourceFileName)
+        contentVersionID = try container.decodeIfPresent(UUID.self, forKey: .contentVersionID)
+        sourceFingerprint = try container.decodeIfPresent(String.self, forKey: .sourceFingerprint)
+        contentFingerprint = try container.decodeIfPresent(String.self, forKey: .contentFingerprint)
+        publishMapping = try container.decodeIfPresent(PublishMapping.self, forKey: .publishMapping)
     }
 
     func summary(
@@ -1867,7 +3592,10 @@ private struct MaterialManifest: Codable, Equatable, Sendable {
             conflictCopies: conflictCopies,
             folderPath: folderPath,
             tags: tags,
-            deletedAt: deletedAt
+            deletedAt: deletedAt,
+            linkedMaterialIDs: linkedMaterialIDs,
+            originalSourceURL: originalSourceURL,
+            publishMapping: publishMapping
         )
     }
 }
@@ -1877,10 +3605,48 @@ private struct MaterialOriginalLocation: Codable, Equatable, Sendable {
     let folderPath: String
 }
 
+private struct ImportRequest: Sendable {
+    let kind: StudyMaterialKind
+    let title: String
+    let markdown: String
+    var originalSourceURL: URL? = nil
+    var media: [WebArticleMedia] = []
+    var mediaFailures: [WebArticleMediaFailure] = []
+}
+
 private struct ScannedPackage {
     let packageURL: URL
     let folderPath: String
     let manifest: MaterialManifest?
+}
+
+private struct InboxDraftPackage {
+    let packageURL: URL
+    let manifest: CrossPlatformInboxManifest
+
+    var payloadURL: URL {
+        packageURL.appending(path: manifest.payloadFile)
+    }
+
+    var studyMaterialKind: StudyMaterialKind {
+        switch manifest.kind {
+        case .url:
+            .webArticle
+        case .image:
+            .image
+        case .text:
+            .note
+        }
+    }
+
+    var originalSourceURL: URL? {
+        guard manifest.kind == .url,
+              let value = try? String(contentsOf: payloadURL, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return nil
+        }
+        return URL(string: value)
+    }
 }
 
 private struct CompletedPackageMove {

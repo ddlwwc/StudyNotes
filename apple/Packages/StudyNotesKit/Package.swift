@@ -5,6 +5,7 @@ import PackageDescription
 let package = Package(
     name: "StudyNotesKit",
     platforms: [
+        .iOS(.v17),
         .macOS(.v15)
     ],
     products: [

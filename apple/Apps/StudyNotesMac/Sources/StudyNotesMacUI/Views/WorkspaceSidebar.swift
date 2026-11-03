@@ -27,7 +27,7 @@ struct WorkspaceSidebar: View {
 
                     SidebarNavigationRow(
                         title: "收件箱",
-                        systemImage: "inbox",
+                        systemImage: "tray",
                         count: model.inboxMaterials.count,
                         isSelected: model.selectedCollection == .inbox,
                         isEnabled: model.isConnected

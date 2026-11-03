@@ -8,6 +8,9 @@ struct MaterialListPane: View {
         VStack(spacing: 0) {
             header
             searchField
+            if !model.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                searchFilters
+            }
 
             if let actionNotice = model.actionNotice {
                 actionNoticeBanner(actionNotice)
@@ -85,7 +88,7 @@ struct MaterialListPane: View {
                 .font(.system(size: 12))
                 .foregroundStyle(SNColor.muted)
 
-            TextField("搜索标题、文件夹或标签", text: $model.searchText)
+            TextField("搜索标题、正文、笔记、标注与 AI", text: $model.searchText)
                 .textFieldStyle(.plain)
                 .font(.sn(11))
                 .foregroundStyle(SNColor.text)
@@ -113,6 +116,74 @@ struct MaterialListPane: View {
                 .stroke(SNColor.border, lineWidth: 1)
         }
         .padding(.horizontal, 12)
+    }
+
+    private var searchFilters: some View {
+        HStack(spacing: 6) {
+            Menu {
+                Button("全部类型") {
+                    model.searchKindFilter = nil
+                }
+                ForEach(
+                    [
+                        StudyMaterialKind.note,
+                        .markdown,
+                        .html,
+                        .webArticle,
+                        .pdf,
+                        .image
+                    ],
+                    id: \.rawValue
+                ) { kind in
+                    Button(kind.displayName) {
+                        model.searchKindFilter = kind
+                    }
+                }
+            } label: {
+                Label(
+                    model.searchKindFilter?.displayName ?? "全部类型",
+                    systemImage: "line.3.horizontal.decrease.circle"
+                )
+                .font(.sn(9))
+            }
+            .menuStyle(.borderlessButton)
+
+            Menu {
+                Button("不限时间") {
+                    model.searchUpdatedAfter = nil
+                }
+                Button("今天") {
+                    model.searchUpdatedAfter = Calendar.current.startOfDay(for: Date())
+                }
+                Button("最近 7 天") {
+                    model.searchUpdatedAfter = Date().addingTimeInterval(-7 * 86_400)
+                }
+                Button("最近 30 天") {
+                    model.searchUpdatedAfter = Date().addingTimeInterval(-30 * 86_400)
+                }
+            } label: {
+                Label(
+                    model.searchUpdatedAfter == nil ? "不限时间" : "已筛选时间",
+                    systemImage: "calendar"
+                )
+                .font(.sn(9))
+            }
+            .menuStyle(.borderlessButton)
+
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 30)
+        .onChange(of: model.searchKindFilter) {
+            Task {
+                await model.searchDidChange()
+            }
+        }
+        .onChange(of: model.searchUpdatedAfter) {
+            Task {
+                await model.searchDidChange()
+            }
+        }
     }
 
     private func actionNoticeBanner(_ message: String) -> some View {
@@ -169,7 +240,10 @@ struct MaterialListPane: View {
                     MaterialRow(
                         material: material,
                         isSelected: model.selectedMaterialIDs.contains(material.id),
-                        knowledgeBaseName: knowledgeBaseName(for: material.knowledgeBaseID)
+                        knowledgeBaseName: knowledgeBaseName(for: material.knowledgeBaseID),
+                        searchHit: model.searchHits.first {
+                            $0.materialID == material.id
+                        }
                     )
                     .tag(material.id)
                     .listRowInsets(EdgeInsets())
@@ -243,7 +317,7 @@ struct MaterialListPane: View {
         }
         return switch model.selectedCollection {
         case .inbox:
-            "inbox"
+            "tray"
         case .recycleBin:
             "trash"
         case .tag:
@@ -295,13 +369,18 @@ private struct MaterialRow: View {
     let material: StudyMaterialSummary
     let isSelected: Bool
     let knowledgeBaseName: String?
+    let searchHit: SearchHit?
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             ZStack {
                 RoundedRectangle(cornerRadius: 5)
                     .fill(isSelected ? SNColor.white.opacity(0.18) : SNColor.blueSoft)
-                Image(systemName: material.deletedAt == nil ? "doc.text" : "trash")
+                Image(
+                    systemName: material.deletedAt == nil
+                        ? material.kind.systemImage
+                        : "trash"
+                )
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(isSelected ? SNColor.white : SNColor.blue)
             }
@@ -326,10 +405,10 @@ private struct MaterialRow: View {
                     recycleLine(deletedAt: deletedAt)
                 }
 
-                Text(tagLine)
+                Text(searchHit?.snippet ?? tagLine)
                     .font(.sn(9))
                     .foregroundStyle(isSelected ? SNColor.white.opacity(0.82) : SNColor.muted)
-                    .lineLimit(1)
+                    .lineLimit(searchHit == nil ? 1 : 2)
             }
 
             Spacer(minLength: 4)
@@ -357,6 +436,10 @@ private struct MaterialRow: View {
                 if material.deletedAt == nil {
                     Text("·")
                 }
+            }
+            if material.deletedAt == nil {
+                Text(material.kind.displayName)
+                Text("·")
             }
             if material.deletedAt == nil {
                 Text(WorkspaceFormatting.updatedDate(material.updatedAt))

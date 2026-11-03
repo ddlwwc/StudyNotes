@@ -61,7 +61,7 @@ private struct SnapshotSidebar: View {
                 )
                 SnapshotSidebarRow(
                     title: "收件箱",
-                    systemImage: "inbox",
+                    systemImage: "tray",
                     count: "2"
                 )
                 SnapshotSidebarRow(
@@ -370,6 +370,7 @@ private struct SnapshotReader: View {
                 SnapshotReaderTool(title: "目录", systemImage: "list.bullet.rectangle")
                 SnapshotReaderTool(title: "搜索", systemImage: "magnifyingglass")
                 SnapshotReaderTool(title: "编辑副本", systemImage: "square.and.pencil")
+                SnapshotReaderTool(title: "版本", systemImage: "clock.arrow.circlepath")
                 Rectangle()
                     .fill(SNColor.border)
                     .frame(width: 1, height: 20)
@@ -512,20 +513,31 @@ private struct SnapshotStudyPanel: View {
                         .stroke(SNColor.yellowLine, lineWidth: 1)
                 }
 
-                VStack(spacing: 8) {
-                    Image(systemName: "tag")
-                        .font(.system(size: 22, weight: .light))
-                        .foregroundStyle(SNColor.muted)
-                    Text("标注数据层尚未接入")
-                        .font(.sn(11, weight: .medium))
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        Text("02")
+                            .font(.sn(10, weight: .medium))
+                            .foregroundStyle(SNColor.text)
+                        Spacer()
+                        Text("10月31日 09:18")
+                            .font(.sn(9))
+                            .foregroundStyle(SNColor.muted)
+                    }
+                    Text("“外在负荷由不恰当的呈现方式产生。”")
+                        .font(.snReading(12))
                         .foregroundStyle(SNColor.text)
-                    Text("当前构建不会读取或伪造持久化标注。")
-                        .font(.sn(9))
+                        .lineSpacing(3)
+                    Text("分段呈现与减少装饰性信息。")
+                        .font(.sn(10))
                         .foregroundStyle(SNColor.muted)
-                        .multilineTextAlignment(.center)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 18)
+                .padding(10)
+                .background(SNColor.white)
+                .clipShape(RoundedRectangle(cornerRadius: SNRadius.control))
+                .overlay {
+                    RoundedRectangle(cornerRadius: SNRadius.control)
+                        .stroke(SNColor.border, lineWidth: 1)
+                }
 
                 Spacer()
 
@@ -533,20 +545,35 @@ private struct SnapshotStudyPanel: View {
                     Text("向 AI 提问当前选段")
                         .font(.sn(11, weight: .medium))
                         .foregroundStyle(SNColor.ink)
-                    Text("AI 研读尚未配置，不会发送内容。")
+                    Text("示例预览 · 实际请求会先确认发送范围")
                         .font(.sn(9))
                         .foregroundStyle(SNColor.muted)
-                    Text("解释这段内容与外在负荷的关系")
-                        .font(.sn(10))
-                        .foregroundStyle(SNColor.muted)
-                        .padding(9)
-                        .frame(maxWidth: .infinity, minHeight: 58, alignment: .topLeading)
-                        .background(SNColor.white)
-                        .clipShape(RoundedRectangle(cornerRadius: SNRadius.control))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: SNRadius.control)
-                                .stroke(SNColor.border, lineWidth: 1)
-                        }
+                    HStack {
+                        Image(systemName: "text.quote")
+                        Text("解释这段内容与外在负荷的关系")
+                        Spacer()
+                    }
+                    .font(.sn(10))
+                    .foregroundStyle(SNColor.text)
+                    .padding(9)
+                    .frame(maxWidth: .infinity, minHeight: 58, alignment: .topLeading)
+                    .background(SNColor.white)
+                    .clipShape(RoundedRectangle(cornerRadius: SNRadius.control))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: SNRadius.control)
+                            .stroke(SNColor.border, lineWidth: 1)
+                    }
+
+                    HStack {
+                        Spacer()
+                        Label("解释选段", systemImage: "sparkles")
+                            .font(.sn(10, weight: .medium))
+                            .foregroundStyle(SNColor.white)
+                            .padding(.horizontal, 12)
+                            .frame(height: 30)
+                            .background(SNColor.blue)
+                            .clipShape(RoundedRectangle(cornerRadius: SNRadius.control))
+                    }
                 }
                 .padding(12)
                 .background(SNColor.white)

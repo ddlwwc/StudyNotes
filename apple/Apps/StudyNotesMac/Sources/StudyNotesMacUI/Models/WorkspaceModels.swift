@@ -132,3 +132,112 @@ public struct WorkspaceMoveFolderRequest: Identifiable, Equatable, Sendable {
         self.folder = folder
     }
 }
+
+public struct ReaderSelection: Equatable, Sendable {
+    public let quote: String
+    public let prefix: String
+    public let suffix: String
+    public let offset: Int
+    public let blockPath: [Int]
+    public let pageIndex: Int?
+    public let rect: NormalizedRect?
+    public let anchorKind: AnnotationAnchorKind?
+
+    public init(
+        quote: String,
+        prefix: String = "",
+        suffix: String = "",
+        offset: Int = 0,
+        blockPath: [Int] = [],
+        pageIndex: Int? = nil,
+        rect: NormalizedRect? = nil,
+        anchorKind: AnnotationAnchorKind? = .text
+    ) {
+        self.quote = quote
+        self.prefix = prefix
+        self.suffix = suffix
+        self.offset = offset
+        self.blockPath = blockPath
+        self.pageIndex = pageIndex
+        self.rect = rect
+        self.anchorKind = anchorKind
+    }
+
+    public var anchor: AnnotationAnchor {
+        AnnotationAnchor(
+            kind: anchorKind ?? .text,
+            excerpt: quote,
+            prefix: prefix,
+            suffix: suffix,
+            offset: offset,
+            blockPath: blockPath,
+            pageIndex: pageIndex,
+            rect: rect
+        )
+    }
+}
+
+public struct AnnotationDraftRequest: Identifiable, Equatable, Sendable {
+    public let id: UUID
+    public let materialID: UUID
+    public let annotationID: UUID?
+    public let quote: String
+    public let anchor: AnnotationAnchor
+    public let initialNote: String
+
+    public init(
+        id: UUID = UUID(),
+        materialID: UUID,
+        annotationID: UUID? = nil,
+        quote: String,
+        anchor: AnnotationAnchor,
+        initialNote: String = ""
+    ) {
+        self.id = id
+        self.materialID = materialID
+        self.annotationID = annotationID
+        self.quote = quote
+        self.anchor = anchor
+        self.initialNote = initialNote
+    }
+}
+
+public struct AIContextPreview: Identifiable, Equatable, Sendable {
+    public let id: UUID
+    public let profile: AIProviderProfile
+    public let prompt: String
+    public let context: String
+    public let origin: AIConversationOrigin
+    public let anchor: AnnotationAnchor?
+
+    public init(
+        id: UUID = UUID(),
+        profile: AIProviderProfile,
+        prompt: String,
+        context: String,
+        origin: AIConversationOrigin,
+        anchor: AnnotationAnchor?
+    ) {
+        self.id = id
+        self.profile = profile
+        self.prompt = prompt
+        self.context = context
+        self.origin = origin
+        self.anchor = anchor
+    }
+
+    public var approximateCharacterCount: Int {
+        prompt.count + context.count
+    }
+}
+
+public enum AIRequestPhase: Equatable, Sendable {
+    case idle
+    case streaming
+    case stopped
+    case failed(String)
+
+    public var isStreaming: Bool {
+        self == .streaming
+    }
+}

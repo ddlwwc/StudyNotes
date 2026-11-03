@@ -1,0 +1,6 @@
+figma-data/
+*.figma-snapshot.zip
+.DS_Store
+.idea/
+.scratch/
+output/

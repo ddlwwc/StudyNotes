@@ -33,6 +33,19 @@ struct StudyNotesMacApp: App {
             }
 
             CommandMenu("工作区") {
+                Button("导入材料…") {
+                    model.presentImportSheet()
+                }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
+                .disabled(!model.isConnected)
+
+                Button("导入网页文章…") {
+                    model.presentImportSheet(webArticle: true)
+                }
+                .disabled(!model.isConnected)
+
+                Divider()
+
                 Button("选择学习目录…") {
                     Task {
                         await model.chooseWorkspace()
@@ -47,6 +60,18 @@ struct StudyNotesMacApp: App {
                 }
                 .keyboardShortcut("r")
                 .disabled(!model.isConnected || model.isLoadingIndex)
+
+                Divider()
+
+                Button("AI 供应商设置…") {
+                    model.isShowingAIConfiguration = true
+                }
+
+                Button("发布预览…") {
+                    model.preparePublishPreview()
+                }
+                .keyboardShortcut("p", modifiers: [.command, .shift])
+                .disabled(!model.canPreviewPublish)
             }
         }
     }

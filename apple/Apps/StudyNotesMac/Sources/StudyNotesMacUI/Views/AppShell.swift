@@ -50,6 +50,33 @@ public struct AppShell: View {
         .sheet(isPresented: $model.isShowingEditTags) {
             EditTagsSheet(model: model)
         }
+        .sheet(isPresented: $model.isShowingImport) {
+            ImportMaterialSheet(model: model)
+        }
+        .sheet(isPresented: $model.isShowingWebImport) {
+            WebArticleImportSheet(model: model)
+        }
+        .sheet(isPresented: $model.isShowingEditReaderCopy) {
+            EditReaderCopySheet(model: model)
+        }
+        .sheet(isPresented: $model.isShowingVersions) {
+            VersionHistorySheet(model: model)
+        }
+        .sheet(isPresented: $model.isShowingLinkMaterials) {
+            LinkMaterialsSheet(model: model)
+        }
+        .sheet(isPresented: $model.isShowingAIConfiguration) {
+            AIConfigurationSheet(model: model)
+        }
+        .sheet(item: $model.pendingAIContext) { preview in
+            AIContextConfirmationSheet(model: model, preview: preview)
+        }
+        .sheet(item: $model.annotationDraftRequest) { request in
+            AnnotationEditorSheet(model: model, request: request)
+        }
+        .sheet(isPresented: $model.isShowingPublishPreview) {
+            PublishPreviewSheet(model: model)
+        }
         .confirmationDialog(
             "将 \(model.selectedMaterialIDs.count) 篇材料移入回收站？",
             isPresented: $model.isConfirmingRecycle,
@@ -89,6 +116,20 @@ public struct AppShell: View {
             if restoresWorkspace {
                 await model.restoreLastWorkspace()
             }
+        }
+        .dropDestination(for: URL.self) { urls, _ in
+            guard model.isConnected, !urls.isEmpty else {
+                return false
+            }
+            Task {
+                _ = await model.importFiles(
+                    urls,
+                    knowledgeBaseID: model.defaultImportKnowledgeBaseID,
+                    folderPath: model.defaultImportFolderPath,
+                    tags: []
+                )
+            }
+            return true
         }
     }
 

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4.5
+        env:
+          MYSQL_DATABASE: studynotes
+          MYSQL_USER: studynotes
+          MYSQL_PASSWORD: studynotes-local-password
+          MYSQL_ROOT_PASSWORD: studynotes-root-password
+        ports:
+          - 33066:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -ustudynotes -pstudynotes-local-password --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: mysql://studynotes:studynotes-local-password@127.0.0.1:33066/studynotes
+      MYSQL_INTEGRATION_TESTS: "1"
+      OPENAPI_CONTRACT_PATH: ${{ github.workspace }}/contracts/openapi.yaml
+      PUBLISH_REGISTRATION_SECRET: test-registration-secret
+      NEXT_TELEMETRY_DISABLED: "1"
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run db:migrate
+      - run: npx playwright install --with-deps chromium
+      - run: npm run verify
+      - run: npm run test:e2e

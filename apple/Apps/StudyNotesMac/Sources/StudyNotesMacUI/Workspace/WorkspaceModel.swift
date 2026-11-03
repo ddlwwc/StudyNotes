@@ -12,6 +12,18 @@ public final class WorkspaceModel {
     public private(set) var recycledMaterials: [StudyMaterialSummary] = []
     public private(set) var tags: [String] = []
     public private(set) var selectedNote: MarkdownNote?
+    public private(set) var selectedDocument: MaterialDocument?
+    public private(set) var annotations: [MaterialAnnotation] = []
+    public private(set) var conversations: [AIConversation] = []
+    public private(set) var revisions: [TextRevision] = []
+    public private(set) var searchHits: [SearchHit] = []
+    public private(set) var searchHitsQuery = ""
+    public private(set) var providerProfiles: [AIProviderProfile] = []
+    public private(set) var aiPhase: AIRequestPhase = .idle
+    public private(set) var aiStreamingText = ""
+    public private(set) var activeConversationID: UUID?
+    public var pendingAIContext: AIContextPreview?
+    public private(set) var publishPreview: PublishPreview?
     public private(set) var connectionState: WorkspaceConnectionState = .disconnected
     public private(set) var isLoadingIndex = false
     public private(set) var isLoadingNote = false
@@ -30,18 +42,56 @@ public final class WorkspaceModel {
     public var isShowingEditTags = false
     public var isConfirmingRecycle = false
     public var isConfirmingPurgeExpired = false
+    public var isShowingImport = false
+    public var isShowingWebImport = false
+    public var isShowingEditReaderCopy = false
+    public var isShowingVersions = false
+    public var isShowingLinkMaterials = false
+    public var isShowingAIConfiguration = false
+    public var isShowingPublishPreview = false
+    public var annotationDraftRequest: AnnotationDraftRequest?
+    public var selectedProviderID: UUID?
+    public var aiPromptText = ""
+    public var readerSelection: ReaderSelection?
+    public var annotationJumpID: UUID?
+    public var documentSearchText = ""
+    public var readerHeadingJumpID: String?
+    public var webArticleURLText = ""
+    public var webArticleDraft: WebArticleDraft?
+    public var webArticleMarkdown = ""
+    public var webArticleStatus = ""
+    public var isFetchingWebArticle = false
+    public var publishIncludeAnnotations = false
+    public var publishIncludeAI = false
+    public var searchKindFilter: StudyMaterialKind?
+    public var searchUpdatedAfter: Date?
     public var createFolderRequest: WorkspaceCreateFolderRequest?
     public var renameRequest: WorkspaceRenameTarget?
     public var moveFolderRequest: WorkspaceMoveFolderRequest?
 
     @ObservationIgnored private let rootStore: WorkspaceRootStore
     @ObservationIgnored private var store: StudyNotesStore?
+    @ObservationIgnored private let secretStore: any SecretStoring
+    @ObservationIgnored private let aiClient: OpenAICompatibleClient
+    @ObservationIgnored private let webArticleFetcher: WebArticleFetcher
+    @ObservationIgnored private var aiTask: Task<Void, Never>?
+    @ObservationIgnored private var aiStopRequested = false
     @ObservationIgnored private var didRestoreWorkspace = false
     @ObservationIgnored private var noteLoadGeneration = 0
     @ObservationIgnored private var refreshGeneration = 0
 
-    public init(rootStore: WorkspaceRootStore = WorkspaceRootStore()) {
+    public init(
+        rootStore: WorkspaceRootStore = WorkspaceRootStore(),
+        secretStore: any SecretStoring = KeychainSecretStore(),
+        aiClient: OpenAICompatibleClient = OpenAICompatibleClient(),
+        webArticleFetcher: WebArticleFetcher = WebArticleFetcher()
+    ) {
         self.rootStore = rootStore
+        self.secretStore = secretStore
+        self.aiClient = aiClient
+        self.webArticleFetcher = webArticleFetcher
+        providerProfiles = AIProviderSettingsStore.load()
+        selectedProviderID = providerProfiles.first?.id
     }
 
     public var isConnected: Bool {
@@ -97,6 +147,41 @@ public final class WorkspaceModel {
         }
     }
 
+    public var searchTagFilter: String? {
+        guard case let .tag(tag) = selectedCollection else {
+            return nil
+        }
+        return tag
+    }
+
+    public var selectedProvider: AIProviderProfile? {
+        guard let selectedProviderID else {
+            return providerProfiles.first
+        }
+        return providerProfiles.first { $0.id == selectedProviderID }
+    }
+
+    public var activeConversation: AIConversation? {
+        guard let activeConversationID else {
+            return nil
+        }
+        return conversations.first { $0.id == activeConversationID }
+    }
+
+    public var canExplainSelection: Bool {
+        selectedDocument != nil
+            && readerSelection?.quote.isEmpty == false
+            && selectedProvider != nil
+    }
+
+    public var canSummarizeMaterial: Bool {
+        selectedDocument != nil && selectedProvider != nil
+    }
+
+    public var canPreviewPublish: Bool {
+        selectedDocument?.summary.kind.canPublish == true
+    }
+
     public var allActiveMaterials: [StudyMaterialSummary] {
         materials + inboxMaterials
     }
@@ -118,6 +203,16 @@ public final class WorkspaceModel {
 
     public var filteredMaterials: [StudyMaterialSummary] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !query.isEmpty, searchHitsQuery == query {
+            let byID = Dictionary(uniqueKeysWithValues: allActiveMaterials.map { ($0.id, $0) })
+            var seen = Set<UUID>()
+            return searchHits.compactMap { hit in
+                guard seen.insert(hit.materialID).inserted else {
+                    return nil
+                }
+                return byID[hit.materialID]
+            }
+        }
         return materials(in: selectedCollection).filter { material in
             guard !query.isEmpty else {
                 return true
@@ -182,7 +277,7 @@ public final class WorkspaceModel {
         case .folder:
             "folder"
         case .inbox:
-            "inbox"
+            "tray"
         case .recycleBin:
             "trash"
         case .tag:
@@ -342,6 +437,12 @@ public final class WorkspaceModel {
         selectedCollection = collection
         selectedMaterialIDs = []
         selectedNote = nil
+        selectedDocument = nil
+        annotations = []
+        conversations = []
+        readerSelection = nil
+        searchHits = []
+        searchHitsQuery = ""
         await selectFirstMaterialIfAvailable()
     }
 
@@ -369,10 +470,45 @@ public final class WorkspaceModel {
         guard !isLoadingIndex else {
             return
         }
+        if selectedMaterialIDs.count == 1,
+           let id = selectedMaterialIDs.first,
+           let hit = searchHits.first(where: { $0.materialID == id }) {
+            isStudyPanelVisible = true
+            if hit.matchedLayer == .ai {
+                studyPanelTab = .ai
+            } else if hit.matchedLayer == .annotation {
+                studyPanelTab = .annotations
+            }
+        }
         await updateReaderForSelection()
     }
 
     public func searchDidChange() async {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let store, !query.isEmpty else {
+            searchHits = []
+            searchHitsQuery = ""
+            let visibleIDs = Set(filteredMaterials.map(\.id))
+            selectedMaterialIDs.formIntersection(visibleIDs)
+            await updateReaderForSelection()
+            return
+        }
+        do {
+            searchHits = try await store.search(
+                query,
+                filter: SearchFilter(
+                    knowledgeBaseID: selectedKnowledgeBaseID,
+                    kind: searchKindFilter,
+                    tag: searchTagFilter,
+                    updatedAfter: searchUpdatedAfter
+                )
+            )
+            searchHitsQuery = query
+        } catch {
+            searchHits = []
+            searchHitsQuery = query
+            present(error)
+        }
         let visibleIDs = Set(filteredMaterials.map(\.id))
         selectedMaterialIDs.formIntersection(visibleIDs)
         await updateReaderForSelection()
@@ -381,6 +517,14 @@ public final class WorkspaceModel {
     public func selectMaterial(_ id: UUID) async {
         guard !isLoadingIndex else {
             return
+        }
+        if let hit = searchHits.first(where: { $0.materialID == id }) {
+            isStudyPanelVisible = true
+            if hit.matchedLayer == .ai {
+                studyPanelTab = .ai
+            } else if hit.matchedLayer == .annotation {
+                studyPanelTab = .annotations
+            }
         }
         selectedMaterialIDs = [id]
         await updateReaderForSelection()
@@ -1002,6 +1146,891 @@ public final class WorkspaceModel {
         actionNotice = nil
     }
 
+    public var defaultImportKnowledgeBaseID: UUID? {
+        switch selectedCollection {
+        case .inbox:
+            nil
+        case let .knowledgeBase(id), let .folder(id, _):
+            id
+        case .all, .recycleBin, .tag:
+            knowledgeBases.first?.id
+        }
+    }
+
+    public var defaultImportFolderPath: String {
+        selectedFolderPath ?? ""
+    }
+
+    public func presentImportSheet(webArticle: Bool = false) {
+        guard isConnected else {
+            return
+        }
+        if webArticle {
+            isShowingWebImport = true
+        } else {
+            isShowingImport = true
+        }
+    }
+
+    public func importFiles(
+        _ urls: [URL],
+        knowledgeBaseID: UUID?,
+        folderPath: String,
+        tags: [String]
+    ) async -> Bool {
+        guard let store, isConnected, !urls.isEmpty else {
+            return false
+        }
+        isPerformingAction = true
+        defer { isPerformingAction = false }
+        let accessingURLs = urls.filter { $0.startAccessingSecurityScopedResource() }
+        defer {
+            accessingURLs.forEach { $0.stopAccessingSecurityScopedResource() }
+        }
+        do {
+            let batch = try await store.importFiles(
+                at: urls,
+                knowledgeBaseID: knowledgeBaseID,
+                folderPath: folderPath,
+                tags: tags
+            )
+            let preferredID = batch.results.first { !$0.isDuplicate }?.summary.id
+            let collection: WorkspaceCollection
+            if let knowledgeBaseID {
+                collection = folderPath.isEmpty
+                    ? .knowledgeBase(knowledgeBaseID)
+                    : .folder(knowledgeBaseID: knowledgeBaseID, path: folderPath)
+            } else {
+                collection = .inbox
+            }
+            let succeeded = await refreshIndex(
+                preferredCollection: collection,
+                preferredSelection: preferredID.map { Set([$0]) } ?? []
+            )
+            if succeeded {
+                isShowingImport = false
+                let mediaFailureCount = batch.results.reduce(0) {
+                    $0 + $1.mediaFailures.count
+                }
+                var notice = "导入 \(batch.importedCount) 份材料"
+                if batch.duplicateCount > 0 {
+                    notice += "，跳过 \(batch.duplicateCount) 份重复内容"
+                }
+                if mediaFailureCount > 0 {
+                    notice += "，\(mediaFailureCount) 张图片下载失败"
+                }
+                actionNotice = notice
+            }
+            return succeeded
+        } catch {
+            present(error)
+            return false
+        }
+    }
+
+    public func fetchWebArticle() async {
+        guard let url = URL(
+            string: webArticleURLText.trimmingCharacters(in: .whitespacesAndNewlines)
+        ), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+            errorMessage = "请输入完整的 http 或 https 网页地址。"
+            return
+        }
+        guard !isFetchingWebArticle else {
+            return
+        }
+        isFetchingWebArticle = true
+        webArticleDraft = nil
+        webArticleMarkdown = ""
+        webArticleStatus = "准备抓取"
+        defer { isFetchingWebArticle = false }
+        do {
+            let draft = try await webArticleFetcher.fetch(url: url) { [weak self] message in
+                await MainActor.run {
+                    self?.webArticleStatus = message
+                }
+            }
+            webArticleDraft = draft
+            webArticleMarkdown = draft.markdown
+            webArticleStatus = draft.mediaFailures.isEmpty
+                ? "已提取正文和 \(draft.media.count) 张图片"
+                : "已提取正文；\(draft.mediaFailures.count) 张图片失败，可重试"
+        } catch {
+            webArticleStatus = ""
+            present(error)
+        }
+    }
+
+    public func importFetchedWebArticle(
+        title: String,
+        markdown: String,
+        knowledgeBaseID: UUID?,
+        folderPath: String,
+        tags: [String]
+    ) async -> Bool {
+        guard let store, let draft = webArticleDraft, !markdown.isEmpty else {
+            return false
+        }
+        isPerformingAction = true
+        defer { isPerformingAction = false }
+        do {
+            let result = try await store.importWebArticle(
+                draft,
+                title: title,
+                markdown: markdown,
+                knowledgeBaseID: knowledgeBaseID,
+                folderPath: folderPath,
+                tags: tags
+            )
+            let collection: WorkspaceCollection
+            if let knowledgeBaseID {
+                collection = folderPath.isEmpty
+                    ? .knowledgeBase(knowledgeBaseID)
+                    : .folder(knowledgeBaseID: knowledgeBaseID, path: folderPath)
+            } else {
+                collection = .inbox
+            }
+            let succeeded = await refreshIndex(
+                preferredCollection: collection,
+                preferredSelection: result.isDuplicate ? [] : [result.summary.id]
+            )
+            if succeeded {
+                isShowingWebImport = false
+                webArticleDraft = nil
+                actionNotice = result.isDuplicate
+                    ? "网页内容已在资料库中，未创建重复材料"
+                    : "已导入网页文章；正文和本地图片可离线阅读"
+            }
+            return succeeded
+        } catch {
+            present(error)
+            return false
+        }
+    }
+
+    public func updateReaderSelection(_ selection: ReaderSelection?) {
+        readerSelection = selection
+    }
+
+    public func presentAnnotationEditor(for selection: ReaderSelection) {
+        guard let document = selectedDocument,
+              !selection.quote.isEmpty
+                || selection.rect != nil
+                || selection.pageIndex != nil else {
+            return
+        }
+        annotationDraftRequest = AnnotationDraftRequest(
+            materialID: document.summary.id,
+            quote: selection.quote,
+            anchor: selection.anchor
+        )
+    }
+
+    public func presentAnnotationEditor(for annotation: MaterialAnnotation) {
+        annotationDraftRequest = AnnotationDraftRequest(
+            materialID: annotation.materialID,
+            annotationID: annotation.id,
+            quote: annotation.quote,
+            anchor: annotation.anchor,
+            initialNote: annotation.note
+        )
+    }
+
+    public func presentAnnotationForCurrentSelection() {
+        guard let readerSelection else {
+            return
+        }
+        presentAnnotationEditor(for: readerSelection)
+    }
+
+    public func saveAnnotation(note: String) async -> Bool {
+        guard let store, let request = annotationDraftRequest else {
+            return false
+        }
+        isPerformingAction = true
+        defer { isPerformingAction = false }
+        do {
+            let saved = try await store.upsertAnnotation(
+                MaterialAnnotation(
+                    id: request.annotationID ?? UUID(),
+                    materialID: request.materialID,
+                    anchor: request.anchor,
+                    quote: request.quote,
+                    note: note.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            )
+            annotations = try await store.loadAnnotations(materialID: request.materialID)
+            annotationDraftRequest = nil
+            annotationJumpID = saved.id
+            isStudyPanelVisible = true
+            studyPanelTab = .annotations
+            actionNotice = request.annotationID == nil ? "已创建标注" : "已更新标注"
+            return true
+        } catch {
+            present(error)
+            return false
+        }
+    }
+
+    public func deleteAnnotation(_ annotation: MaterialAnnotation) async {
+        guard let store else {
+            return
+        }
+        do {
+            try await store.deleteAnnotation(
+                id: annotation.id,
+                materialID: annotation.materialID
+            )
+            annotations = try await store.loadAnnotations(materialID: annotation.materialID)
+            if annotationJumpID == annotation.id {
+                annotationJumpID = nil
+            }
+            actionNotice = "已删除标注，正文未改变"
+        } catch {
+            present(error)
+        }
+    }
+
+    public func rebind(_ annotation: MaterialAnnotation) async {
+        guard let store, let selection = readerSelection else {
+            return
+        }
+        do {
+            _ = try await store.rebindAnnotation(
+                id: annotation.id,
+                materialID: annotation.materialID,
+                anchor: selection.anchor
+            )
+            annotations = try await store.loadAnnotations(materialID: annotation.materialID)
+            actionNotice = "已重新绑定标注位置"
+        } catch {
+            present(error)
+        }
+    }
+
+    public func saveReaderCopy(_ text: String) async -> Bool {
+        guard let store, let document = selectedDocument else {
+            return false
+        }
+        isPerformingAction = true
+        defer { isPerformingAction = false }
+        do {
+            _ = try await store.saveReaderCopy(id: document.summary.id, text: text)
+            let updated = try await store.loadMaterialDocument(id: document.summary.id)
+            selectedDocument = updated
+            selectedNote = updated.summary.kind == .note
+                ? MarkdownNote(summary: updated.summary, markdown: updated.markdown)
+                : nil
+            revisions = try await store.loadTextRevisions(id: document.summary.id)
+            isShowingEditReaderCopy = false
+            actionNotice = "已保存阅读副本并保留最近的文字版本"
+            await reloadIndexPreservingSelection()
+            return true
+        } catch {
+            present(error)
+            return false
+        }
+    }
+
+    public func loadRevisions() async {
+        guard let store, let document = selectedDocument else {
+            return
+        }
+        do {
+            revisions = try await store.loadTextRevisions(id: document.summary.id)
+        } catch {
+            present(error)
+        }
+    }
+
+    public func restoreRevision(_ revision: TextRevision) async {
+        guard let store, let document = selectedDocument else {
+            return
+        }
+        do {
+            _ = try await store.restoreRevision(
+                id: document.summary.id,
+                revisionID: revision.id
+            )
+            let updated = try await store.loadMaterialDocument(id: document.summary.id)
+            selectedDocument = updated
+            selectedNote = updated.summary.kind == .note
+                ? MarkdownNote(summary: updated.summary, markdown: updated.markdown)
+                : nil
+            revisions = try await store.loadTextRevisions(id: document.summary.id)
+            isShowingVersions = false
+            actionNotice = "已恢复文字版本，并生成新的当前版本"
+        } catch {
+            present(error)
+        }
+    }
+
+    public func setLinkedMaterials(_ ids: Set<UUID>) async {
+        guard let store, let document = selectedDocument else {
+            return
+        }
+        do {
+            _ = try await store.setLinkedMaterials(
+                for: document.summary.id,
+                linkedMaterialIDs: Array(ids)
+            )
+            isShowingLinkMaterials = false
+            await reloadIndexPreservingSelection()
+            actionNotice = ids.isEmpty ? "已清除材料关联" : "已关联 \(ids.count) 份学习材料"
+        } catch {
+            present(error)
+        }
+    }
+
+    public func saveProviderProfile(
+        id: UUID?,
+        name: String,
+        baseURLText: String,
+        model: String,
+        apiKey: String
+    ) -> Bool {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty,
+              !trimmedModel.isEmpty,
+              let baseURL = URL(
+                  string: baseURLText.trimmingCharacters(in: .whitespacesAndNewlines)
+              ),
+              ["http", "https"].contains(baseURL.scheme?.lowercased() ?? "") else {
+            errorMessage = "请填写供应商名称、有效的 HTTP(S) 基础地址和模型标识。"
+            return false
+        }
+        let profileID = id ?? UUID()
+        let existing = providerProfiles.first { $0.id == profileID }
+        let account = existing?.keychainAccount ?? "provider-\(profileID.uuidString)"
+        do {
+            let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedKey.isEmpty {
+                try secretStore.save(trimmedKey, account: account)
+            } else if existing == nil {
+                throw AIStreamError.missingAPIKey
+            }
+            let profile = AIProviderProfile(
+                id: profileID,
+                name: trimmedName,
+                baseURL: baseURL,
+                model: trimmedModel,
+                keychainAccount: account
+            )
+            var updated = providerProfiles.filter { $0.id != profileID }
+            updated.append(profile)
+            updated.sort {
+                $0.name.localizedStandardCompare($1.name) == .orderedAscending
+            }
+            providerProfiles = updated
+            selectedProviderID = profile.id
+            AIProviderSettingsStore.save(updated)
+            isShowingAIConfiguration = false
+            actionNotice = "已保存 AI 供应商“\(profile.name)”"
+            return true
+        } catch {
+            present(error)
+            return false
+        }
+    }
+
+    public func deleteProviderProfile(_ profile: AIProviderProfile) {
+        do {
+            try secretStore.delete(account: profile.keychainAccount)
+        } catch {
+            present(error)
+        }
+        providerProfiles.removeAll { $0.id == profile.id }
+        AIProviderSettingsStore.save(providerProfiles)
+        if selectedProviderID == profile.id {
+            selectedProviderID = providerProfiles.first?.id
+        }
+        actionNotice = "已删除 AI 供应商“\(profile.name)”"
+    }
+
+    public func hasAPIKey(for profile: AIProviderProfile) -> Bool {
+        ((try? secretStore.load(account: profile.keychainAccount)) ?? nil)?.isEmpty == false
+    }
+
+    public func prepareSelectionExplanation() {
+        guard let selection = readerSelection,
+              let document = selectedDocument,
+              let profile = selectedProvider else {
+            errorMessage = "请先选择一段文字并配置 AI 供应商。"
+            return
+        }
+        let prompt = aiPromptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "请解释这段内容在整篇材料中的含义。"
+            : aiPromptText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let context = [
+            "前文：\(selection.prefix)",
+            "选段：\(selection.quote)",
+            "后文：\(selection.suffix)"
+        ].joined(separator: "\n")
+        pendingAIContext = AIContextPreview(
+            profile: profile,
+            prompt: prompt,
+            context: context,
+            origin: .selection,
+            anchor: selection.anchor
+        )
+        isStudyPanelVisible = true
+        studyPanelTab = .ai
+        _ = document
+    }
+
+    public func prepareMaterialSummary() {
+        guard let document = selectedDocument,
+              let profile = selectedProvider else {
+            errorMessage = "请先配置并选择 AI 供应商。"
+            return
+        }
+        let prompt = aiPromptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "请总结这份学习材料的结构、核心观点和可继续追问的问题。"
+            : aiPromptText.trimmingCharacters(in: .whitespacesAndNewlines)
+        pendingAIContext = AIContextPreview(
+            profile: profile,
+            prompt: prompt,
+            context: document.markdown,
+            origin: .summary,
+            anchor: nil
+        )
+        isStudyPanelVisible = true
+        studyPanelTab = .ai
+    }
+
+    public func prepareSectionSummary(heading: ReaderHeading) {
+        guard let document = selectedDocument,
+              let profile = selectedProvider else {
+            errorMessage = "请先配置并选择 AI 供应商。"
+            return
+        }
+        let lines = document.markdown
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        var startIndex: Int?
+        for (index, line) in lines.enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let hashes = trimmed.prefix { $0 == "#" }
+            let title = trimmed.dropFirst(hashes.count)
+                .trimmingCharacters(in: .whitespaces)
+            if hashes.count == heading.level, title == heading.title {
+                startIndex = index
+                break
+            }
+        }
+        guard let startIndex else {
+            prepareMaterialSummary()
+            return
+        }
+        var endIndex = lines.count
+        if startIndex + 1 < lines.count {
+            for index in (startIndex + 1)..<lines.count {
+                let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
+                let hashes = trimmed.prefix { $0 == "#" }
+                if !hashes.isEmpty, hashes.count <= heading.level {
+                    endIndex = index
+                    break
+                }
+            }
+        }
+        let context = lines[startIndex..<endIndex].joined(separator: "\n")
+        pendingAIContext = AIContextPreview(
+            profile: profile,
+            prompt: "请总结“\(heading.title)”这一节的结构、核心观点和可继续追问的问题。",
+            context: context,
+            origin: .summary,
+            anchor: nil
+        )
+        isStudyPanelVisible = true
+        studyPanelTab = .ai
+    }
+
+    public func confirmAIContext() {
+        guard let preview = pendingAIContext else {
+            return
+        }
+        guard let apiKey = try? secretStore.load(account: preview.profile.keychainAccount),
+              !apiKey.isEmpty else {
+            pendingAIContext = nil
+            present(AIStreamError.missingAPIKey)
+            return
+        }
+        pendingAIContext = nil
+        startAIRequest(preview: preview, apiKey: apiKey)
+    }
+
+    public func cancelAIContext() {
+        pendingAIContext = nil
+    }
+
+    public func stopAIStream() {
+        guard aiPhase.isStreaming else {
+            return
+        }
+        aiStopRequested = true
+        aiTask?.cancel()
+        aiTask = nil
+        persistStreamingResponse(includeStoppedMarker: true)
+        aiPhase = .stopped
+    }
+
+    public func retryActiveAIRequest() {
+        guard case .failed = aiPhase,
+              let conversation = activeConversation else {
+            return
+        }
+        guard let profile = providerProfiles.first(where: {
+            $0.name == conversation.providerName && $0.model == conversation.model
+        }) ?? selectedProvider else {
+            errorMessage = "找不到这个会话使用的 AI 供应商。"
+            return
+        }
+        guard let apiKey = try? secretStore.load(account: profile.keychainAccount),
+              !apiKey.isEmpty else {
+            present(AIStreamError.missingAPIKey)
+            return
+        }
+
+        runAIStream(
+            conversationID: conversation.id,
+            profile: profile,
+            apiKey: apiKey,
+            messages: requestMessages(for: conversation)
+        )
+    }
+
+    public func continueAIConversation(prompt: String) {
+        guard let conversation = activeConversation else {
+            return
+        }
+        guard let profile = providerProfiles.first(where: {
+            $0.name == conversation.providerName && $0.model == conversation.model
+        }) ?? selectedProvider else {
+            errorMessage = "找不到这个会话使用的 AI 供应商。"
+            return
+        }
+        guard let apiKey = try? secretStore.load(account: profile.keychainAccount),
+              !apiKey.isEmpty else {
+            present(AIStreamError.missingAPIKey)
+            return
+        }
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrompt.isEmpty else {
+            return
+        }
+        var updated = conversation
+        updated.messages.append(AIMessage(role: .user, content: trimmedPrompt))
+        conversations.removeAll { $0.id == updated.id }
+        conversations.insert(updated, at: 0)
+        Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            if let store,
+               let saved = try? await store.saveConversation(updated) {
+                replaceConversation(saved)
+            }
+            runAIStream(
+                conversationID: conversation.id,
+                profile: profile,
+                apiKey: apiKey,
+                messages: requestMessages(for: updated)
+            )
+        }
+    }
+
+    public func renameConversation(_ conversation: AIConversation, title: String) async {
+        guard let store else {
+            return
+        }
+        var updated = conversation
+        updated.title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !updated.title.isEmpty else {
+            return
+        }
+        do {
+            let saved = try await store.saveConversation(updated)
+            replaceConversation(saved)
+            actionNotice = "已重命名 AI 研读会话"
+        } catch {
+            present(error)
+        }
+    }
+
+    public func deleteConversation(_ conversation: AIConversation) async {
+        guard let store else {
+            return
+        }
+        do {
+            try await store.deleteConversation(
+                id: conversation.id,
+                materialID: conversation.materialID
+            )
+            conversations.removeAll { $0.id == conversation.id }
+            if activeConversationID == conversation.id {
+                activeConversationID = conversations.first?.id
+            }
+            actionNotice = "已删除 AI 研读会话，原文与标注未受影响"
+        } catch {
+            present(error)
+        }
+    }
+
+    public func promoteConversationMessage(
+        _ conversation: AIConversation,
+        message: AIMessage,
+        target: AIPromotionTarget
+    ) async {
+        guard let store,
+              let knowledgeBaseID = selectedDocument?.summary.knowledgeBaseID
+                ?? knowledgeBases.first?.id else {
+            return
+        }
+        do {
+            let result = try await store.promoteAIResult(
+                conversationID: conversation.id,
+                messageID: message.id,
+                materialID: conversation.materialID,
+                target: target,
+                knowledgeBaseID: knowledgeBaseID
+            )
+            if target == .annotation {
+                annotations = try await store.loadAnnotations(
+                    materialID: conversation.materialID
+                )
+            } else {
+                _ = await refreshIndex(
+                    preferredCollection: result.material.knowledgeBaseID.map {
+                        WorkspaceCollection.knowledgeBase($0)
+                    } ?? .inbox,
+                    preferredSelection: [result.material.id]
+                )
+            }
+            actionNotice = target == .annotation
+                ? "已把 AI 结果提升为标注"
+                : "已提升“\(result.material.title)”"
+        } catch {
+            present(error)
+        }
+    }
+
+    public func preparePublishPreview() {
+        guard canPreviewPublish else {
+            return
+        }
+        publishIncludeAnnotations = false
+        publishIncludeAI = false
+        Task {
+            await refreshPublishPreview()
+            isShowingPublishPreview = true
+        }
+    }
+
+    public func refreshPublishPreview() async {
+        guard let store, let document = selectedDocument else {
+            return
+        }
+        do {
+            publishPreview = try await store.publishPreview(
+                materialID: document.summary.id,
+                includeAnnotations: publishIncludeAnnotations,
+                includeAI: publishIncludeAI
+            )
+        } catch {
+            present(error)
+        }
+    }
+
+    public func saveLocalPublishMapping(
+        articleID: String,
+        publicURLText: String,
+        version: String,
+        visibility: PublishVisibility,
+        contentFingerprint: String? = nil
+    ) async -> Bool {
+        guard let store, let preview = publishPreview,
+              let publicURL = URL(
+                  string: publicURLText.trimmingCharacters(in: .whitespacesAndNewlines)
+              ),
+              !articleID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            errorMessage = "请填写文章标识和有效的公开地址。"
+            return false
+        }
+        do {
+            _ = try await store.savePublishMapping(
+                materialID: preview.materialID,
+                mapping: PublishMapping(
+                    articleID: articleID,
+                    publicURL: publicURL,
+                    lastPublishedVersion: version.isEmpty ? nil : version,
+                    visibility: visibility,
+                    contentFingerprint: contentFingerprint
+                        ?? preview.contentFingerprint,
+                    updatedAt: Date()
+                )
+            )
+            await reloadIndexPreservingSelection()
+            await refreshPublishPreview()
+            actionNotice = "已保存轻量本地发布映射"
+            return true
+        } catch {
+            present(error)
+            return false
+        }
+    }
+
+    public func clearLocalPublishMapping() async {
+        guard let store, let preview = publishPreview else {
+            return
+        }
+        do {
+            _ = try await store.clearPublishMapping(
+                materialID: preview.materialID
+            )
+            await reloadIndexPreservingSelection()
+            await refreshPublishPreview()
+            actionNotice = "已清除本地轻量发布映射"
+        } catch {
+            present(error)
+        }
+    }
+
+    private func reloadIndexPreservingSelection() async {
+        _ = await refreshIndex(
+            preferredCollection: selectedCollection,
+            preferredSelection: selectedMaterialIDs,
+            autoSelectFirst: false
+        )
+    }
+
+    private func startAIRequest(preview: AIContextPreview, apiKey: String) {
+        guard let document = selectedDocument else {
+            return
+        }
+        let title = preview.origin == .summary
+            ? "整篇总结"
+            : String(preview.prompt.prefix(28))
+        let messages = [
+            AIMessage(role: .user, content: "\(preview.prompt)\n\n发送上下文：\n\(preview.context)")
+        ]
+        let conversation = AIConversation(
+            materialID: document.summary.id,
+            title: title.isEmpty ? "AI 研读" : title,
+            origin: preview.origin,
+            originAnchor: preview.anchor,
+            messages: messages,
+            providerName: preview.profile.name,
+            model: preview.profile.model
+        )
+        conversations.removeAll { $0.id == conversation.id }
+        conversations.insert(conversation, at: 0)
+        activeConversationID = conversation.id
+        Task {
+            if let store,
+               let saved = try? await store.saveConversation(conversation) {
+                replaceConversation(saved)
+            }
+            runAIStream(
+                conversationID: conversation.id,
+                profile: preview.profile,
+                apiKey: apiKey,
+                messages: [
+                    AIMessage(
+                        role: .system,
+                        content: "你是学习研读助手。只解释或总结用户明确发送的材料，不推测未发送内容。"
+                    )
+                ] + messages
+            )
+        }
+    }
+
+    private func runAIStream(
+        conversationID: UUID,
+        profile: AIProviderProfile,
+        apiKey: String,
+        messages: [AIMessage]
+    ) {
+        aiTask?.cancel()
+        aiStopRequested = false
+        aiStreamingText = ""
+        aiPhase = .streaming
+        activeConversationID = conversationID
+        aiTask = Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            do {
+                for try await event in aiClient.stream(
+                    profile: profile,
+                    apiKey: apiKey,
+                    messages: messages
+                ) {
+                    guard !aiStopRequested else {
+                        return
+                    }
+                    switch event {
+                    case let .delta(delta):
+                        aiStreamingText += delta
+                    case .completed:
+                        break
+                    }
+                }
+                guard !aiStopRequested else {
+                    return
+                }
+                persistStreamingResponse(includeStoppedMarker: false)
+                aiPhase = .idle
+                aiTask = nil
+            } catch is CancellationError {
+                if !aiStopRequested {
+                    aiPhase = .stopped
+                }
+            } catch {
+                aiPhase = .failed(error.localizedDescription)
+                aiTask = nil
+            }
+        }
+    }
+
+    private func requestMessages(for conversation: AIConversation) -> [AIMessage] {
+        [
+            AIMessage(
+                role: .system,
+                content: "继续同一学习研读会话。保持已有上下文，不自动切换到其他供应商。"
+            )
+        ] + conversation.messages
+    }
+
+    private func persistStreamingResponse(includeStoppedMarker: Bool) {
+        guard let activeConversationID,
+              let index = conversations.firstIndex(where: { $0.id == activeConversationID }) else {
+            return
+        }
+        var content = aiStreamingText
+        if includeStoppedMarker, !content.isEmpty {
+            content += "\n\n（已由用户停止生成）"
+        }
+        guard !content.isEmpty else {
+            return
+        }
+        var conversation = conversations[index]
+        conversation.messages.append(AIMessage(role: .assistant, content: content))
+        conversations[index] = conversation
+        if let store {
+            Task {
+                if let saved = try? await store.saveConversation(conversation) {
+                    replaceConversation(saved)
+                }
+            }
+        }
+    }
+
+    private func replaceConversation(_ conversation: AIConversation) {
+        conversations.removeAll { $0.id == conversation.id }
+        conversations.insert(conversation, at: 0)
+    }
+
     private func loadWorkspace(at location: WorkspaceLocation) async {
         invalidateNoteLoad()
         refreshGeneration += 1
@@ -1111,6 +2140,16 @@ public final class WorkspaceModel {
            !allMaterials.contains(where: { $0.id == selectedNote.summary.id }) {
             invalidateNoteLoad()
             self.selectedNote = nil
+            selectedDocument = nil
+            annotations = []
+            conversations = []
+        } else if let selectedDocument,
+                  !allMaterials.contains(where: { $0.id == selectedDocument.summary.id }) {
+            invalidateNoteLoad()
+            self.selectedDocument = nil
+            selectedNote = nil
+            annotations = []
+            conversations = []
         }
     }
 
@@ -1124,11 +2163,17 @@ public final class WorkspaceModel {
         selectedCollection = .all
         selectedMaterialIDs = []
         selectedNote = nil
+        selectedDocument = nil
+        annotations = []
+        conversations = []
+        searchHits = []
+        searchHitsQuery = ""
     }
 
     private func selectFirstMaterialIfAvailable() async {
         guard let firstMaterial = filteredMaterials.first else {
             selectedNote = nil
+            selectedDocument = nil
             return
         }
         selectedMaterialIDs = [firstMaterial.id]
@@ -1141,16 +2186,20 @@ public final class WorkspaceModel {
         guard selectedMaterialIDs.count == 1,
               let materialID = selectedMaterialIDs.first else {
             selectedNote = nil
+            selectedDocument = nil
+            annotations = []
+            conversations = []
+            readerSelection = nil
             return
         }
 
-        if selectedNote?.summary.id == materialID {
+        if selectedDocument?.summary.id == materialID {
             return
         }
-        await loadNote(id: materialID)
+        await loadMaterial(id: materialID)
     }
 
-    private func loadNote(id: UUID) async {
+    private func loadMaterial(id: UUID) async {
         guard let store else {
             return
         }
@@ -1165,16 +2214,28 @@ public final class WorkspaceModel {
         }
 
         do {
-            let note = try await store.loadMarkdownNote(id: id)
+            let document = try await store.loadMaterialDocument(id: id)
+            let loadedAnnotations = try await store.loadAnnotations(materialID: id)
+            let loadedConversations = try await store.loadConversations(materialID: id)
             guard selectedMaterialIDs == [id], noteLoadGeneration == generation else {
                 return
             }
-            selectedNote = note
+            selectedDocument = document
+            selectedNote = document.summary.kind == .note
+                ? MarkdownNote(summary: document.summary, markdown: document.markdown)
+                : nil
+            annotations = loadedAnnotations
+            conversations = loadedConversations
+            readerSelection = nil
+            activeConversationID = loadedConversations.first?.id
         } catch {
             guard noteLoadGeneration == generation else {
                 return
             }
             selectedNote = nil
+            selectedDocument = nil
+            annotations = []
+            conversations = []
             present(error)
         }
     }

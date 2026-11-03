@@ -1,0 +1,45 @@
+{
+  "name": "studynotes-web",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "next dev -p 8090",
+    "build": "next build",
+    "start": "next start -p 8090",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "db:migrate": "node scripts/migrate.mjs",
+    "verify": "npm run lint && npm run typecheck && npm run test && npm run build"
+  },
+  "dependencies": {
+    "ajv": "8.20.0",
+    "cheerio": "1.2.0",
+    "drizzle-orm": "0.45.4",
+    "lucide-react": "0.545.0",
+    "mysql2": "3.24.6",
+    "next": "16.4.4",
+    "qiniu": "7.15.2",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "sanitize-html": "2.18.1",
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/node": "26.6.6",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@types/sanitize-html": "2.16.2",
+    "drizzle-kit": "0.31.11",
+    "eslint": "10.14.0",
+    "eslint-config-next": "16.4.4",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0"
+  }
+}
