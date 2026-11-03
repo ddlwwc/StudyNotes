@@ -24,6 +24,10 @@ export function getRuntimeConfig() {
       optional("PUBLISH_TIMESTAMP_SKEW_SECONDS") ?? "300"
     ),
     mediaUrlTtlSeconds: Number(optional("MEDIA_URL_TTL_SECONDS") ?? "300"),
+    libraryMediaKeyHash: optional("LIBRARY_MEDIA_KEY_SHA256"),
+    libraryMediaCleanupDelaySeconds: Number(
+      optional("LIBRARY_MEDIA_CLEANUP_DELAY_SECONDS") ?? "86400"
+    ),
     qiniu: {
       accessKey: optional("QINIU_ACCESS_KEY"),
       secretKey: optional("QINIU_SECRET_KEY"),

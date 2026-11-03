@@ -4,7 +4,8 @@ import type {
   StorageAdapter,
   UploadCredentialInput
 } from "@/domain/types";
-import { ExternalServiceError } from "@/domain/errors";
+import { ExternalServiceError, ValidationError } from "@/domain/errors";
+import { normalizeContentType } from "@/lib/media-content-type";
 
 interface MemoryObject {
   bytes: Buffer;
@@ -14,6 +15,10 @@ interface MemoryObject {
 
 export class MemoryStorageAdapter implements StorageAdapter {
   private readonly objects = new Map<string, MemoryObject>();
+
+  async health() {
+    return true;
+  }
 
   putObject(
     objectKey: string,
@@ -66,12 +71,31 @@ export class MemoryStorageAdapter implements StorageAdapter {
     if (object.bytes.length !== input.size) {
       throw new ExternalServiceError("发布媒体大小不匹配");
     }
+    if (normalizeContentType(object.contentType) !== normalizeContentType(input.contentType)) {
+      throw new ValidationError("笔记媒体类型不匹配");
+    }
     return {
       objectKey: input.objectKey,
       contentHash: object.contentHash,
       contentType: object.contentType,
       size: object.bytes.length
     };
+  }
+
+  async copyObject(
+    sourceObjectKey: string,
+    destinationObjectKey: string,
+    contentType: string
+  ): Promise<void> {
+    const source = this.objects.get(sourceObjectKey);
+    if (!source) {
+      throw new ExternalServiceError("笔记媒体不存在");
+    }
+    this.objects.set(destinationObjectKey, {
+      bytes: Buffer.from(source.bytes),
+      contentType: normalizeContentType(contentType),
+      contentHash: source.contentHash
+    });
   }
 
   async createReadUrl(objectKey: string, expiresInSeconds: number) {

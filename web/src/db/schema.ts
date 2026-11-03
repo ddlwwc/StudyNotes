@@ -143,6 +143,71 @@ export const mediaAssets = mysqlTable(
   ]
 );
 
+export const libraryMediaAssets = mysqlTable(
+  "library_media_assets",
+  {
+    id: varchar("id", { length: 36 }).primaryKey(),
+    objectKey: varchar("object_key", { length: 512 }).notNull(),
+    contentHash: varchar("content_hash", { length: 71 }).notNull(),
+    contentType: varchar("content_type", { length: 128 }).notNull(),
+    size: int("size").notNull(),
+    status: varchar("status", { length: 16 })
+      .$type<"PENDING" | "READY" | "DELETING">()
+      .notNull(),
+    createdAt: timestamp("created_at", { fsp: 3 }).notNull(),
+    verifiedAt: timestamp("verified_at", { fsp: 3 })
+  },
+  (table) => [
+    uniqueIndex("library_media_assets_object_key_unique").on(table.objectKey),
+    uniqueIndex("library_media_assets_content_hash_unique").on(
+      table.contentHash
+    )
+  ]
+);
+
+export const libraryMediaReferences = mysqlTable(
+  "library_media_references",
+  {
+    id: varchar("id", { length: 36 }).primaryKey(),
+    sourceId: varchar("source_id", { length: 128 }).notNull(),
+    scope: varchar("scope", { length: 16 })
+      .$type<"CURRENT" | "HISTORY">()
+      .notNull(),
+    objectKey: varchar("object_key", { length: 512 }).notNull(),
+    reference: varchar("reference", { length: 1024 }).notNull(),
+    updatedAt: timestamp("updated_at", { fsp: 3 }).notNull()
+  },
+  (table) => [
+    index("library_media_references_source_idx").on(table.sourceId),
+    index("library_media_references_object_idx").on(table.objectKey)
+  ]
+);
+
+export const libraryMediaCleanupJobs = mysqlTable(
+  "library_media_cleanup_jobs",
+  {
+    id: varchar("id", { length: 36 }).primaryKey(),
+    objectKey: varchar("object_key", { length: 512 }).notNull(),
+    status: varchar("status", { length: 16 })
+      .$type<"PENDING" | "PROCESSING" | "FAILED">()
+      .notNull(),
+    attempts: int("attempts").notNull(),
+    lastError: text("last_error"),
+    availableAt: timestamp("available_at", { fsp: 3 }).notNull(),
+    createdAt: timestamp("created_at", { fsp: 3 }).notNull(),
+    updatedAt: timestamp("updated_at", { fsp: 3 }).notNull()
+  },
+  (table) => [
+    uniqueIndex("library_media_cleanup_jobs_object_key_unique").on(
+      table.objectKey
+    ),
+    index("library_media_cleanup_jobs_status_available_idx").on(
+      table.status,
+      table.availableAt
+    )
+  ]
+);
+
 export const articleVersionMedia = mysqlTable(
   "article_version_media",
   {
@@ -200,6 +265,9 @@ export type PublishKeyRow = typeof publishKeys.$inferSelect;
 export type ArticleRow = typeof articles.$inferSelect;
 export type ArticleVersionRow = typeof articleVersions.$inferSelect;
 export type MediaAssetRow = typeof mediaAssets.$inferSelect;
+export type LibraryMediaAssetRow = typeof libraryMediaAssets.$inferSelect;
+export type LibraryMediaCleanupJobRow =
+  typeof libraryMediaCleanupJobs.$inferSelect;
 export type MediaCleanupJobRow = typeof mediaCleanupJobs.$inferSelect;
 export const publishContractMetadata = {
   signedGetUsesEmptyBodyHash: true,

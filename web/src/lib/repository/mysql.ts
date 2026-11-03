@@ -3,6 +3,8 @@ import {
   desc,
   eq,
   inArray,
+  ne,
+  lte,
   lt,
   or,
   sql
@@ -10,6 +12,8 @@ import {
 import type {
   ArticleRow,
   ArticleVersionRow,
+  LibraryMediaAssetRow,
+  LibraryMediaCleanupJobRow,
   MediaAssetRow,
   MediaCleanupJobRow,
   PublishKeyRow
@@ -19,6 +23,9 @@ import {
   articles,
   articleVersionMedia,
   articleVersions,
+  libraryMediaAssets,
+  libraryMediaCleanupJobs,
+  libraryMediaReferences,
   mediaCleanupJobs,
   mediaAssets,
   publishKeys,
@@ -40,6 +47,9 @@ import type {
   DeleteInput,
   DeleteOutcome,
   MediaAsset,
+  LibraryMediaAsset,
+  LibraryMediaCleanupJob,
+  LibraryMediaReference,
   MediaCleanupJob,
   PublishKey,
   PublishOutcome,
@@ -55,6 +65,7 @@ import { createDatabase, type Database } from "@/db/client";
 import { getRuntimeConfig } from "@/lib/env";
 import { plainTextFromHtml } from "@/lib/html";
 import { randomUuid } from "@/lib/ids";
+import { sameMediaMetadata } from "@/lib/media-content-type";
 
 type Transaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
 type Executor = Database | Transaction;
@@ -92,6 +103,34 @@ function toMedia(row: MediaAssetRow): MediaAsset {
     size: row.size,
     status: row.status as MediaAsset["status"],
     createdAt: row.createdAt
+  };
+}
+
+function toLibraryMedia(row: LibraryMediaAssetRow): LibraryMediaAsset {
+  return {
+    id: row.id,
+    objectKey: row.objectKey,
+    contentHash: row.contentHash,
+    contentType: row.contentType,
+    size: row.size,
+    status: row.status,
+    createdAt: row.createdAt,
+    verifiedAt: row.verifiedAt
+  };
+}
+
+function toLibraryCleanupJob(
+  row: LibraryMediaCleanupJobRow
+): LibraryMediaCleanupJob {
+  return {
+    id: row.id,
+    objectKey: row.objectKey,
+    status: row.status,
+    attempts: row.attempts,
+    lastError: row.lastError,
+    availableAt: row.availableAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
   };
 }
 
@@ -188,6 +227,20 @@ export class MySqlRepository implements PublishRepository {
       }
       throw error;
     }
+  }
+
+  async getPublishOutcomeByRequest(
+    keyId: string,
+    requestId: string,
+    requestHash: string
+  ): Promise<PublishOutcome | null> {
+    const replay = await this.readRequest(
+      this.db,
+      keyId,
+      requestId,
+      requestHash
+    );
+    return replay ? { ...(replay as PublishOutcome), idempotent: true } : null;
   }
 
   async executePublish(input: AtomicPublishInput): Promise<PublishOutcome> {
@@ -632,11 +685,7 @@ export class MySqlRepository implements PublishRepository {
   async createMediaAsset(asset: MediaAsset) {
     const existing = await this.getMediaAssetByObjectKey(asset.objectKey);
     if (existing) {
-      if (
-        existing.contentHash !== asset.contentHash ||
-        existing.contentType !== asset.contentType ||
-        existing.size !== asset.size
-      ) {
+      if (!sameMediaMetadata(existing, asset)) {
         throw new ConflictError("同一对象键已登记不同媒体");
       }
       return existing;
@@ -651,6 +700,262 @@ export class MySqlRepository implements PublishRepository {
       createdAt: asset.createdAt
     });
     return asset;
+  }
+
+  async getLibraryMediaAssetByContentHash(contentHash: string) {
+    const rows = await this.db
+      .select()
+      .from(libraryMediaAssets)
+      .where(eq(libraryMediaAssets.contentHash, contentHash))
+      .limit(1);
+    return rows[0] ? toLibraryMedia(rows[0]) : null;
+  }
+
+  async getLibraryMediaAssetByObjectKey(objectKey: string) {
+    const rows = await this.db
+      .select()
+      .from(libraryMediaAssets)
+      .where(eq(libraryMediaAssets.objectKey, objectKey))
+      .limit(1);
+    return rows[0] ? toLibraryMedia(rows[0]) : null;
+  }
+
+  async listLibraryMediaAssets() {
+    const rows = await this.db.select().from(libraryMediaAssets);
+    return rows.map(toLibraryMedia);
+  }
+
+  async createLibraryMediaAsset(asset: LibraryMediaAsset) {
+    const existingByHash = await this.getLibraryMediaAssetByContentHash(
+      asset.contentHash
+    );
+    if (existingByHash) {
+      if (
+        existingByHash.objectKey !== asset.objectKey ||
+        !sameMediaMetadata(existingByHash, asset)
+      ) {
+        throw new ConflictError("同一内容已登记不同的笔记媒体");
+      }
+      return existingByHash;
+    }
+    try {
+      await this.db.insert(libraryMediaAssets).values(asset);
+      return asset;
+    } catch (error) {
+      const existing = await this.getLibraryMediaAssetByContentHash(
+        asset.contentHash
+      );
+      if (!existing) {
+        throw error;
+      }
+      if (
+        existing.objectKey !== asset.objectKey ||
+        !sameMediaMetadata(existing, asset)
+      ) {
+        throw new ConflictError("同一内容已登记不同的笔记媒体");
+      }
+      return existing;
+    }
+  }
+
+  async markLibraryMediaReady(mediaId: string, verifiedAt: Date) {
+    const result = await this.db
+      .update(libraryMediaAssets)
+      .set({ status: "READY", verifiedAt })
+      .where(
+        and(
+          eq(libraryMediaAssets.id, mediaId),
+          ne(libraryMediaAssets.status, "DELETING")
+        )
+      );
+    if (result[0].affectedRows === 0) {
+      throw new ConflictError("笔记媒体不存在或正在清理");
+    }
+  }
+
+  async markLibraryMediaDeletingIfUnreferenced(objectKey: string) {
+    return this.db.transaction(async (tx) => {
+      await this.lockOperations(tx, [`library-media:${objectKey}`]);
+      const references = await tx
+        .select({ id: libraryMediaReferences.id })
+        .from(libraryMediaReferences)
+        .where(eq(libraryMediaReferences.objectKey, objectKey))
+        .limit(1);
+      if (references.length) {
+        return false;
+      }
+      const rows = await tx
+        .select()
+        .from(libraryMediaAssets)
+        .where(eq(libraryMediaAssets.objectKey, objectKey))
+        .limit(1)
+        .for("update");
+      const asset = rows[0];
+      if (!asset || asset.status === "PENDING") {
+        return false;
+      }
+      await tx
+        .update(libraryMediaAssets)
+        .set({ status: "DELETING" })
+        .where(eq(libraryMediaAssets.id, asset.id));
+      return true;
+    });
+  }
+
+  async replaceLibraryMediaReferences(
+    sourceId: string,
+    references: LibraryMediaReference[]
+  ) {
+    await this.db.transaction(async (tx) => {
+      const objectKeys = [
+        ...new Set(references.map((reference) => reference.objectKey))
+      ];
+      await this.lockOperations(tx, [
+        `library-scan:${sourceId}`,
+        ...objectKeys.map((objectKey) => `library-media:${objectKey}`)
+      ]);
+      if (objectKeys.length) {
+        const deleting = await tx
+          .select({ objectKey: libraryMediaAssets.objectKey })
+          .from(libraryMediaAssets)
+          .where(
+            and(
+              inArray(libraryMediaAssets.objectKey, objectKeys),
+              eq(libraryMediaAssets.status, "DELETING")
+            )
+          );
+        if (deleting.length) {
+          throw new ConflictError("笔记媒体正在清理，请稍后重试扫描", {
+            objectKeys: deleting.map((asset) => asset.objectKey)
+          });
+        }
+      }
+      await tx
+        .delete(libraryMediaReferences)
+        .where(eq(libraryMediaReferences.sourceId, sourceId));
+      if (references.length) {
+        await tx.insert(libraryMediaReferences).values(references);
+      }
+    });
+  }
+
+  async getLibraryMediaReferences(objectKeys: string[]) {
+    if (!objectKeys.length) {
+      return [];
+    }
+    const rows = await this.db
+      .select()
+      .from(libraryMediaReferences)
+      .where(inArray(libraryMediaReferences.objectKey, objectKeys));
+    return rows.map((row) => ({
+      id: row.id,
+      sourceId: row.sourceId,
+      scope: row.scope,
+      objectKey: row.objectKey,
+      reference: row.reference,
+      updatedAt: row.updatedAt
+    }));
+  }
+
+  async enqueueLibraryMediaCleanup(objectKeys: string[], availableAt: Date) {
+    if (!objectKeys.length) {
+      return [];
+    }
+    const now = new Date();
+    const values = objectKeys.map((objectKey) => ({
+      id: randomUuid(),
+      objectKey,
+      status: "PENDING" as const,
+      attempts: 0,
+      lastError: null,
+      availableAt,
+      createdAt: now,
+      updatedAt: now
+    }));
+    await this.db
+      .insert(libraryMediaCleanupJobs)
+      .values(values)
+      .onDuplicateKeyUpdate({
+        set: {
+          status: "PENDING",
+          attempts: 0,
+          lastError: null,
+          availableAt,
+          updatedAt: now
+        }
+      });
+    const rows = await this.db
+      .select()
+      .from(libraryMediaCleanupJobs)
+      .where(inArray(libraryMediaCleanupJobs.objectKey, objectKeys));
+    return rows.map(toLibraryCleanupJob);
+  }
+
+  async claimLibraryMediaCleanupJobs(limit: number, now: Date) {
+    return this.db.transaction(async (tx) => {
+      const staleBefore = new Date(now.getTime() - 5 * 60 * 1000);
+      const rows = await tx
+        .select()
+        .from(libraryMediaCleanupJobs)
+        .where(
+          and(
+            lte(libraryMediaCleanupJobs.availableAt, now),
+            or(
+              inArray(libraryMediaCleanupJobs.status, ["PENDING", "FAILED"]),
+              and(
+                eq(libraryMediaCleanupJobs.status, "PROCESSING"),
+                lt(libraryMediaCleanupJobs.updatedAt, staleBefore)
+              )
+            )
+          )
+        )
+        .orderBy(libraryMediaCleanupJobs.createdAt)
+        .limit(limit)
+        .for("update", { skipLocked: true });
+      if (!rows.length) {
+        return [];
+      }
+      await tx
+        .update(libraryMediaCleanupJobs)
+        .set({ status: "PROCESSING", updatedAt: now })
+        .where(
+          inArray(
+            libraryMediaCleanupJobs.id,
+            rows.map((row) => row.id)
+          )
+        );
+      return rows.map((row) =>
+        toLibraryCleanupJob({
+          ...row,
+          status: "PROCESSING",
+          updatedAt: now
+        })
+      );
+    });
+  }
+
+  async completeLibraryMediaCleanupJob(jobId: string) {
+    await this.db
+      .delete(libraryMediaCleanupJobs)
+      .where(eq(libraryMediaCleanupJobs.id, jobId));
+  }
+
+  async failLibraryMediaCleanupJob(jobId: string, message: string) {
+    await this.db
+      .update(libraryMediaCleanupJobs)
+      .set({
+        status: "FAILED",
+        attempts: sql`${libraryMediaCleanupJobs.attempts} + 1`,
+        lastError: message.slice(0, 4000),
+        updatedAt: new Date()
+      })
+      .where(eq(libraryMediaCleanupJobs.id, jobId));
+  }
+
+  async deleteLibraryMediaAsset(objectKey: string) {
+    await this.db
+      .delete(libraryMediaAssets)
+      .where(eq(libraryMediaAssets.objectKey, objectKey));
   }
 
   async markMediaReady(mediaId: string) {

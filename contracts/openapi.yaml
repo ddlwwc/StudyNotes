@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
-  title: StudyNotes Publish API
-  version: 1.0.0
+  title: StudyNotes Web API
+  version: 1.1.0
   description: |
-    Mac 到 Web 的唯一发布 HTTP 契约。所有写操作以及发布状态查询都必须使用
-    Ed25519 请求签名；OpenAPI 同时用于运行时请求边界校验。
+    StudyNotes 客户端的唯一 HTTP 契约。发布和文章管理使用 Ed25519 请求签名；
+    笔记媒体使用共享 Bearer 密钥。OpenAPI 同时用于运行时请求边界校验。
 servers:
   - url: http://127.0.0.1:8090
 paths:
@@ -85,6 +85,172 @@ paths:
         "409":
           $ref: "#/components/responses/Error"
         "422":
+          $ref: "#/components/responses/Error"
+  /api/v1/library-media/status:
+    get:
+      operationId: getLibraryMediaStatus
+      security:
+        - LibraryMediaBearer: []
+      responses:
+        "200":
+          description: 笔记媒体服务状态和不含永久密钥的存储配置
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryMediaStatusResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+        "503":
+          description: 笔记媒体服务或存储不可用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryMediaStatusResponse"
+  /api/v1/library-media/upload-token:
+    post:
+      operationId: createLibraryMediaUploadToken
+      security:
+        - LibraryMediaBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LibraryMediaUploadRequest"
+      responses:
+        "200":
+          description: 内容寻址的短时笔记媒体上传凭据
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryMediaUploadResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /api/v1/library-media/complete:
+    post:
+      operationId: completeLibraryMediaUpload
+      security:
+        - LibraryMediaBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LibraryMediaCompleteRequest"
+      responses:
+        "200":
+          description: 对象存在性、哈希、类型和大小验证通过
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryMediaCompleteResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /api/v1/library-media/read-url:
+    post:
+      operationId: createLibraryMediaReadUrl
+      security:
+        - LibraryMediaBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LibraryMediaReadRequest"
+      responses:
+        "200":
+          description: 短时私有读取地址
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryMediaReadResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/v1/library-media/scan:
+    post:
+      operationId: scanLibraryMediaReferences
+      security:
+        - LibraryMediaBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LibraryMediaScanRequest"
+      responses:
+        "200":
+          description: 按当前正文、历史版本和本地历史媒体分类的扫描结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryMediaScanResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /api/v1/library-media/cleanup:
+    post:
+      operationId: requestLibraryMediaCleanup
+      security:
+        - LibraryMediaBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LibraryMediaCleanupRequest"
+      responses:
+        "200":
+          description: 已二次检查引用并排入延迟清理队列
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryMediaCleanupResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /api/v1/library-media/cleanup-candidates:
+    get:
+      operationId: listLibraryMediaCleanupCandidates
+      security:
+        - LibraryMediaBearer: []
+      responses:
+        "200":
+          description: 未被任何当前正文或历史版本引用的可清理云端媒体
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryMediaCleanupCandidateResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+  /api/v1/library-media/publish-preview:
+    post:
+      operationId: previewPublishedLibraryMedia
+      security:
+        - LibraryMediaBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LibraryMediaPublishPreviewRequest"
+      responses:
+        "200":
+          description: 发布正文中的媒体就绪状态
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LibraryMediaPublishPreviewResponse"
+        "401":
           $ref: "#/components/responses/Error"
   /api/v1/publish:
     post:
@@ -258,6 +424,11 @@ paths:
         "409":
           $ref: "#/components/responses/Error"
 components:
+  securitySchemes:
+    LibraryMediaBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: random-shared-key
   parameters:
     RegistrationSecret:
       name: x-studynotes-registration-secret
@@ -448,14 +619,14 @@ components:
           type: string
           minLength: 1
           maxLength: 512
-          pattern: "^[A-Za-z0-9][A-Za-z0-9/_.-]+$"
+          pattern: "^(articles|library-media)/[A-Za-z0-9][A-Za-z0-9/_.-]*$"
         contentHash:
           type: string
           pattern: "^sha256:[a-f0-9]{64}$"
         contentType:
           type: string
           maxLength: 128
-          pattern: "^(image|application|audio|video)/"
+          pattern: "^(image|application|audio|video|text)/"
         size:
           type: integer
           minimum: 1
@@ -723,7 +894,7 @@ components:
           type: string
           minLength: 1
           maxLength: 512
-          pattern: "^[A-Za-z0-9][A-Za-z0-9/_.-]+$"
+          pattern: "^articles/[A-Za-z0-9][A-Za-z0-9/_.-]*$"
         contentHash:
           type: string
           pattern: "^sha256:[a-f0-9]{64}$"
@@ -751,3 +922,304 @@ components:
           format: date-time
         method:
           enum: [PUT, POST]
+    LibraryMediaObjectKey:
+      type: string
+      pattern: "^library-media/[a-f0-9]{64}\\.[a-z0-9]{1,8}$"
+    LibraryMediaUploadRequest:
+      type: object
+      additionalProperties: false
+      required: [contentHash, contentType, size]
+      properties:
+        contentHash:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+        contentType:
+          type: string
+          maxLength: 128
+          pattern: "^(image|application|audio|video|text)/"
+        size:
+          type: integer
+          minimum: 1
+          maximum: 52428800
+    LibraryMediaUploadResponse:
+      type: object
+      additionalProperties: false
+      required: [uploadUrl, token, objectKey, expiresAt, method, alreadyExists]
+      properties:
+        uploadUrl:
+          type: string
+        token:
+          type: string
+        objectKey:
+          $ref: "#/components/schemas/LibraryMediaObjectKey"
+        expiresAt:
+          type: string
+          format: date-time
+        method:
+          enum: [PUT, POST]
+        alreadyExists:
+          type: boolean
+    LibraryMediaCompleteRequest:
+      type: object
+      additionalProperties: false
+      required: [objectKey]
+      properties:
+        objectKey:
+          $ref: "#/components/schemas/LibraryMediaObjectKey"
+    LibraryMediaCompleteResponse:
+      type: object
+      additionalProperties: false
+      required: [objectKey, status, contentHash, contentType, size]
+      properties:
+        objectKey:
+          $ref: "#/components/schemas/LibraryMediaObjectKey"
+        status:
+          const: READY
+        contentHash:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+        contentType:
+          type: string
+        size:
+          type: integer
+    LibraryMediaReadRequest:
+      type: object
+      additionalProperties: false
+      required: [objectKey]
+      properties:
+        objectKey:
+          $ref: "#/components/schemas/LibraryMediaObjectKey"
+    LibraryMediaReadResponse:
+      type: object
+      additionalProperties: false
+      required: [url, expiresAt]
+      properties:
+        url:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+    LibraryMediaPublishPreviewRequest:
+      type: object
+      additionalProperties: false
+      required: [bodyHtml]
+      properties:
+        bodyHtml:
+          type: string
+          minLength: 1
+          maxLength: 2000000
+        mediaRefs:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/MediaReference"
+    LibraryMediaPublishPreviewResponse:
+      type: object
+      additionalProperties: false
+      required: [ready, media]
+      properties:
+        ready:
+          type: boolean
+        media:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [objectKey, status]
+            properties:
+              objectKey:
+                type: string
+              status:
+                enum: [PENDING, READY, DELETING, MISSING, MISMATCH, MISSING_REFERENCE]
+              contentHash:
+                type: string
+              contentType:
+                type: string
+              size:
+                type: integer
+    LibraryMediaScanRequest:
+      type: object
+      additionalProperties: false
+      required: [sourceId, references]
+      properties:
+        sourceId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        references:
+          type: array
+          maxItems: 5000
+          items:
+            type: object
+            additionalProperties: false
+            required: [scope, objectKey, reference]
+            properties:
+              scope:
+                enum: [CURRENT, HISTORY]
+              objectKey:
+                $ref: "#/components/schemas/LibraryMediaObjectKey"
+              reference:
+                type: string
+                minLength: 1
+                maxLength: 1024
+        historicalLocalMedia:
+          type: array
+          maxItems: 5000
+          items:
+            type: object
+            additionalProperties: false
+            required: [reference, size]
+            properties:
+              reference:
+                type: string
+                minLength: 1
+                maxLength: 1024
+              size:
+                type: integer
+                minimum: 0
+                maximum: 52428800
+    LibraryMediaScanResponse:
+      type: object
+      additionalProperties: false
+      required: [sourceId, summary, media]
+      properties:
+        sourceId:
+          type: string
+        summary:
+          type: object
+          additionalProperties: false
+          required:
+            - currentCount
+            - historyCount
+            - totalSize
+            - missingCount
+            - historicalLocalCount
+            - historicalLocalSize
+          properties:
+            currentCount:
+              type: integer
+            historyCount:
+              type: integer
+            totalSize:
+              type: integer
+            missingCount:
+              type: integer
+            historicalLocalCount:
+              type: integer
+            historicalLocalSize:
+              type: integer
+        media:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [objectKey, scopes, references, status]
+            properties:
+              objectKey:
+                type: string
+              scopes:
+                type: array
+                items:
+                  enum: [CURRENT, HISTORY]
+              references:
+                type: array
+                items:
+                  type: string
+              status:
+                enum: [PENDING, READY, DELETING, MISSING]
+              contentHash:
+                type: string
+              contentType:
+                type: string
+              size:
+                type: integer
+    LibraryMediaCleanupRequest:
+      type: object
+      additionalProperties: false
+      required: [objectKeys, confirmed]
+      properties:
+        objectKeys:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            $ref: "#/components/schemas/LibraryMediaObjectKey"
+        confirmed:
+          const: true
+    LibraryMediaCleanupResponse:
+      type: object
+      additionalProperties: false
+      required: [queued, skipped]
+      properties:
+        queued:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [objectKey, availableAt]
+            properties:
+              objectKey:
+                type: string
+              availableAt:
+                type: string
+                format: date-time
+        skipped:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [objectKey, reason]
+            properties:
+              objectKey:
+                type: string
+              reason:
+                enum: [REFERENCED, NOT_FOUND, CONFIRMATION_REQUIRED]
+    LibraryMediaCleanupCandidateResponse:
+      type: object
+      additionalProperties: false
+      required: [summary, media]
+      properties:
+        summary:
+          type: object
+          additionalProperties: false
+          required: [count, totalSize]
+          properties:
+            count:
+              type: integer
+            totalSize:
+              type: integer
+        media:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [objectKey, status, contentHash, contentType, size]
+            properties:
+              objectKey:
+                $ref: "#/components/schemas/LibraryMediaObjectKey"
+              status:
+                const: READY
+              contentHash:
+                type: string
+                pattern: "^sha256:[a-f0-9]{64}$"
+              contentType:
+                type: string
+              size:
+                type: integer
+    LibraryMediaStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, bucket, domain, uploadUrl, httpWarning]
+      properties:
+        ok:
+          type: boolean
+        bucket:
+          type: string
+        domain:
+          type: string
+        uploadUrl:
+          type: string
+        httpWarning:
+          type: boolean
+        message:
+          type: string

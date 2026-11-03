@@ -9,6 +9,7 @@ import {
   ExternalServiceError,
   ValidationError
 } from "@/domain/errors";
+import { normalizeContentType } from "@/lib/media-content-type";
 
 interface QiniuConfig {
   accessKey: string;
@@ -40,6 +41,19 @@ export class QiniuStorageAdapter implements StorageAdapter {
       this.mac,
       new qiniu.conf.Config()
     );
+  }
+
+  async health() {
+    const response = await this.bucketManager.stat(
+      this.config.bucket,
+      ".studynotes-media-health-probe"
+    );
+    if (response.ok()) {
+      return true;
+    }
+    return Number(
+      (response as unknown as { statusCode?: number }).statusCode ?? 0
+    ) === 612;
   }
 
   async createUploadCredential(input: UploadCredentialInput) {
@@ -78,13 +92,13 @@ export class QiniuStorageAdapter implements StorageAdapter {
       throw new ValidationError("发布媒体大小不匹配");
     }
 
-    const storedContentType = String(stat.mimeType ?? input.contentType);
+    const storedContentType = String(stat.mimeType ?? "");
     if (
-      input.contentType &&
-      storedContentType &&
-      !storedContentType.startsWith(input.contentType.split(";")[0] ?? "")
+      !storedContentType ||
+      normalizeContentType(storedContentType) !==
+        normalizeContentType(input.contentType)
     ) {
-      throw new ValidationError("发布媒体类型不匹配");
+      throw new ValidationError("笔记媒体类型不匹配");
     }
 
     const bytes = await this.readObject(input.objectKey);
@@ -100,6 +114,22 @@ export class QiniuStorageAdapter implements StorageAdapter {
       contentType: storedContentType,
       size: Number(stat.fsize)
     };
+  }
+
+  async copyObject(
+    sourceObjectKey: string,
+    destinationObjectKey: string
+  ): Promise<void> {
+    const response = await this.bucketManager.copy(
+      this.config.bucket,
+      sourceObjectKey,
+      this.config.bucket,
+      destinationObjectKey,
+      { force: true }
+    );
+    if (!response.ok()) {
+      throw new ExternalServiceError("复制七牛云笔记媒体失败");
+    }
   }
 
   async createReadUrl(
@@ -132,7 +162,11 @@ export class QiniuStorageAdapter implements StorageAdapter {
     if (contentLength > 50 * 1024 * 1024) {
       throw new ExternalServiceError("七牛云对象超过允许大小");
     }
-    return Buffer.from(await response.arrayBuffer());
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length > 50 * 1024 * 1024) {
+      throw new ExternalServiceError("七牛云对象超过允许大小");
+    }
+    return bytes;
   }
 
   async deleteObject(objectKey: string): Promise<void> {

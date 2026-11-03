@@ -34,9 +34,12 @@ import { computePublishFingerprint } from "@/lib/fingerprint";
 import {
   buildReaderContent,
   referencedMediaKeys,
+  rewriteMediaObjectKeys,
   sanitizeArticleHtml
 } from "@/lib/html";
 import { randomId, randomUuid } from "@/lib/ids";
+import { publishedObjectKey } from "@/lib/media-object-key";
+import { sameMediaMetadata } from "@/lib/media-content-type";
 
 const MAX_ANNOTATIONS = 200;
 const MAX_AI_ITEMS = 50;
@@ -94,13 +97,24 @@ export class PublishService {
     requestHash: string,
     input: PublishRequest
   ): Promise<{ status: number; response: PublishResponse }> {
+    const replay = await this.repository.getPublishOutcomeByRequest(
+      keyId,
+      input.requestId,
+      requestHash
+    );
+    if (replay) {
+      return {
+        status: 200,
+        response: this.toPublishResponse(replay)
+      };
+    }
     await this.flushMediaCleanupJobs();
     const annotations = this.activeAnnotations(input);
     const aiAppendix = this.activeAiAppendix(input);
     const tags = this.normalizeTags(input.tags);
     const mediaRefs = input.mediaRefs ?? [];
-    const media = await this.validateMediaRefs(mediaRefs, input.bodyHtml);
-    const reader = buildReaderContent(input.bodyHtml, annotations);
+    const resolvedMedia = await this.validateMediaRefs(mediaRefs, input.bodyHtml);
+    const reader = buildReaderContent(resolvedMedia.bodyHtml, annotations);
     const fingerprint = computePublishFingerprint({
       title: input.title,
       summary: input.summary ?? "",
@@ -129,7 +143,7 @@ export class PublishService {
       tags,
       annotations,
       aiAppendix,
-      media,
+      media: resolvedMedia.media,
       versionId: randomUuid(),
       newArticleRowId: randomUuid(),
       newArticlePublicId: randomId(24),
@@ -236,6 +250,9 @@ export class PublishService {
   async createMediaUploadToken(
     input: MediaUploadTokenRequest
   ): Promise<MediaUploadTokenResponse> {
+    if (!input.objectKey.startsWith("articles/")) {
+      throw new ValidationError("发布媒体对象键必须使用 articles/ 命名空间");
+    }
     await this.flushMediaCleanupJobs();
     let asset = await this.repository.getMediaAssetByObjectKey(input.objectKey);
     if (asset) {
@@ -339,7 +356,7 @@ export class PublishService {
   private async validateMediaRefs(
     refs: MediaReferenceInput[],
     rawBodyHtml: string
-  ): Promise<VersionMedia[]> {
+  ): Promise<{ media: VersionMedia[]; bodyHtml: string }> {
     const sanitized = sanitizeArticleHtml(rawBodyHtml);
     const referenced = referencedMediaKeys(sanitized);
     const byKey = new Map<string, MediaReferenceInput>();
@@ -351,12 +368,93 @@ export class PublishService {
     });
     referenced.forEach((key) => {
       if (!byKey.has(key)) {
-        throw new ValidationError(`正文引用的媒体 ${key} 缺少媒体提交信息`);
+        throw new ValidationError(`正文引用的媒体 ${key} 缺少媒体提交信息`, {
+          media: [{ objectKey: key, status: "MISSING_REFERENCE" }]
+        });
       }
     });
 
-    const media: VersionMedia[] = [];
+    const readinessIssues: Array<{
+      objectKey: string;
+      status: "PENDING" | "MISSING" | "MISMATCH";
+    }> = [];
     for (const ref of refs) {
+      if (!isLibraryMedia(ref.objectKey)) {
+        continue;
+      }
+      const asset = await this.repository.getLibraryMediaAssetByObjectKey(
+        ref.objectKey
+      );
+      if (!asset) {
+        readinessIssues.push({ objectKey: ref.objectKey, status: "MISSING" });
+      } else if (
+        asset.contentHash !== ref.contentHash ||
+        asset.contentType !== ref.contentType ||
+        asset.size !== ref.size
+      ) {
+        readinessIssues.push({ objectKey: ref.objectKey, status: "MISMATCH" });
+      } else if (asset.status !== "READY") {
+        readinessIssues.push({ objectKey: ref.objectKey, status: "PENDING" });
+      }
+    }
+    if (readinessIssues.length) {
+      throw new ValidationError("笔记媒体尚未全部就绪", {
+        media: readinessIssues
+      });
+    }
+
+    const media: VersionMedia[] = [];
+    const rewrittenKeys = new Map<string, string>();
+    for (const ref of refs) {
+      if (isLibraryMedia(ref.objectKey)) {
+        const libraryAsset =
+          await this.repository.getLibraryMediaAssetByObjectKey(ref.objectKey);
+        if (!libraryAsset) {
+          throw new ValidationError("笔记媒体登记不存在");
+        }
+        this.assertLibraryAssetMatches(libraryAsset, ref);
+        const objectKey = publishedObjectKey(
+          libraryAsset.contentHash,
+          libraryAsset.contentType
+        );
+        await this.storage.copyObject(
+          libraryAsset.objectKey,
+          objectKey,
+          libraryAsset.contentType
+        );
+        await this.storage.verifyObject({
+          objectKey,
+          contentHash: libraryAsset.contentHash,
+          contentType: libraryAsset.contentType,
+          size: libraryAsset.size
+        });
+        let publishAsset =
+          await this.repository.getMediaAssetByObjectKey(objectKey);
+        if (!publishAsset) {
+          publishAsset = await this.repository.createMediaAsset({
+            id: randomUuid(),
+            objectKey,
+            contentHash: libraryAsset.contentHash,
+            contentType: libraryAsset.contentType,
+            size: libraryAsset.size,
+            status: "PENDING",
+            createdAt: new Date()
+          });
+        }
+        await this.repository.markMediaReady(publishAsset.id);
+        rewrittenKeys.set(ref.objectKey, objectKey);
+        media.push({
+          id: publishAsset.id,
+          mediaId: publishAsset.id,
+          objectKey,
+          contentHash: publishAsset.contentHash,
+          contentType: publishAsset.contentType,
+          size: publishAsset.size,
+          reference: ref.reference
+        });
+        continue;
+      }
+
       const asset = await this.repository.getMediaAssetByObjectKey(ref.objectKey);
       if (!asset) {
         throw new ValidationError("发布媒体尚未取得受控上传凭据");
@@ -374,16 +472,28 @@ export class PublishService {
         reference: ref.reference
       });
     }
-    return media;
+    return {
+      media,
+      bodyHtml: rewriteMediaObjectKeys(rawBodyHtml, rewrittenKeys)
+    };
   }
 
   private assertAssetMatches(asset: MediaAsset, ref: MediaReferenceInput): void {
-    if (
-      asset.contentHash !== ref.contentHash ||
-      asset.contentType !== ref.contentType ||
-      asset.size !== ref.size
-    ) {
+    if (!sameMediaMetadata(asset, ref)) {
       throw new ValidationError("发布媒体信息与上传凭据登记不一致");
+    }
+  }
+
+  private assertLibraryAssetMatches(
+    asset: {
+      contentHash: string;
+      contentType: string;
+      size: number;
+    },
+    ref: MediaReferenceInput
+  ): void {
+    if (!sameMediaMetadata(asset, ref)) {
+      throw new ValidationError("笔记媒体信息与上传登记不一致");
     }
   }
 
@@ -445,6 +555,10 @@ export class PublishService {
       }
     }
   }
+}
+
+function isLibraryMedia(objectKey: string): boolean {
+  return objectKey.startsWith("library-media/");
 }
 
 export function requestBodyHash(body: string): string {

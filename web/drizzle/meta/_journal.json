@@ -15,6 +15,13 @@
       "when": 1793692800000,
       "tag": "0001_publish_hardening",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793740800000,
+      "tag": "0002_library_media",
+      "breakpoints": true
     }
   ]
 }

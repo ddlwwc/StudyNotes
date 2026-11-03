@@ -4,9 +4,12 @@ import { validateContract } from "@/lib/contract";
 import { sha256 } from "@/lib/signature";
 import {
   getSignatureAuthenticator,
-  getPublishService
+  getPublishService,
+  getLibraryMediaService,
+  getMediaBearerAuthenticator
 } from "@/lib/services";
 import type { PublishService } from "@/lib/services/publish-service";
+import type { LibraryMediaService } from "@/lib/services/library-media-service";
 
 export interface SignedBody<T> {
   body: T;
@@ -49,4 +52,21 @@ export async function parseSignedEmpty(request: Request) {
     requestHash: sha256(""),
     service: getPublishService()
   };
+}
+
+export async function parseBearerJson<T>(
+  request: Request,
+  schemaName: string
+): Promise<{ body: T; service: LibraryMediaService }> {
+  await getMediaBearerAuthenticator().authenticate(request);
+  const parsed = await readJsonBody(request);
+  return {
+    body: validateContract<T>(schemaName, parsed.value),
+    service: getLibraryMediaService()
+  };
+}
+
+export async function parseBearerEmpty(request: Request) {
+  await getMediaBearerAuthenticator().authenticate(request);
+  return getLibraryMediaService();
 }

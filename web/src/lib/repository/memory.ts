@@ -5,6 +5,9 @@ import type {
   AtomicPublishInput,
   DeleteInput,
   DeleteOutcome,
+  LibraryMediaAsset,
+  LibraryMediaCleanupJob,
+  LibraryMediaReference,
   MediaAsset,
   MediaCleanupJob,
   PublishKey,
@@ -25,6 +28,7 @@ import {
 } from "@/domain/errors";
 import { plainTextFromHtml } from "@/lib/html";
 import { randomUuid } from "@/lib/ids";
+import { sameMediaMetadata } from "@/lib/media-content-type";
 
 interface InternalRequest {
   stored: StoredRequest;
@@ -48,6 +52,17 @@ export class MemoryRepository implements PublishRepository {
   private readonly requests = new Map<string, InternalRequest>();
   private readonly media = new Map<string, MediaAsset>();
   private readonly mediaByObjectKey = new Map<string, string>();
+  private readonly libraryMedia = new Map<string, LibraryMediaAsset>();
+  private readonly libraryMediaByObjectKey = new Map<string, string>();
+  private readonly libraryMediaByContentHash = new Map<string, string>();
+  private readonly libraryMediaReferences = new Map<
+    string,
+    LibraryMediaReference[]
+  >();
+  private readonly libraryCleanupJobs = new Map<
+    string,
+    LibraryMediaCleanupJob
+  >();
   private readonly versionMedia = new Map<string, VersionMedia[]>();
   private readonly searchRows = new Map<string, SearchRow>();
   private readonly cleanupJobs = new Map<string, MediaCleanupJob>();
@@ -95,6 +110,15 @@ export class MemoryRepository implements PublishRepository {
     }
     this.nonces.add(value);
     return true;
+  }
+
+  async getPublishOutcomeByRequest(
+    keyId: string,
+    requestId: string,
+    requestHash: string
+  ): Promise<PublishOutcome | null> {
+    const replay = this.readRequest(keyId, requestId, requestHash);
+    return replay ? { ...(replay as PublishOutcome), idempotent: true } : null;
   }
 
   async executePublish(input: AtomicPublishInput): Promise<PublishOutcome> {
@@ -397,11 +421,7 @@ export class MemoryRepository implements PublishRepository {
       if (!value) {
         throw new ConflictError("媒体索引损坏");
       }
-      if (
-        value.contentHash !== asset.contentHash ||
-        value.size !== asset.size ||
-        value.contentType !== asset.contentType
-      ) {
+      if (!sameMediaMetadata(value, asset)) {
         throw new ConflictError("同一对象键已登记不同媒体");
       }
       return value;
@@ -409,6 +429,179 @@ export class MemoryRepository implements PublishRepository {
     this.media.set(asset.id, { ...asset });
     this.mediaByObjectKey.set(asset.objectKey, asset.id);
     return { ...asset };
+  }
+
+  async getLibraryMediaAssetByContentHash(contentHash: string) {
+    const id = this.libraryMediaByContentHash.get(contentHash);
+    return id ? this.libraryMedia.get(id) ?? null : null;
+  }
+
+  async getLibraryMediaAssetByObjectKey(objectKey: string) {
+    const id = this.libraryMediaByObjectKey.get(objectKey);
+    return id ? this.libraryMedia.get(id) ?? null : null;
+  }
+
+  async listLibraryMediaAssets() {
+    return [...this.libraryMedia.values()].map((asset) => ({ ...asset }));
+  }
+
+  async createLibraryMediaAsset(asset: LibraryMediaAsset) {
+    const existingByHash = await this.getLibraryMediaAssetByContentHash(
+      asset.contentHash
+    );
+    const existingByKey = this.libraryMedia.get(
+      this.libraryMediaByObjectKey.get(asset.objectKey) ?? ""
+    );
+    const existing = existingByHash ?? existingByKey;
+    if (existing) {
+      if (
+        existing.objectKey !== asset.objectKey ||
+        !sameMediaMetadata(existing, asset)
+      ) {
+        throw new ConflictError("同一内容已登记不同的笔记媒体");
+      }
+      return existing;
+    }
+    this.libraryMedia.set(asset.id, { ...asset });
+    this.libraryMediaByObjectKey.set(asset.objectKey, asset.id);
+    this.libraryMediaByContentHash.set(asset.contentHash, asset.id);
+    return { ...asset };
+  }
+
+  async markLibraryMediaReady(mediaId: string, verifiedAt: Date) {
+    const asset = this.libraryMedia.get(mediaId);
+    if (!asset) {
+      throw new NotFoundError("笔记媒体不存在");
+    }
+    if (asset.status === "DELETING") {
+      throw new ConflictError("笔记媒体正在清理");
+    }
+    asset.status = "READY";
+    asset.verifiedAt = verifiedAt;
+  }
+
+  async markLibraryMediaDeletingIfUnreferenced(objectKey: string) {
+    if ((await this.getLibraryMediaReferences([objectKey])).length) {
+      return false;
+    }
+    const id = this.libraryMediaByObjectKey.get(objectKey);
+    const asset = id ? this.libraryMedia.get(id) : undefined;
+    if (!asset || asset.status === "PENDING") {
+      return false;
+    }
+    asset.status = "DELETING";
+    return true;
+  }
+
+  async replaceLibraryMediaReferences(
+    sourceId: string,
+    references: LibraryMediaReference[]
+  ) {
+    const deletingKeys = new Set(
+      (await Promise.all(
+        [...new Set(references.map((reference) => reference.objectKey))].map(
+          (objectKey) => this.getLibraryMediaAssetByObjectKey(objectKey)
+        )
+      ))
+        .filter((asset) => asset?.status === "DELETING")
+        .map((asset) => asset!.objectKey)
+    );
+    if (deletingKeys.size) {
+      throw new ConflictError("笔记媒体正在清理，请稍后重试扫描", {
+        objectKeys: [...deletingKeys]
+      });
+    }
+    this.libraryMediaReferences.set(
+      sourceId,
+      references.map((reference) => ({ ...reference }))
+    );
+  }
+
+  async getLibraryMediaReferences(objectKeys: string[]) {
+    const wanted = new Set(objectKeys);
+    return [...this.libraryMediaReferences.values()]
+      .flat()
+      .filter((reference) => wanted.has(reference.objectKey))
+      .map((reference) => ({ ...reference }));
+  }
+
+  async enqueueLibraryMediaCleanup(objectKeys: string[], availableAt: Date) {
+    const now = new Date();
+    return objectKeys.map((objectKey) => {
+      const existing = this.libraryCleanupJobs.get(objectKey);
+      const job: LibraryMediaCleanupJob = {
+        id: existing?.id ?? randomUuid(),
+        objectKey,
+        status: "PENDING",
+        attempts: 0,
+        lastError: null,
+        availableAt,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now
+      };
+      this.libraryCleanupJobs.set(objectKey, job);
+      return { ...job };
+    });
+  }
+
+  async claimLibraryMediaCleanupJobs(limit: number, now: Date) {
+    const staleBefore = now.getTime() - 5 * 60 * 1000;
+    return [...this.libraryCleanupJobs.values()]
+      .filter(
+        (job) =>
+          job.availableAt.getTime() <= now.getTime() &&
+          (job.status === "PENDING" ||
+            job.status === "FAILED" ||
+            (job.status === "PROCESSING" &&
+              job.updatedAt.getTime() < staleBefore))
+      )
+      .sort(
+        (left, right) => left.createdAt.getTime() - right.createdAt.getTime()
+      )
+      .slice(0, limit)
+      .map((job) => {
+        const claimed = {
+          ...job,
+          status: "PROCESSING" as const,
+          updatedAt: now
+        };
+        this.libraryCleanupJobs.set(job.objectKey, claimed);
+        return { ...claimed };
+      });
+  }
+
+  async completeLibraryMediaCleanupJob(jobId: string) {
+    for (const [objectKey, job] of this.libraryCleanupJobs) {
+      if (job.id === jobId) {
+        this.libraryCleanupJobs.delete(objectKey);
+        return;
+      }
+    }
+  }
+
+  async failLibraryMediaCleanupJob(jobId: string, message: string) {
+    for (const job of this.libraryCleanupJobs.values()) {
+      if (job.id === jobId) {
+        job.status = "FAILED";
+        job.attempts += 1;
+        job.lastError = message;
+        job.updatedAt = new Date();
+        return;
+      }
+    }
+  }
+
+  async deleteLibraryMediaAsset(objectKey: string) {
+    const id = this.libraryMediaByObjectKey.get(objectKey);
+    if (!id) {
+      return;
+    }
+    const asset = this.libraryMedia.get(id);
+    this.libraryMedia.delete(id);
+    this.libraryMediaByObjectKey.delete(objectKey);
+    if (asset) {
+      this.libraryMediaByContentHash.delete(asset.contentHash);
+    }
   }
 
   async markMediaReady(mediaId: string) {

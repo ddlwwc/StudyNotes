@@ -5,6 +5,7 @@ import type { PublishRequest } from "@/lib/api-types";
 import { ConflictError } from "@/domain/errors";
 import { MySqlRepository } from "@/lib/repository/mysql";
 import { PublishService } from "@/lib/services/publish-service";
+import { LibraryMediaService } from "@/lib/services/library-media-service";
 import { MemoryStorageAdapter } from "@/lib/storage/memory";
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -222,10 +223,105 @@ describe.skipIf(!integrationEnabled)("MySQL publish hardening", () => {
     expect(await cleanupJobCount(pool)).toBe(0);
   });
 
+  it("deduplicates library media and isolates published copies from source cleanup", async () => {
+    storage = new VerifyingStorage(pool);
+    service = serviceFor(storage);
+    const library = libraryServiceFor(storage);
+    const bytes = Buffer.from("mysql-library-media");
+    const contentHash = hash(bytes);
+    const uploads = await Promise.all([
+      library.createUploadToken({
+        contentHash,
+        contentType: "image/png",
+        size: bytes.length
+      }),
+      library.createUploadToken({
+        contentHash,
+        contentType: "image/png",
+        size: bytes.length
+      })
+    ]);
+    expect(new Set(uploads.map((item) => item.objectKey)).size).toBe(1);
+    expect(await libraryMediaCount(pool)).toBe(1);
+    const objectKey = uploads[0].objectKey;
+    storage.putObject(objectKey, bytes, "image/png");
+    await library.completeUpload({ objectKey });
+    await library.scanReferences({
+      sourceId: "mysql-library-note",
+      references: [
+        {
+          scope: "CURRENT",
+          objectKey,
+          reference: `media://qiniu/${objectKey}`
+        }
+      ]
+    });
+    const protectedCleanup = await library.requestCleanup({
+      objectKeys: [objectKey],
+      confirmed: true
+    });
+    expect(protectedCleanup.skipped).toContainEqual({
+      objectKey,
+      reason: "REFERENCED"
+    });
+
+    const input = request({
+      requestId: "mysql-library-publish-request",
+      sourceMaterialId: "mysql-library-publish-material",
+      bodyHtml: `<img data-object-key="${objectKey}" alt="library">`,
+      mediaRefs: [
+        {
+          objectKey,
+          contentHash,
+          contentType: "image/png",
+          size: bytes.length,
+          reference: `media://qiniu/${objectKey}`
+        }
+      ]
+    });
+    const published = await service.publish(
+      kid,
+      hash(JSON.stringify(input)),
+      input
+    );
+    const article = await repository.getArticleByPublicId(
+      published.response.articleId
+    );
+    const view = await repository.getArticleView(article!);
+    const publishedObjectKey = view!.version.media[0]!.objectKey;
+    expect(publishedObjectKey).toMatch(/^published-media\//);
+    expect(storage.hasObject(publishedObjectKey)).toBe(true);
+
+    await library.scanReferences({
+      sourceId: "mysql-library-note",
+      references: []
+    });
+    await library.requestCleanup({
+      objectKeys: [objectKey],
+      confirmed: true
+    });
+    expect(storage.hasObject(objectKey)).toBe(false);
+    expect(storage.hasObject(publishedObjectKey)).toBe(true);
+    expect(await repository.getArticleView(article!)).not.toBeNull();
+  });
+
   function serviceFor(adapter: MemoryStorageAdapter) {
     return new PublishService(repository, adapter, {
       baseUrl: "http://127.0.0.1:8090",
       mediaUrlTtlSeconds: 300
+    });
+  }
+
+  function libraryServiceFor(adapter: MemoryStorageAdapter) {
+    return new LibraryMediaService(repository, adapter, {
+      baseUrl: "http://127.0.0.1:8090",
+      mediaUrlTtlSeconds: 300,
+      cleanupDelaySeconds: 0,
+      qiniu: {
+        bucket: "mysql-test",
+        domain: "memory://media",
+        uploadUrl: "memory://upload"
+      }
     });
   }
 });
@@ -278,6 +374,9 @@ function hash(value: string | Buffer): string {
 
 async function resetDatabase(pool: mysql.Pool) {
   const tables = [
+    "library_media_cleanup_jobs",
+    "library_media_references",
+    "library_media_assets",
     "media_cleanup_jobs",
     "publish_locks",
     "article_search",
@@ -297,6 +396,13 @@ async function resetDatabase(pool: mysql.Pool) {
   } finally {
     await pool.query("SET FOREIGN_KEY_CHECKS = 1");
   }
+}
+
+async function libraryMediaCount(pool: mysql.Pool): Promise<number> {
+  const [rows] = await pool.query<mysql.RowDataPacket[]>(
+    "SELECT COUNT(*) AS count FROM library_media_assets"
+  );
+  return Number(rows[0]?.count ?? 0);
 }
 
 async function cleanupJobCount(pool: mysql.Pool): Promise<number> {

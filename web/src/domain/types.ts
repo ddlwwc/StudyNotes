@@ -33,31 +33,58 @@ export interface AiAppendixItem {
   body: string;
 }
 
-export interface MediaReferenceInput {
-  objectKey: string;
+export interface MediaMetadata {
   contentHash: string;
   contentType: string;
   size: number;
+}
+
+export interface MediaReferenceInput extends MediaMetadata {
+  objectKey: string;
   reference: string;
 }
 
-export interface MediaAsset {
+export interface MediaAsset extends MediaMetadata {
   id: string;
   objectKey: string;
-  contentHash: string;
-  contentType: string;
-  size: number;
   status: "PENDING" | "READY";
   createdAt: Date;
 }
 
-export interface VersionMedia {
+export interface LibraryMediaAsset extends MediaMetadata {
+  id: string;
+  objectKey: string;
+  status: "PENDING" | "READY" | "DELETING";
+  createdAt: Date;
+  verifiedAt: Date | null;
+}
+
+export type LibraryMediaReferenceScope = "CURRENT" | "HISTORY";
+
+export interface LibraryMediaReference {
+  id: string;
+  sourceId: string;
+  scope: LibraryMediaReferenceScope;
+  objectKey: string;
+  reference: string;
+  updatedAt: Date;
+}
+
+export interface LibraryMediaCleanupJob {
+  id: string;
+  objectKey: string;
+  status: "PENDING" | "PROCESSING" | "FAILED";
+  attempts: number;
+  lastError: string | null;
+  availableAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface VersionMedia extends MediaMetadata {
   id: string;
   mediaId: string;
   objectKey: string;
-  contentHash: string;
-  contentType: string;
-  size: number;
   reference: string;
 }
 
@@ -240,6 +267,11 @@ export interface PublishRepository {
     seenAt: Date,
     expiresAt: Date
   ): Promise<boolean>;
+  getPublishOutcomeByRequest(
+    keyId: string,
+    requestId: string,
+    requestHash: string
+  ): Promise<PublishOutcome | null>;
   executePublish(input: AtomicPublishInput): Promise<PublishOutcome>;
   executeVisibilityChange(input: VisibilityInput): Promise<VisibilityOutcome>;
   executeRollback(input: RollbackInput): Promise<RollbackOutcome>;
@@ -252,6 +284,34 @@ export interface PublishRepository {
   getMediaAsset(mediaId: string): Promise<MediaAsset | null>;
   getMediaAssetByObjectKey(objectKey: string): Promise<MediaAsset | null>;
   createMediaAsset(asset: MediaAsset): Promise<MediaAsset>;
+  getLibraryMediaAssetByContentHash(
+    contentHash: string
+  ): Promise<LibraryMediaAsset | null>;
+  getLibraryMediaAssetByObjectKey(
+    objectKey: string
+  ): Promise<LibraryMediaAsset | null>;
+  listLibraryMediaAssets(): Promise<LibraryMediaAsset[]>;
+  createLibraryMediaAsset(asset: LibraryMediaAsset): Promise<LibraryMediaAsset>;
+  markLibraryMediaReady(mediaId: string, verifiedAt: Date): Promise<void>;
+  markLibraryMediaDeletingIfUnreferenced(objectKey: string): Promise<boolean>;
+  replaceLibraryMediaReferences(
+    sourceId: string,
+    references: LibraryMediaReference[]
+  ): Promise<void>;
+  getLibraryMediaReferences(
+    objectKeys: string[]
+  ): Promise<LibraryMediaReference[]>;
+  enqueueLibraryMediaCleanup(
+    objectKeys: string[],
+    availableAt: Date
+  ): Promise<LibraryMediaCleanupJob[]>;
+  claimLibraryMediaCleanupJobs(
+    limit: number,
+    now: Date
+  ): Promise<LibraryMediaCleanupJob[]>;
+  completeLibraryMediaCleanupJob(jobId: string): Promise<void>;
+  failLibraryMediaCleanupJob(jobId: string, message: string): Promise<void>;
+  deleteLibraryMediaAsset(objectKey: string): Promise<void>;
   markMediaReady(mediaId: string): Promise<void>;
   claimMediaCleanupJobs(limit: number): Promise<MediaCleanupJob[]>;
   completeMediaCleanupJob(jobId: string): Promise<void>;
@@ -285,9 +345,17 @@ export interface ObjectMetadata {
   size: number;
 }
 
+export type ObjectVerificationInput = Omit<MediaReferenceInput, "reference">;
+
 export interface StorageAdapter {
   createUploadCredential(input: UploadCredentialInput): Promise<UploadCredential>;
-  verifyObject(input: MediaReferenceInput): Promise<ObjectMetadata>;
+  verifyObject(input: ObjectVerificationInput): Promise<ObjectMetadata>;
+  health(): Promise<boolean>;
+  copyObject(
+    sourceObjectKey: string,
+    destinationObjectKey: string,
+    contentType: string
+  ): Promise<void>;
   createReadUrl(objectKey: string, expiresInSeconds: number): Promise<string>;
   readObject(objectKey: string): Promise<Buffer>;
   deleteObject(objectKey: string): Promise<void>;

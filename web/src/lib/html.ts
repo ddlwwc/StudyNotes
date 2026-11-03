@@ -52,26 +52,28 @@ export function sanitizeArticleHtml(source: string): string {
   return sanitizeHtml(source, {
     allowedTags: ALLOWED_TAGS,
     allowedAttributes: {
-      a: ["href", "title", "target", "rel"],
+      a: ["href", "title", "target", "rel", "download", "data-object-key"],
       img: ["alt", "title", "width", "height", "data-object-key"],
       "*": ["id", "class", "data-block-id"]
     },
-    allowedSchemes: ["http", "https", "mailto"],
+    allowedSchemes: ["http", "https", "mailto", "media"],
     allowedSchemesByTag: {
       img: []
     },
     transformTags: {
       a: (_tagName, attributes) => ({
         tagName: "a",
-        attribs:
-          attributes.href?.startsWith("http") === true
-            ? {
-                ...attributes,
-                target: "_blank",
-                rel: "noopener noreferrer"
-              }
-            : attributes
-      })
+        attribs: attachmentAttributes(attributes)
+      }),
+      img: (_tagName, attributes) => {
+        const objectKey = mediaObjectKey(attributes.src) ?? attributes["data-object-key"];
+        const { src: _src, ...rest } = attributes;
+        void _src;
+        return {
+          tagName: "img",
+          attribs: objectKey ? { ...rest, "data-object-key": objectKey } : rest
+        };
+      }
     }
   });
 }
@@ -79,8 +81,12 @@ export function sanitizeArticleHtml(source: string): string {
 export function referencedMediaKeys(html: string): string[] {
   const $ = load(html);
   const keys = new Set<string>();
-  $("img[data-object-key]").each((_index, element) => {
-    const key = $(element).attr("data-object-key");
+  $("[data-object-key]").each((_index, element) => {
+    const node = $(element);
+    const key =
+      node.attr("data-object-key") ??
+      mediaObjectKey(node.attr("src")) ??
+      mediaObjectKey(node.attr("href"));
     if (key) {
       keys.add(key);
     }
@@ -167,6 +173,7 @@ export function buildReaderContent(
   const bodyHtml = sanitizeArticleHtml(sourceHtml);
   const $ = load(`<main id="article-body">${bodyHtml}</main>`, null, false);
   $("img:not([data-object-key])").remove();
+  $("a[href^='media:']:not([data-object-key])").remove();
 
   annotations.forEach((annotation) => {
     const quote = normalizedText(annotation.quote);
@@ -253,16 +260,23 @@ export function rewriteMediaReferences(
 ): string {
   const byKey = new Map(media.map((item) => [item.objectKey, item]));
   const $ = load(`<main id="article-body">${html}</main>`, null, false);
-  $("img[data-object-key]").each((_index, element) => {
+  $("[data-object-key]").each((_index, element) => {
+    const node = $(element);
     const key = $(element).attr("data-object-key");
     const asset = key ? byKey.get(key) : undefined;
     if (!asset) {
       $(element).remove();
       return;
     }
-    $(element).attr("src", `${basePath}/media/${asset.mediaId}`);
-    $(element).attr("loading", "lazy");
-    $(element).attr("decoding", "async");
+    const url = `${basePath}/media/${asset.mediaId}`;
+    if (element.tagName === "img") {
+      node.attr("src", url);
+      node.attr("loading", "lazy");
+      node.attr("decoding", "async");
+    } else if (element.tagName === "a") {
+      node.attr("href", url);
+      node.attr("download", "attachment");
+    }
   });
   return $("main").html() ?? html;
 }
@@ -283,7 +297,8 @@ export async function embedMediaAsDataUrls(
   }
 
   const $ = load(`<main id="article-body">${html}</main>`, null, false);
-  $("img[data-object-key]").each((_index, element) => {
+  $("[data-object-key]").each((_index, element) => {
+    const node = $(element);
     const key = $(element).attr("data-object-key");
     const data = key ? dataByKey.get(key) : undefined;
     const asset = key ? byKey.get(key) : undefined;
@@ -291,8 +306,70 @@ export async function embedMediaAsDataUrls(
       $(element).remove();
       return;
     }
-    $(element).attr("src", data);
-    $(element).removeAttr("data-object-key");
+    if (element.tagName === "img") {
+      node.attr("src", data);
+    } else if (element.tagName === "a") {
+      node.attr("href", data);
+      node.attr("download", "attachment");
+    }
+    node.removeAttr("data-object-key");
   });
   return $("main").html() ?? html;
+}
+
+export function rewriteMediaObjectKeys(
+  html: string,
+  replacements: Map<string, string>
+): string {
+  if (!replacements.size) {
+    return html;
+  }
+  const $ = load(`<main id="article-body">${html}</main>`, null, false);
+  $("[data-object-key]").each((_index, element) => {
+    const node = $(element);
+    const key = node.attr("data-object-key");
+    if (key && replacements.has(key)) {
+      node.attr("data-object-key", replacements.get(key));
+    }
+  });
+  $("[src], [href]").each((_index, element) => {
+    const node = $(element);
+    for (const attribute of ["src", "href"] as const) {
+      const value = node.attr(attribute);
+      if (!value?.startsWith("media://qiniu/")) {
+        continue;
+      }
+      const key = value.slice("media://qiniu/".length);
+      if (replacements.has(key)) {
+        node.attr(attribute, `media://qiniu/${replacements.get(key)}`);
+      }
+    }
+  });
+  return $("main").html() ?? html;
+}
+
+function attachmentAttributes(
+  attributes: Record<string, string>
+): Record<string, string> {
+  const objectKey = mediaObjectKey(attributes.href);
+  if (objectKey) {
+    return { ...attributes, "data-object-key": objectKey };
+  }
+  if (attributes.href?.startsWith("media:")) {
+    const { href: _href, ...rest } = attributes;
+    void _href;
+    return rest;
+  }
+  return attributes.href?.startsWith("http") === true
+    ? {
+        ...attributes,
+        target: "_blank",
+        rel: "noopener noreferrer"
+      }
+    : attributes;
+}
+
+function mediaObjectKey(value: string | undefined): string | undefined {
+  const prefix = "media://qiniu/";
+  return value?.startsWith(prefix) ? value.slice(prefix.length) : undefined;
 }

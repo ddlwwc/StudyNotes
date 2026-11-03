@@ -28,6 +28,8 @@ interface PublishResponse {
   fingerprint: string;
 }
 
+const LIBRARY_MEDIA_KEY = "library-media-e2e-key-0123456789abcdef";
+
 let key: E2EKey;
 
 test.describe.configure({ mode: "serial" });
@@ -288,6 +290,159 @@ test("private media upload, public signed read and standalone HTML export", asyn
   expect(html).not.toContain("script");
 });
 
+test("library media uses Bearer, survives publish copy and can be cleaned independently", async ({
+  page,
+  request
+}, testInfo) => {
+  const suffix = uniqueSuffix(testInfo);
+  const bytes = Buffer.from(`library-media-${suffix}`);
+  const contentHash = sha256(bytes);
+  const unauthorized = await request.get("/api/v1/library-media/status");
+  expect(unauthorized.status()).toBe(401);
+  const status = await request.get("/api/v1/library-media/status", {
+    headers: { authorization: `Bearer ${LIBRARY_MEDIA_KEY}` }
+  });
+  expect(status.status()).toBe(200);
+  expect(await status.json()).toMatchObject({
+    ok: true,
+    bucket: "memory",
+    httpWarning: true
+  });
+
+  const upload = await libraryMediaJson(
+    request,
+    "/api/v1/library-media/upload-token",
+    {
+      contentHash,
+      contentType: "image/png",
+      size: bytes.length
+    }
+  );
+  expect(upload.status()).toBe(200);
+  const credential = (await upload.json()) as {
+    objectKey: string;
+    alreadyExists: boolean;
+  };
+  expect(credential.objectKey).toMatch(/^library-media\/[a-f0-9]{64}\.png$/);
+  expect(credential.alreadyExists).toBe(false);
+
+  const stored = await request.post("/api/test/media", {
+    data: {
+      objectKey: credential.objectKey,
+      contentType: "image/png",
+      base64: bytes.toString("base64")
+    }
+  });
+  expect(stored.status()).toBe(200);
+  const pendingPreview = await libraryMediaJson(
+    request,
+    "/api/v1/library-media/publish-preview",
+    {
+      bodyHtml: `<img data-object-key="${credential.objectKey}" alt="待上传">`,
+      mediaRefs: [
+        {
+          objectKey: credential.objectKey,
+          contentHash,
+          contentType: "image/png",
+          size: bytes.length,
+          reference: `media://qiniu/${credential.objectKey}`
+        }
+      ]
+    }
+  );
+  expect(await pendingPreview.json()).toMatchObject({
+    ready: false,
+    media: [{ status: "PENDING" }]
+  });
+  const complete = await libraryMediaJson(
+    request,
+    "/api/v1/library-media/complete",
+    { objectKey: credential.objectKey }
+  );
+  expect(complete.status()).toBe(200);
+  const readyPreview = await libraryMediaJson(
+    request,
+    "/api/v1/library-media/publish-preview",
+    {
+      bodyHtml: `<img data-object-key="${credential.objectKey}" alt="已就绪">`,
+      mediaRefs: [
+        {
+          objectKey: credential.objectKey,
+          contentHash,
+          contentType: "image/png",
+          size: bytes.length,
+          reference: `media://qiniu/${credential.objectKey}`
+        }
+      ]
+    }
+  );
+  expect(await readyPreview.json()).toMatchObject({ ready: true });
+  const readUrl = await libraryMediaJson(
+    request,
+    "/api/v1/library-media/read-url",
+    { objectKey: credential.objectKey }
+  );
+  expect(readUrl.status()).toBe(200);
+  expect(((await readUrl.json()) as { url: string }).url).toContain(
+    "memory://media/"
+  );
+
+  const published = await publishArticle(request, {
+    requestId: requestId("library-media-publish"),
+    sourceMaterialId: `library-media-publish-${suffix}`,
+    title: `笔记媒体发布 ${suffix}`,
+    bodyHtml: `<figure><img data-object-key="${credential.objectKey}" alt="笔记媒体"></figure>`,
+    mediaRefs: [
+      {
+        objectKey: credential.objectKey,
+        contentHash,
+        contentType: "image/png",
+        size: bytes.length,
+        reference: `media://qiniu/${credential.objectKey}`
+      }
+    ]
+  });
+  await page.goto(`/a/${published.articleId}`);
+  const image = page.locator(".article-body img");
+  await expect(image).toBeVisible();
+  const imageSource = await image.getAttribute("src");
+  const redirect = await request.get(imageSource!, { maxRedirects: 0 });
+  expect(redirect.status()).toBe(307);
+  expect(decodeURIComponent(redirect.headers().location!)).toContain(
+    "memory://media/published-media/"
+  );
+
+  await libraryMediaJson(request, "/api/v1/library-media/scan", {
+    sourceId: `library-note-${suffix}`,
+    references: []
+  });
+  const candidates = await request.get(
+    "/api/v1/library-media/cleanup-candidates",
+    { headers: { authorization: `Bearer ${LIBRARY_MEDIA_KEY}` } }
+  );
+  expect(candidates.status()).toBe(200);
+  expect(await candidates.json()).toMatchObject({
+    media: expect.arrayContaining([
+      expect.objectContaining({ objectKey: credential.objectKey })
+    ])
+  });
+  const cleanup = await libraryMediaJson(
+    request,
+    "/api/v1/library-media/cleanup",
+    { objectKeys: [credential.objectKey], confirmed: true }
+  );
+  expect(cleanup.status()).toBe(200);
+  const gone = await libraryMediaJson(
+    request,
+    "/api/v1/library-media/read-url",
+    { objectKey: credential.objectKey }
+  );
+  expect(gone.status()).toBe(404);
+
+  await page.reload();
+  await expect(page.locator(".article-body img")).toBeVisible();
+});
+
 test("lifecycle covers conflict, rollback, visibility, withdraw and permanent delete", async ({
   page,
   request
@@ -507,8 +662,19 @@ function signedHeaders(
   };
 }
 
-function sha256(value: string): string {
+function sha256(value: string | Buffer): string {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+function libraryMediaJson(
+  request: APIRequestContext,
+  path: string,
+  body: unknown
+): Promise<APIResponse> {
+  return request.post(path, {
+    headers: { authorization: `Bearer ${LIBRARY_MEDIA_KEY}` },
+    data: body
+  });
 }
 
 function removeUndefined(value: unknown): unknown {

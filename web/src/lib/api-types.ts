@@ -91,3 +91,138 @@ export interface MediaUploadTokenResponse {
   expiresAt: string;
   method: "PUT" | "POST";
 }
+
+export interface LibraryMediaUploadRequest {
+  contentHash: string;
+  contentType: string;
+  size: number;
+}
+
+export interface LibraryMediaUploadResponse {
+  uploadUrl: string;
+  token: string;
+  objectKey: string;
+  expiresAt: string;
+  method: "PUT" | "POST";
+  alreadyExists: boolean;
+}
+
+export interface LibraryMediaCompleteRequest {
+  objectKey: string;
+}
+
+export interface LibraryMediaCompleteResponse {
+  objectKey: string;
+  status: "READY";
+  contentHash: string;
+  contentType: string;
+  size: number;
+}
+
+export interface LibraryMediaReadRequest {
+  objectKey: string;
+}
+
+export interface LibraryMediaReadResponse {
+  url: string;
+  expiresAt: string;
+}
+
+export interface LibraryMediaPublishPreviewRequest {
+  bodyHtml: string;
+  mediaRefs?: MediaReferenceInput[];
+}
+
+export interface LibraryMediaPublishPreviewResponse {
+  ready: boolean;
+  media: Array<{
+    objectKey: string;
+    status:
+      | "PENDING"
+      | "READY"
+      | "DELETING"
+      | "MISSING"
+      | "MISMATCH"
+      | "MISSING_REFERENCE";
+    contentHash?: string;
+    contentType?: string;
+    size?: number;
+  }>;
+}
+
+export interface LibraryMediaReferenceInput {
+  scope: "CURRENT" | "HISTORY";
+  objectKey: string;
+  reference: string;
+}
+
+export interface LibraryMediaHistoricalLocalItem {
+  reference: string;
+  size: number;
+}
+
+export interface LibraryMediaScanRequest {
+  sourceId: string;
+  references: LibraryMediaReferenceInput[];
+  historicalLocalMedia?: LibraryMediaHistoricalLocalItem[];
+}
+
+export interface LibraryMediaScanResponse {
+  sourceId: string;
+  summary: {
+    currentCount: number;
+    historyCount: number;
+    totalSize: number;
+    missingCount: number;
+    historicalLocalCount: number;
+    historicalLocalSize: number;
+  };
+  media: Array<{
+    objectKey: string;
+    scopes: Array<"CURRENT" | "HISTORY">;
+    references: string[];
+    status: "PENDING" | "READY" | "DELETING" | "MISSING";
+    contentHash?: string;
+    contentType?: string;
+    size?: number;
+  }>;
+}
+
+export interface LibraryMediaCleanupRequest {
+  objectKeys: string[];
+  confirmed: boolean;
+}
+
+export interface LibraryMediaCleanupResponse {
+  queued: Array<{
+    objectKey: string;
+    availableAt: string;
+  }>;
+  skipped: Array<{
+    objectKey: string;
+    reason: "REFERENCED" | "NOT_FOUND" | "CONFIRMATION_REQUIRED";
+  }>;
+}
+
+export interface LibraryMediaCleanupCandidateResponse {
+  summary: {
+    count: number;
+    totalSize: number;
+  };
+  media: Array<{
+    objectKey: string;
+    status: "READY";
+    contentHash: string;
+    contentType: string;
+    size: number;
+  }>;
+}
+
+export interface LibraryMediaStatusResponse {
+  ok: boolean;
+  bucket: string;
+  domain: string;
+  uploadUrl: string;
+  httpWarning: boolean;
+  message?: string;
+}
