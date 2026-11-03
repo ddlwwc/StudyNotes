@@ -86,12 +86,78 @@ struct WorkspaceToolbarActions: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Button {} label: {
-                Label("导入", systemImage: "square.and.arrow.down")
-                    .font(.sn(11))
+            if model.isRecycleScope {
+                if model.hasSelection {
+                    Text("已选 \(model.selectedMaterialIDs.count) 项")
+                        .font(.sn(10, weight: .medium))
+                        .foregroundStyle(SNColor.text)
+
+                    Button {
+                        Task {
+                            await model.restoreSelectedMaterials()
+                        }
+                    } label: {
+                        Label("恢复", systemImage: "arrow.uturn.backward")
+                            .font(.sn(11))
+                    }
+                    .disabled(!model.canRestoreSelection || model.isPerformingAction)
+                    .help("优先恢复到删除前位置；原知识库不存在时进入收件箱")
+                }
+
+                Button {
+                    model.isConfirmingPurgeExpired = true
+                } label: {
+                    Label("清理已过期", systemImage: "trash.slash")
+                        .font(.sn(11))
+                }
+                .disabled(
+                    !model.hasExpiredRecycleItems
+                        || model.isPerformingAction
+                        || model.isLoadingIndex
+                )
+                .help(
+                    model.hasExpiredRecycleItems
+                        ? "永久清理超过 30 天的材料"
+                        : "没有超过 30 天的材料"
+                )
+
+                Divider()
+                    .frame(height: 18)
+            } else if model.hasSelection {
+                Text("已选 \(model.selectedMaterialIDs.count) 项")
+                    .font(.sn(10, weight: .medium))
+                    .foregroundStyle(SNColor.text)
+
+                Button {
+                    model.isShowingMoveMaterials = true
+                } label: {
+                    Label("移动", systemImage: "folder")
+                        .font(.sn(11))
+                }
+                .disabled(!model.canMoveSelection || model.isPerformingAction)
+                .help("移动所选材料到知识库或文件夹")
+
+                Button {
+                    model.isShowingEditTags = true
+                } label: {
+                    Label("标签", systemImage: "tag")
+                        .font(.sn(11))
+                }
+                .disabled(!model.canEditSelectionTags || model.isPerformingAction)
+                .help("编辑所选材料的标签")
+
+                Button {
+                    model.isConfirmingRecycle = true
+                } label: {
+                    Label("移入回收站", systemImage: "trash")
+                        .font(.sn(11))
+                }
+                .disabled(!model.canRecycleSelection || model.isPerformingAction)
+                .help("把所选材料移入回收站")
+
+                Divider()
+                    .frame(height: 18)
             }
-            .disabled(true)
-            .help("导入功能尚未接入")
 
             Button {
                 model.presentCreateNoteSheet()
@@ -99,24 +165,33 @@ struct WorkspaceToolbarActions: View {
                 Label("新建笔记", systemImage: "square.and.pencil")
                     .font(.sn(11))
             }
-            .disabled(!model.canCreateNote)
-            .help(model.canCreateNote ? "新建 Markdown 笔记" : "请先连接目录并创建知识库")
+            .disabled(!model.canCreateNote || model.isPerformingAction)
+            .help(model.canCreateNote ? "新建 Markdown 笔记" : "请先连接学习目录")
 
-            Button {} label: {
-                Label("AI 研读", systemImage: "sparkles")
-                    .font(.sn(11))
-            }
-            .disabled(true)
-            .help("AI 研读尚未配置")
+            if !model.hasSelection {
+                Button {} label: {
+                    Label("导入", systemImage: "square.and.arrow.down")
+                        .font(.sn(11))
+                }
+                .disabled(true)
+                .help("导入功能尚未接入")
 
-            Button {} label: {
-                Label("发布", systemImage: "paperplane")
-                    .font(.sn(11))
+                Button {} label: {
+                    Label("AI 研读", systemImage: "sparkles")
+                        .font(.sn(11))
+                }
+                .disabled(true)
+                .help("AI 研读尚未配置")
+
+                Button {} label: {
+                    Label("发布", systemImage: "paperplane")
+                        .font(.sn(11))
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(SNColor.blue)
+                .disabled(true)
+                .help("发布功能尚未接入")
             }
-            .buttonStyle(.borderedProminent)
-            .tint(SNColor.blue)
-            .disabled(true)
-            .help("发布功能尚未接入")
         }
         .buttonStyle(.bordered)
         .controlSize(.small)

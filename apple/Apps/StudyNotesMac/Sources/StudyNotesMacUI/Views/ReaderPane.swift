@@ -11,7 +11,9 @@ struct ReaderPane: View {
             }
 
             Group {
-                if let note = model.selectedNote {
+                if model.selectedMaterialIDs.count > 1 {
+                    MultiSelectionReaderView(model: model)
+                } else if let note = model.selectedNote {
                     ReaderDocumentView(
                         note: note,
                         knowledgeBaseName: knowledgeBaseName(for: note.summary.knowledgeBaseID)
@@ -51,8 +53,11 @@ struct ReaderPane: View {
         }
     }
 
-    private func knowledgeBaseName(for id: UUID) -> String {
-        model.knowledgeBases.first { $0.id == id }?.name ?? "知识库"
+    private func knowledgeBaseName(for id: UUID?) -> String {
+        guard let id else {
+            return "收件箱"
+        }
+        return model.knowledgeBases.first { $0.id == id }?.name ?? "知识库"
     }
 }
 
@@ -124,9 +129,15 @@ private struct ReaderTopBar: View {
             let knowledgeBase = model.knowledgeBases.first {
                 $0.id == note.summary.knowledgeBaseID
             }
-            return "\(knowledgeBase?.name ?? "知识库") / \(note.summary.title)"
+            if note.summary.deletedAt != nil {
+                return "回收站 / \(note.summary.title)"
+            }
+            return "\(knowledgeBase?.name ?? "收件箱") / \(note.summary.title)"
         }
-        return model.selectedKnowledgeBase?.name ?? "阅读"
+        if model.selectedMaterialIDs.count > 1 {
+            return "\(model.selectedMaterialIDs.count) 篇材料"
+        }
+        return model.scopeTitle
     }
 }
 
@@ -176,10 +187,36 @@ private struct ReaderDocumentView: View {
                     Text("更新于 \(WorkspaceFormatting.updatedDate(note.summary.updatedAt))")
                     Text("·")
                     Text(knowledgeBaseName)
+                    if !note.summary.folderPath.isEmpty {
+                        Text("·")
+                        Text(WorkspaceFormatting.folderPathDisplay(note.summary.folderPath))
+                    }
+                    if let deletedAt = note.summary.deletedAt {
+                        Text("·")
+                        Text("删除于 \(WorkspaceFormatting.updatedDate(deletedAt))")
+                            .foregroundStyle(SNColor.red)
+                    }
                 }
                 .font(.sn(11))
                 .foregroundStyle(SNColor.muted)
                 .padding(.top, 8)
+
+                if !note.summary.tags.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 5) {
+                            ForEach(note.summary.tags, id: \.self) { tag in
+                                Text("# \(tag)")
+                                    .font(.sn(9, weight: .medium))
+                                    .foregroundStyle(SNColor.blue)
+                                    .padding(.horizontal, 7)
+                                    .frame(height: 22)
+                                    .background(SNColor.blueSoft)
+                                    .clipShape(RoundedRectangle(cornerRadius: SNRadius.small))
+                            }
+                        }
+                    }
+                    .padding(.top, 10)
+                }
 
                 Rectangle()
                     .fill(SNColor.border)
@@ -224,6 +261,78 @@ private struct ReaderDocumentView: View {
             return lines.dropFirst(firstContentIndex + 1).joined(separator: "\n")
         }
         return note.markdown
+    }
+}
+
+private struct MultiSelectionReaderView: View {
+    @Bindable var model: WorkspaceModel
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "square.stack.3d.up")
+                .font(.system(size: 30, weight: .light))
+                .foregroundStyle(SNColor.blue)
+
+            Text("已选择 \(model.selectedMaterialIDs.count) 篇材料")
+                .font(.sn(17, weight: .medium))
+                .foregroundStyle(SNColor.ink)
+
+            Text(multiSelectionDescription)
+                .font(.sn(11))
+                .foregroundStyle(SNColor.muted)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 380)
+
+            HStack(spacing: 8) {
+                if model.isRecycleScope {
+                    Button {
+                        Task {
+                            await model.restoreSelectedMaterials()
+                        }
+                    } label: {
+                        Label("恢复", systemImage: "arrow.uturn.backward")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(SNColor.blue)
+                    .disabled(model.isPerformingAction)
+                } else {
+                    Button {
+                        model.isShowingMoveMaterials = true
+                    } label: {
+                        Label("移动", systemImage: "folder")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(SNColor.blue)
+                    .disabled(model.isPerformingAction)
+
+                    Button {
+                        model.isShowingEditTags = true
+                    } label: {
+                        Label("编辑标签", systemImage: "tag")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(model.isPerformingAction)
+
+                    Button {
+                        model.isConfirmingRecycle = true
+                    } label: {
+                        Label("移入回收站", systemImage: "trash")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(model.isPerformingAction)
+                }
+            }
+            .controlSize(.large)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(30)
+    }
+
+    private var multiSelectionDescription: String {
+        if model.isRecycleScope {
+            return "阅读区只显示单篇笔记。可以恢复所选材料，或继续在工具栏中执行批量动作。"
+        }
+        return "阅读区只显示单篇笔记。可以移动所选材料、编辑共同标签，或移入回收站。"
     }
 }
 

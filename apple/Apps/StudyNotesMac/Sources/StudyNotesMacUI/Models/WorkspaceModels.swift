@@ -1,4 +1,5 @@
 import Foundation
+import StudyNotesKit
 
 public enum WorkspaceStorageKind: String, Sendable {
     case local
@@ -65,5 +66,69 @@ public enum StudyPanelTab: String, CaseIterable, Identifiable, Sendable {
         case .ai:
             "AI 研读"
         }
+    }
+}
+
+public enum WorkspaceTagMutationMode: String, CaseIterable, Identifiable, Sendable {
+    case add
+    case remove
+    case replace
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .add:
+            "添加"
+        case .remove:
+            "移除"
+        case .replace:
+            "替换"
+        }
+    }
+}
+
+public enum WorkspaceCollection: Hashable, Sendable {
+    case all
+    case knowledgeBase(UUID)
+    case folder(knowledgeBaseID: UUID, path: String)
+    case inbox
+    case recycleBin
+    case tag(String)
+}
+
+public enum WorkspaceRenameTarget: Identifiable, Equatable, Sendable {
+    case knowledgeBase(KnowledgeBase)
+    case folder(KnowledgeFolder)
+
+    public var id: String {
+        switch self {
+        case let .knowledgeBase(knowledgeBase):
+            "knowledge-base-\(knowledgeBase.id.uuidString)"
+        case let .folder(folder):
+            "folder-\(folder.id)"
+        }
+    }
+}
+
+public struct WorkspaceCreateFolderRequest: Identifiable, Equatable, Sendable {
+    public let id: UUID
+    public let knowledgeBaseID: UUID
+    public let parentPath: String
+
+    public init(id: UUID = UUID(), knowledgeBaseID: UUID, parentPath: String) {
+        self.id = id
+        self.knowledgeBaseID = knowledgeBaseID
+        self.parentPath = parentPath
+    }
+}
+
+public struct WorkspaceMoveFolderRequest: Identifiable, Equatable, Sendable {
+    public let id: UUID
+    public let folder: KnowledgeFolder
+
+    public init(id: UUID = UUID(), folder: KnowledgeFolder) {
+        self.id = id
+        self.folder = folder
     }
 }

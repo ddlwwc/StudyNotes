@@ -1,61 +1,53 @@
+import StudyNotesKit
 import SwiftUI
 
 struct WorkspaceSidebar: View {
     @Bindable var model: WorkspaceModel
+    @State private var deletionRequest: SidebarDeletionRequest?
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Text("知识库")
-                    .font(.sn(18, weight: .semibold))
-                    .foregroundStyle(SNColor.ink)
-
-                Spacer(minLength: 4)
-
-                Button {
-                    model.presentCreateKnowledgeBaseSheet()
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 13, weight: .medium))
-                        .frame(width: 26, height: 26)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(SNColor.text)
-                .disabled(!model.isConnected || model.isPerformingAction)
-                .help("新建知识库")
-                .accessibilityLabel("新建知识库")
-            }
-            .padding(.horizontal, 14)
-            .padding(.top, 16)
-            .padding(.bottom, 14)
+            sidebarHeader
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
-                    Text("开始")
-                        .font(.sn(11, weight: .medium))
-                        .foregroundStyle(SNColor.muted)
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 6)
+                    sidebarSectionTitle("开始")
 
                     SidebarNavigationRow(
                         title: "全部材料",
                         systemImage: "tray.full",
                         count: model.materials.count,
-                        isSelected: model.selectedKnowledgeBaseID == nil,
+                        isSelected: model.selectedCollection == .all,
                         isEnabled: model.isConnected
                     ) {
                         Task {
-                            await model.selectKnowledgeBase(nil)
+                            await model.selectCollection(.all)
                         }
                     }
 
                     SidebarNavigationRow(
                         title: "收件箱",
                         systemImage: "inbox",
-                        detail: "即将推出",
-                        isEnabled: false
-                    ) {}
+                        count: model.inboxMaterials.count,
+                        isSelected: model.selectedCollection == .inbox,
+                        isEnabled: model.isConnected
+                    ) {
+                        Task {
+                            await model.selectInbox()
+                        }
+                    }
+
+                    SidebarNavigationRow(
+                        title: "回收站",
+                        systemImage: "trash",
+                        count: model.recycledMaterials.count,
+                        isSelected: model.selectedCollection == .recycleBin,
+                        isEnabled: model.isConnected
+                    ) {
+                        Task {
+                            await model.selectRecycleBin()
+                        }
+                    }
 
                     Divider()
                         .overlay(SNColor.border)
@@ -82,17 +74,28 @@ struct WorkspaceSidebar: View {
                             .padding(.vertical, 10)
                     } else {
                         ForEach(model.knowledgeBases) { knowledgeBase in
+                            knowledgeBaseGroup(knowledgeBase)
+                        }
+                    }
+
+                    if !model.tags.isEmpty {
+                        Divider()
+                            .overlay(SNColor.border)
+                            .padding(.vertical, 10)
+                            .padding(.horizontal, 12)
+
+                        sidebarSectionTitle("标签")
+
+                        ForEach(model.tags, id: \.self) { tag in
                             SidebarNavigationRow(
-                                title: knowledgeBase.name,
-                                systemImage: "books.vertical",
-                                count: model.materials.filter {
-                                    $0.knowledgeBaseID == knowledgeBase.id
-                                }.count,
-                                isSelected: model.selectedKnowledgeBaseID == knowledgeBase.id,
+                                title: tag,
+                                systemImage: "tag",
+                                count: model.tagMaterialCount(tag),
+                                isSelected: model.selectedCollection == .tag(tag),
                                 isEnabled: true
                             ) {
                                 Task {
-                                    await model.selectKnowledgeBase(knowledgeBase.id)
+                                    await model.selectTag(tag)
                                 }
                             }
                         }
@@ -101,6 +104,7 @@ struct WorkspaceSidebar: View {
                 .padding(.horizontal, 8)
                 .padding(.bottom, 12)
             }
+            .disabled(model.isLoadingIndex)
 
             WorkspaceConnectionCard(model: model)
                 .padding(10)
@@ -112,6 +116,171 @@ struct WorkspaceSidebar: View {
                 .fill(SNColor.border)
                 .frame(width: 1)
         }
+        .alert(item: $deletionRequest) { request in
+            deletionAlert(for: request)
+        }
+    }
+
+    private var sidebarHeader: some View {
+        HStack(spacing: 5) {
+            Text("知识库")
+                .font(.sn(18, weight: .semibold))
+                .foregroundStyle(SNColor.ink)
+
+            Spacer(minLength: 4)
+
+            Button {
+                model.presentCreateFolderSheet()
+            } label: {
+                Image(systemName: "folder.badge.plus")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(SNColor.text)
+            .disabled(!model.canCreateFolder || model.isPerformingAction)
+            .help("新建文件夹")
+            .accessibilityLabel("新建文件夹")
+
+            Button {
+                model.presentCreateKnowledgeBaseSheet()
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(SNColor.text)
+            .disabled(!model.isConnected || model.isPerformingAction)
+            .help("新建知识库")
+            .accessibilityLabel("新建知识库")
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 16)
+        .padding(.bottom, 14)
+    }
+
+    @ViewBuilder
+    private func knowledgeBaseGroup(_ knowledgeBase: KnowledgeBase) -> some View {
+        SidebarNavigationRow(
+            title: knowledgeBase.name,
+            systemImage: "books.vertical",
+            count: model.materialCount(inKnowledgeBase: knowledgeBase.id),
+            isSelected: model.selectedCollection == .knowledgeBase(knowledgeBase.id),
+            isEnabled: true
+        ) {
+            Task {
+                await model.selectKnowledgeBase(knowledgeBase.id)
+            }
+        }
+        .contextMenu {
+            Button("新建文件夹") {
+                model.presentCreateFolderSheet(
+                    in: knowledgeBase.id,
+                    parentPath: ""
+                )
+            }
+            Button("重命名知识库…") {
+                model.renameRequest = .knowledgeBase(knowledgeBase)
+            }
+            Divider()
+            Button("删除知识库…", role: .destructive) {
+                deletionRequest = .knowledgeBase(knowledgeBase)
+            }
+        }
+
+        ForEach(model.folders(in: knowledgeBase.id)) { folder in
+            SidebarNavigationRow(
+                title: folder.name,
+                systemImage: "folder",
+                count: model.folderMaterialCount(
+                    knowledgeBaseID: knowledgeBase.id,
+                    path: folder.path
+                ),
+                isSelected: model.selectedCollection == .folder(
+                    knowledgeBaseID: knowledgeBase.id,
+                    path: folder.path
+                ),
+                isEnabled: true,
+                indentation: folder.depth
+            ) {
+                Task {
+                    await model.selectFolder(
+                        knowledgeBaseID: knowledgeBase.id,
+                        path: folder.path
+                    )
+                }
+            }
+            .contextMenu {
+                Button("新建子文件夹") {
+                    model.presentCreateFolderSheet(
+                        in: knowledgeBase.id,
+                        parentPath: folder.path
+                    )
+                }
+                Button("重命名文件夹…") {
+                    model.renameRequest = .folder(folder)
+                }
+                Button("移动文件夹…") {
+                    model.moveFolderRequest = WorkspaceMoveFolderRequest(folder: folder)
+                }
+                Divider()
+                Button("删除文件夹…", role: .destructive) {
+                    deletionRequest = .folder(folder)
+                }
+            }
+        }
+    }
+
+    private func sidebarSectionTitle(_ title: String) -> some View {
+        Text(title)
+            .font(.sn(11, weight: .medium))
+            .foregroundStyle(SNColor.muted)
+            .padding(.horizontal, 12)
+            .padding(.bottom, 6)
+    }
+
+    private func deletionAlert(for request: SidebarDeletionRequest) -> Alert {
+        switch request {
+        case let .knowledgeBase(knowledgeBase):
+            Alert(
+                title: Text("删除知识库“\(knowledgeBase.name)”？"),
+                message: Text("知识库内的材料会移入回收站，可在 30 天内恢复。此操作不会永久删除材料。"),
+                primaryButton: .destructive(Text("删除知识库")) {
+                    Task {
+                        await model.deleteKnowledgeBase(knowledgeBase)
+                    }
+                },
+                secondaryButton: .cancel(Text("取消"))
+            )
+        case let .folder(folder):
+            Alert(
+                title: Text("删除文件夹“\(folder.name)”？"),
+                message: Text("文件夹及其子文件夹中的材料会移入回收站，可在 30 天内恢复。"),
+                primaryButton: .destructive(Text("删除文件夹")) {
+                    Task {
+                        await model.deleteFolder(folder)
+                    }
+                },
+                secondaryButton: .cancel(Text("取消"))
+            )
+        }
+    }
+}
+
+private enum SidebarDeletionRequest: Identifiable {
+    case knowledgeBase(KnowledgeBase)
+    case folder(KnowledgeFolder)
+
+    var id: String {
+        switch self {
+        case let .knowledgeBase(knowledgeBase):
+            "knowledge-base-\(knowledgeBase.id.uuidString)"
+        case let .folder(folder):
+            "folder-\(folder.id)"
+        }
     }
 }
 
@@ -119,14 +288,17 @@ private struct SidebarNavigationRow: View {
     let title: String
     let systemImage: String
     var count: Int?
-    var detail: String?
     var isSelected = false
     var isEnabled = true
+    var indentation = 0
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 9) {
+                Color.clear
+                    .frame(width: CGFloat(max(0, indentation - 1)) * 13)
+
                 Image(systemName: systemImage)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(isSelected ? SNColor.blue : SNColor.text)
@@ -139,12 +311,7 @@ private struct SidebarNavigationRow: View {
 
                 Spacer(minLength: 4)
 
-                if let detail {
-                    Text(detail)
-                        .font(.sn(9))
-                        .foregroundStyle(SNColor.muted)
-                        .lineLimit(1)
-                } else if let count {
+                if let count {
                     Text("\(count)")
                         .font(.sn(10))
                         .foregroundStyle(SNColor.muted)

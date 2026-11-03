@@ -57,13 +57,17 @@ private struct SnapshotSidebar: View {
                 SnapshotSidebarRow(
                     title: "全部材料",
                     systemImage: "tray.full",
-                    count: "1",
-                    isSelected: true
+                    count: "6"
                 )
                 SnapshotSidebarRow(
                     title: "收件箱",
                     systemImage: "inbox",
-                    detail: "即将推出"
+                    count: "2"
+                )
+                SnapshotSidebarRow(
+                    title: "回收站",
+                    systemImage: "trash",
+                    count: "1"
                 )
 
                 Rectangle()
@@ -87,6 +91,48 @@ private struct SnapshotSidebar: View {
                 SnapshotSidebarRow(
                     title: "学习科学",
                     systemImage: "books.vertical",
+                    count: "6"
+                )
+                SnapshotSidebarRow(
+                    title: "基础",
+                    systemImage: "folder",
+                    count: "3",
+                    isSelected: true,
+                    indentation: 1
+                )
+                SnapshotSidebarRow(
+                    title: "图论",
+                    systemImage: "folder",
+                    count: "2",
+                    indentation: 2
+                )
+
+                Rectangle()
+                    .fill(SNColor.border)
+                    .frame(height: 1)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+
+                HStack {
+                    Text("标签")
+                        .font(.sn(11, weight: .medium))
+                        .foregroundStyle(SNColor.muted)
+                    Spacer()
+                    Text("2")
+                        .font(.sn(10))
+                        .foregroundStyle(SNColor.muted)
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 6)
+
+                SnapshotSidebarRow(
+                    title: "认知负荷",
+                    systemImage: "tag",
+                    count: "2"
+                )
+                SnapshotSidebarRow(
+                    title: "教学设计",
+                    systemImage: "tag",
                     count: "1"
                 )
             }
@@ -137,9 +183,13 @@ private struct SnapshotSidebarRow: View {
     var count: String?
     var detail: String?
     var isSelected = false
+    var indentation = 0
 
     var body: some View {
         HStack(spacing: 9) {
+            Color.clear
+                .frame(width: CGFloat(max(0, indentation - 1)) * 13)
+
             Image(systemName: systemImage)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(isSelected ? SNColor.blue : SNColor.text)
@@ -171,12 +221,12 @@ private struct SnapshotMaterialList: View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 7) {
-                    Text("学习科学")
+                    Text("基础")
                         .font(.sn(15, weight: .semibold))
                         .foregroundStyle(SNColor.ink)
                     Spacer()
                 }
-                Text("知识库 / 1 个分类")
+                Text("学习科学 / 基础 · 3 篇材料")
                     .font(.sn(10))
                     .foregroundStyle(SNColor.muted)
             }
@@ -204,7 +254,7 @@ private struct SnapshotMaterialList: View {
             .padding(.horizontal, 12)
 
             HStack {
-                Text("全部 1")
+                Text("全部 3")
                     .font(.sn(11, weight: .medium))
                     .foregroundStyle(SNColor.blue)
                 Spacer()
@@ -219,7 +269,19 @@ private struct SnapshotMaterialList: View {
                 .fill(SNColor.border)
                 .frame(height: 1)
 
-            SnapshotMaterialRow()
+            SnapshotMaterialRow(
+                title: "认知负荷理论与学习设计",
+                metadata: "学习科学 / 基础 · 今天 10:42",
+                tags: "#认知负荷  #教学设计",
+                isSelected: true
+            )
+
+            SnapshotMaterialRow(
+                title: "多媒体学习的双通道假设",
+                metadata: "学习科学 / 基础 / 图论 · 昨天",
+                tags: "#认知负荷",
+                isSelected: false
+            )
 
             Spacer()
         }
@@ -233,42 +295,56 @@ private struct SnapshotMaterialList: View {
 }
 
 private struct SnapshotMaterialRow: View {
+    let title: String
+    let metadata: String
+    let tags: String
+    let isSelected: Bool
+
     var body: some View {
         HStack(alignment: .top, spacing: 11) {
             ZStack {
                 RoundedRectangle(cornerRadius: 5)
-                    .fill(SNColor.white)
+                    .fill(isSelected ? SNColor.white : SNColor.blueSoft)
                 Image(systemName: "doc.text")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(SNColor.blue)
             }
             .frame(width: 24, height: 24)
             .overlay {
-                RoundedRectangle(cornerRadius: 5)
-                    .stroke(SNColor.blueLine, lineWidth: 1)
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(SNColor.blueLine, lineWidth: 1)
+                }
             }
 
-            VStack(alignment: .leading, spacing: 5) {
-                Text("认知负荷理论与学习设计")
-                    .font(.sn(12, weight: .semibold))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.sn(12, weight: isSelected ? .semibold : .medium))
                     .foregroundStyle(SNColor.ink)
                     .lineLimit(2)
-                Text("Markdown 笔记 · 今天 10:42")
+                Text(metadata)
                     .font(.sn(9))
                     .foregroundStyle(SNColor.muted)
+                    .lineLimit(1)
+                Text(tags)
+                    .font(.sn(9))
+                    .foregroundStyle(SNColor.muted)
+                    .lineLimit(1)
             }
 
             Spacer(minLength: 4)
         }
-        .padding(.leading, 13)
+        .padding(.leading, isSelected ? 13 : 16)
         .padding(.trailing, 12)
-        .padding(.vertical, 13)
-        .frame(maxWidth: .infinity, minHeight: 70, alignment: .leading)
-        .background(SNColor.blueSoft)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, minHeight: 76, alignment: .leading)
+        .background(isSelected ? SNColor.blueSoft : SNColor.white)
         .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(SNColor.blue)
-                .frame(width: 3)
+            if isSelected {
+                Rectangle()
+                    .fill(SNColor.blue)
+                    .frame(width: 3)
+            }
         }
         .overlay(alignment: .bottom) {
             Rectangle()

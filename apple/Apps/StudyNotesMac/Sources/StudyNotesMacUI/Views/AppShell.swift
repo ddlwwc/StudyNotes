@@ -35,6 +35,49 @@ public struct AppShell: View {
         .sheet(isPresented: $model.isShowingCreateNote) {
             CreateNoteSheet(model: model)
         }
+        .sheet(item: $model.createFolderRequest) { request in
+            CreateFolderSheet(model: model, request: request)
+        }
+        .sheet(item: $model.renameRequest) { target in
+            RenameWorkspaceItemSheet(model: model, target: target)
+        }
+        .sheet(item: $model.moveFolderRequest) { request in
+            MoveFolderSheet(model: model, request: request)
+        }
+        .sheet(isPresented: $model.isShowingMoveMaterials) {
+            MoveMaterialsSheet(model: model)
+        }
+        .sheet(isPresented: $model.isShowingEditTags) {
+            EditTagsSheet(model: model)
+        }
+        .confirmationDialog(
+            "将 \(model.selectedMaterialIDs.count) 篇材料移入回收站？",
+            isPresented: $model.isConfirmingRecycle,
+            titleVisibility: .visible
+        ) {
+            Button("移入回收站", role: .destructive) {
+                Task {
+                    await model.moveSelectedMaterialsToRecycleBin()
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("材料会保留 30 天，并可在回收站中恢复到原位置。")
+        }
+        .confirmationDialog(
+            "永久清理 \(model.expiredRecycleCount) 篇过期材料？",
+            isPresented: $model.isConfirmingPurgeExpired,
+            titleVisibility: .visible
+        ) {
+            Button("永久清理", role: .destructive) {
+                Task {
+                    await model.purgeExpiredRecycleBin()
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("只会清理超过 30 天的材料，此操作无法撤销。")
+        }
         .alert("无法完成操作", isPresented: errorIsPresented) {
             Button("好", role: .cancel) {
                 model.dismissError()
