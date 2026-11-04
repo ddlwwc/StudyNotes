@@ -20,11 +20,21 @@ struct StudyNotesMacSnapshotMain {
                 .appending(path: "dist/StudyNotesMac-1440x1024.png")
         }
 
-        let mode: SnapshotWorkspaceMode = arguments.contains("--search-results")
-            ? .searchResults
-            : .tree
+        let mode: SnapshotWorkspaceMode
+        if arguments.contains("--settings") {
+            mode = .settings
+        } else if arguments.contains("--settings-compact") {
+            mode = .compactSettings
+        } else if arguments.contains("--search-results") {
+            mode = .searchResults
+        } else {
+            mode = .tree
+        }
         let renderer = ImageRenderer(content: SnapshotWorkspaceView(mode: mode))
-        renderer.proposedSize = ProposedViewSize(width: 1_440, height: 1_024)
+        renderer.proposedSize = ProposedViewSize(
+            width: mode.canvasSize.width,
+            height: mode.canvasSize.height
+        )
         renderer.scale = 1
 
         guard let image = renderer.cgImage else {

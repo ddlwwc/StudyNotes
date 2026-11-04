@@ -26,22 +26,27 @@ public struct AppShell: View {
                 )
             }
 
-            if model.isMaterialPaneVisible {
-                MaterialListPane(model: model)
-                    .frame(width: model.materialPaneWidth)
-                    .transition(.move(edge: .leading).combined(with: .opacity))
-                WorkspacePaneDivider(
-                    width: model.materialPaneWidth,
-                    range: WorkspacePreferences.materialsWidthRange,
-                    defaultWidth: WorkspacePreferences.defaultMaterialsWidth,
-                    dragDirection: 1,
-                    onChange: { model.setPaneWidth(.materials, width: $0) },
-                    onReset: { model.restoreDefaultWidth(.materials) }
-                )
-            }
+            if model.isShowingSettings {
+                SettingsView(model: model)
+                    .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                if model.isMaterialPaneVisible {
+                    MaterialListPane(model: model)
+                        .frame(width: model.materialPaneWidth)
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+                    WorkspacePaneDivider(
+                        width: model.materialPaneWidth,
+                        range: WorkspacePreferences.materialsWidthRange,
+                        defaultWidth: WorkspacePreferences.defaultMaterialsWidth,
+                        dragDirection: 1,
+                        onChange: { model.setPaneWidth(.materials, width: $0) },
+                        onReset: { model.restoreDefaultWidth(.materials) }
+                    )
+                }
 
-            ReaderWorkspace(model: model)
-                .frame(minWidth: 420, maxWidth: .infinity)
+                ReaderWorkspace(model: model)
+                    .frame(minWidth: 420, maxWidth: .infinity)
+            }
         }
         .frame(
             minWidth: minimumWorkspaceWidth,
@@ -166,8 +171,12 @@ public struct AppShell: View {
 
     private var minimumWorkspaceWidth: CGFloat {
         let visiblePanes = (model.isLibraryPaneVisible ? model.libraryPaneWidth : 0)
-            + (model.isMaterialPaneVisible ? model.materialPaneWidth : 0)
-            + (model.isStudyPanelVisible ? model.studyPaneWidth : 0)
+            + (
+                model.isShowingSettings
+                    ? 0
+                    : (model.isMaterialPaneVisible ? model.materialPaneWidth : 0)
+                        + (model.isStudyPanelVisible ? model.studyPaneWidth : 0)
+            )
         return max(SNMetric.minimumWindowWidth, CGFloat(visiblePanes) + 420)
     }
 

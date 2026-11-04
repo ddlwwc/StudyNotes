@@ -47,6 +47,7 @@ public final class WorkspaceModel {
         }
     }
     public var settingsPage: WorkspaceSettingsPage = .workspace
+    public private(set) var isShowingSettings = false
 
     public var selectedCollection: WorkspaceCollection = .all
     public var selectedMaterialIDs: Set<UUID> = []
@@ -636,6 +637,24 @@ public final class WorkspaceModel {
         )
     }
 
+    @discardableResult
+    public func openSettings(
+        page: WorkspaceSettingsPage = .workspace
+    ) async -> Bool {
+        if !isShowingSettings {
+            guard await flushMarkdownEditorBeforeNavigation() else {
+                return false
+            }
+        }
+        settingsPage = page
+        isShowingSettings = true
+        return true
+    }
+
+    public func returnToWorkspace() {
+        isShowingSettings = false
+    }
+
     public func selectCollection(_ collection: WorkspaceCollection) async {
         guard !isLoadingIndex else {
             return
@@ -644,9 +663,10 @@ public final class WorkspaceModel {
             return
         }
 
-        guard await flushMarkdownEditorBeforeSelectionChange() else {
+        guard await flushMarkdownEditorBeforeNavigation() else {
             return
         }
+        returnToWorkspace()
         invalidateNoteLoad()
         selectedCollection = collection
         selectedMaterialIDs = []
@@ -671,9 +691,10 @@ public final class WorkspaceModel {
     }
 
     public func selectTreeKnowledgeBase(_ knowledgeBaseID: UUID) async {
-        guard await flushMarkdownEditorBeforeSelectionChange() else {
+        guard await flushMarkdownEditorBeforeNavigation() else {
             return
         }
+        returnToWorkspace()
         selectedCollection = .knowledgeBase(knowledgeBaseID)
         selectedMaterialIDs = []
         treeSelectionAnchorID = nil
@@ -685,9 +706,10 @@ public final class WorkspaceModel {
         knowledgeBaseID: UUID,
         path: String
     ) async {
-        guard await flushMarkdownEditorBeforeSelectionChange() else {
+        guard await flushMarkdownEditorBeforeNavigation() else {
             return
         }
+        returnToWorkspace()
         selectedCollection = .folder(
             knowledgeBaseID: knowledgeBaseID,
             path: path
@@ -775,7 +797,7 @@ public final class WorkspaceModel {
             return
         }
         if selectedMaterialID != id {
-            guard await flushMarkdownEditorBeforeSelectionChange() else {
+            guard await flushMarkdownEditorBeforeNavigation() else {
                 return
             }
         }
@@ -2510,7 +2532,7 @@ public final class WorkspaceModel {
         }
     }
 
-    private func flushMarkdownEditorBeforeSelectionChange() async -> Bool {
+    private func flushMarkdownEditorBeforeNavigation() async -> Bool {
         guard let markdownEditorSession else {
             return true
         }

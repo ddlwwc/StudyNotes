@@ -17,7 +17,8 @@ struct WorkspaceSidebar: View {
                         title: "全部材料",
                         systemImage: "tray.full",
                         count: model.materials.count,
-                        isSelected: model.selectedCollection == .all,
+                        isSelected: !model.isShowingSettings
+                            && model.selectedCollection == .all,
                         isEnabled: model.isConnected
                     ) {
                         Task {
@@ -29,7 +30,8 @@ struct WorkspaceSidebar: View {
                         title: "收件箱",
                         systemImage: "tray",
                         count: model.inboxMaterials.count,
-                        isSelected: model.selectedCollection == .inbox,
+                        isSelected: !model.isShowingSettings
+                            && model.selectedCollection == .inbox,
                         isEnabled: model.isConnected
                     ) {
                         Task {
@@ -41,7 +43,8 @@ struct WorkspaceSidebar: View {
                         title: "回收站",
                         systemImage: "trash",
                         count: model.recycledMaterials.count,
-                        isSelected: model.selectedCollection == .recycleBin,
+                        isSelected: !model.isShowingSettings
+                            && model.selectedCollection == .recycleBin,
                         isEnabled: model.isConnected
                     ) {
                         Task {
@@ -91,7 +94,8 @@ struct WorkspaceSidebar: View {
                                 title: tag,
                                 systemImage: "tag",
                                 count: model.tagMaterialCount(tag),
-                                isSelected: model.selectedCollection == .tag(tag),
+                                isSelected: !model.isShowingSettings
+                                    && model.selectedCollection == .tag(tag),
                                 isEnabled: true
                             ) {
                                 Task {
@@ -110,11 +114,6 @@ struct WorkspaceSidebar: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(SNColor.nav)
-        .overlay(alignment: .trailing) {
-            Rectangle()
-                .fill(SNColor.border)
-                .frame(width: 1)
-        }
         .alert(item: $deletionRequest) { request in
             deletionAlert(for: request)
         }
@@ -138,7 +137,11 @@ struct WorkspaceSidebar: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(SNColor.text)
-            .disabled(!model.isConnected || model.isPerformingAction)
+            .disabled(
+                !model.isConnected
+                    || model.isPerformingAction
+                    || model.isShowingSettings
+            )
             .help("新建知识库")
             .accessibilityLabel("新建知识库")
         }
@@ -153,7 +156,8 @@ struct WorkspaceSidebar: View {
             title: knowledgeBase.name,
             systemImage: "books.vertical",
             count: model.materialCount(inKnowledgeBase: knowledgeBase.id),
-            isSelected: model.selectedKnowledgeBaseID == knowledgeBase.id,
+            isSelected: !model.isShowingSettings
+                && model.selectedKnowledgeBaseID == knowledgeBase.id,
             isEnabled: true
         ) {
             Task {
@@ -269,60 +273,59 @@ private struct SidebarNavigationRow: View {
 
 private struct WorkspaceSidebarFooter: View {
     @Bindable var model: WorkspaceModel
-    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
-        HStack(spacing: 8) {
+        VStack(spacing: 0) {
             Button {
-                model.settingsPage = .workspace
-                openSettings()
-            } label: {
-                HStack(spacing: 7) {
-                    statusIndicator
-                    Text(statusTitle)
-                        .font(.sn(9, weight: .medium))
-                        .foregroundStyle(SNColor.text)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
+                Task {
+                    await model.openSettings()
                 }
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(width: 16)
+                    Text("设置")
+                        .font(.sn(12, weight: .medium))
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                }
+                .foregroundStyle(
+                    model.isShowingSettings ? SNColor.blue : SNColor.text
+                )
+                .padding(.horizontal, 9)
+                .frame(height: 32)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
+                .background(
+                    model.isShowingSettings ? SNColor.blueSoft : Color.clear
+                )
+                .clipShape(RoundedRectangle(cornerRadius: SNRadius.small))
             }
-            .padding(.horizontal, 10)
-            .frame(height: 34)
             .buttonStyle(.plain)
-            .disabled(model.isPerformingAction || model.isLoadingIndex)
-            .help(model.connectionDetail)
+            .accessibilityLabel("设置")
+            .accessibilityValue(
+                model.isShowingSettings ? model.settingsPage.title : ""
+            )
+            .padding(.horizontal, 8)
+            .padding(.bottom, 6)
 
-            Menu {
-                Button("学习目录…", systemImage: "folder") {
-                    open(.workspace)
-                }
-                Button("AI 配置…", systemImage: "sparkles") {
-                    open(.ai)
-                }
-                Button("发布配置…", systemImage: "paperplane") {
-                    open(.publishing)
-                }
-                Button("密钥与凭据…", systemImage: "key") {
-                    open(.credentials)
-                }
-                Button("阅读偏好…", systemImage: "textformat.size") {
-                    open(.reading)
-                }
-            } label: {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
+            HStack(spacing: 7) {
+                statusIndicator
+                Text(statusTitle)
+                    .font(.sn(9, weight: .medium))
+                    .foregroundStyle(SNColor.text)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
             }
-            .menuStyle(.borderlessButton)
-            .frame(width: 28)
-            .help("打开设置")
-            .accessibilityLabel("打开设置")
+            .padding(.horizontal, 18)
+            .frame(height: 28)
+            .help(model.connectionDetail)
+            .accessibilityElement(children: .combine)
         }
         .padding(.horizontal, 8)
-        .frame(height: 48)
+        .padding(.top, 8)
+        .padding(.bottom, 8)
         .overlay(alignment: .top) {
             Rectangle()
                 .fill(SNColor.border)
@@ -366,8 +369,4 @@ private struct WorkspaceSidebarFooter: View {
         }
     }
 
-    private func open(_ page: WorkspaceSettingsPage) {
-        model.settingsPage = page
-        openSettings()
-    }
 }

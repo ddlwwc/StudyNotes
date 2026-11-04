@@ -944,7 +944,6 @@ struct AIContextConfirmationSheet: View {
 struct PublishPreviewSheet: View {
     @Bindable var model: WorkspaceModel
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.openSettings) private var openSettings
     @State private var publishing = PublishingPanelModel()
     @State private var isConfirmingWithdraw = false
     @State private var isConfirmingDelete = false
@@ -999,8 +998,10 @@ struct PublishPreviewSheet: View {
                             .foregroundStyle(SNColor.muted)
                             .lineLimit(1)
                             Button("管理发布密钥…") {
-                                model.settingsPage = .credentials
-                                openSettings()
+                                dismiss()
+                                Task {
+                                    await model.openSettings(page: .credentials)
+                                }
                             }
                             .buttonStyle(.bordered)
                             .controlSize(.small)

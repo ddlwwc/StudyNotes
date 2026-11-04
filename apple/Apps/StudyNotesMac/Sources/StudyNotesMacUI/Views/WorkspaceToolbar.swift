@@ -67,7 +67,6 @@ struct WorkspaceBrandStatus: View {
 
 struct WorkspaceToolbarActions: View {
     let model: WorkspaceModel
-    @Environment(\.openSettings) private var openSettings
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -81,27 +80,29 @@ struct WorkspaceToolbarActions: View {
                     model.togglePane(.library)
                 }
             }
-            PaneVisibilityButton(
-                title: "材料目录栏",
-                systemImage: "list.bullet.indent",
-                isVisible: model.isMaterialPaneVisible
-            ) {
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
-                    model.togglePane(.materials)
-                }
-            }
-            PaneVisibilityButton(
-                title: "研读层",
-                systemImage: "sidebar.right",
-                isVisible: model.isStudyPanelVisible
-            ) {
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
-                    model.togglePane(.study)
-                }
-            }
 
-            Divider()
-                .frame(height: 18)
+            if !model.isShowingSettings {
+                PaneVisibilityButton(
+                    title: "材料目录栏",
+                    systemImage: "list.bullet.indent",
+                    isVisible: model.isMaterialPaneVisible
+                ) {
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                        model.togglePane(.materials)
+                    }
+                }
+                PaneVisibilityButton(
+                    title: "研读层",
+                    systemImage: "sidebar.right",
+                    isVisible: model.isStudyPanelVisible
+                ) {
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                        model.togglePane(.study)
+                    }
+                }
+
+                Divider()
+                    .frame(height: 18)
 
             if model.isRecycleScope {
                 if model.hasSelection {
@@ -196,8 +197,9 @@ struct WorkspaceToolbarActions: View {
 
             Button {
                 if model.selectedProvider == nil {
-                    model.settingsPage = .ai
-                    openSettings()
+                    Task {
+                        await model.openSettings(page: .ai)
+                    }
                 } else if model.selectedDocument != nil {
                     model.prepareMaterialSummary()
                 }
@@ -226,6 +228,7 @@ struct WorkspaceToolbarActions: View {
                     ? "预览公开正文与私人研读层范围"
                     : "只有文章类材料可以发布"
             )
+            }
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
@@ -233,6 +236,8 @@ struct WorkspaceToolbarActions: View {
 }
 
 struct WorkspaceSnapshotHeader: View {
+    var showsWorkspaceActions = true
+
     var body: some View {
         HStack(spacing: 12) {
             HStack(spacing: 10) {
@@ -261,31 +266,50 @@ struct WorkspaceSnapshotHeader: View {
 
             Spacer()
 
-            HStack(spacing: 6) {
+            if showsWorkspaceActions {
+                HStack(spacing: 6) {
+                    Image(systemName: "sidebar.left")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(SNColor.blue)
+                    Image(systemName: "list.bullet.indent")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(SNColor.blue)
+                    Image(systemName: "sidebar.right")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(SNColor.blue)
+
+                    Rectangle()
+                        .fill(SNColor.border)
+                        .frame(width: 1, height: 18)
+                        .padding(.horizontal, 4)
+
+                    SnapshotActionPill(
+                        title: "导入",
+                        systemImage: "square.and.arrow.down",
+                        isEnabled: true
+                    )
+                    SnapshotActionPill(
+                        title: "新建笔记",
+                        systemImage: "square.and.pencil",
+                        isEnabled: true
+                    )
+                    SnapshotActionPill(
+                        title: "AI 研读",
+                        systemImage: "sparkles",
+                        isEnabled: true
+                    )
+                    SnapshotActionPill(
+                        title: "发布",
+                        systemImage: "paperplane",
+                        isEnabled: true,
+                        isPrimary: true
+                    )
+                }
+            } else {
                 Image(systemName: "sidebar.left")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(SNColor.blue)
-                Image(systemName: "list.bullet.indent")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(SNColor.blue)
-                Image(systemName: "sidebar.right")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(SNColor.blue)
-
-                Rectangle()
-                    .fill(SNColor.border)
-                    .frame(width: 1, height: 18)
-                    .padding(.horizontal, 4)
-
-                SnapshotActionPill(title: "导入", systemImage: "square.and.arrow.down", isEnabled: true)
-                SnapshotActionPill(title: "新建笔记", systemImage: "square.and.pencil", isEnabled: true)
-                SnapshotActionPill(title: "AI 研读", systemImage: "sparkles", isEnabled: true)
-                SnapshotActionPill(
-                    title: "发布",
-                    systemImage: "paperplane",
-                    isEnabled: true,
-                    isPrimary: true
-                )
+                    .frame(width: 28, height: 24)
             }
         }
         .padding(.horizontal, 20)

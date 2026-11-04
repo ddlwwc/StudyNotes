@@ -1,9 +1,13 @@
+import AppKit
 import StudyNotesMacUI
 import SwiftUI
 
 @main
 @MainActor
 struct StudyNotesMacApp: App {
+    @NSApplicationDelegateAdaptor(StudyNotesAppDelegate.self)
+    private var appDelegate
+
     @State private var model: WorkspaceModel
 
     init() {
@@ -20,17 +24,20 @@ struct StudyNotesMacApp: App {
         .commands {
             StudyNotesCommands(model: model)
         }
+    }
+}
 
-        Settings {
-            SettingsView(model: model)
-        }
-        .defaultSize(width: 920, height: 700)
+@MainActor
+private final class StudyNotesAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // SwiftPM executables launched by Xcode otherwise keep Xcode as the active app.
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate()
     }
 }
 
 private struct StudyNotesCommands: Commands {
     let model: WorkspaceModel
-    @Environment(\.openSettings) private var openSettings
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
@@ -38,19 +45,20 @@ private struct StudyNotesCommands: Commands {
                 model.presentCreateNoteSheet()
             }
             .keyboardShortcut("n")
-            .disabled(!model.canCreateNote)
+            .disabled(!model.canCreateNote || model.isShowingSettings)
 
             Button("新建知识库") {
                 model.presentCreateKnowledgeBaseSheet()
             }
             .keyboardShortcut("n", modifiers: [.command, .shift])
-            .disabled(!model.isConnected)
+            .disabled(!model.isConnected || model.isShowingSettings)
         }
 
         CommandGroup(replacing: .appSettings) {
             Button("设置…") {
-                model.settingsPage = .workspace
-                openSettings()
+                Task {
+                    await model.openSettings()
+                }
             }
             .keyboardShortcut(",", modifiers: .command)
         }
@@ -60,18 +68,19 @@ private struct StudyNotesCommands: Commands {
                 model.presentImportSheet()
             }
             .keyboardShortcut("i", modifiers: [.command, .shift])
-            .disabled(!model.isConnected)
+            .disabled(!model.isConnected || model.isShowingSettings)
 
             Button("导入网页文章…") {
                 model.presentImportSheet(webArticle: true)
             }
-            .disabled(!model.isConnected)
+            .disabled(!model.isConnected || model.isShowingSettings)
 
             Divider()
 
             Button("学习目录设置…") {
-                model.settingsPage = .workspace
-                openSettings()
+                Task {
+                    await model.openSettings()
+                }
             }
             .keyboardShortcut("o", modifiers: [.command, .shift])
 
@@ -79,7 +88,11 @@ private struct StudyNotesCommands: Commands {
                 Task { await model.reloadIndex() }
             }
             .keyboardShortcut("r")
-            .disabled(!model.isConnected || model.isLoadingIndex)
+            .disabled(
+                !model.isConnected
+                    || model.isLoadingIndex
+                    || model.isShowingSettings
+            )
 
             Divider()
 
@@ -92,24 +105,27 @@ private struct StudyNotesCommands: Commands {
                 model.togglePane(.materials)
             }
             .keyboardShortcut("2", modifiers: [.command, .option])
+            .disabled(model.isShowingSettings)
 
             Button(model.isStudyPanelVisible ? "隐藏研读层" : "显示研读层") {
                 model.togglePane(.study)
             }
             .keyboardShortcut("3", modifiers: [.command, .option])
+            .disabled(model.isShowingSettings)
 
             Divider()
 
             Button("AI 配置…") {
-                model.settingsPage = .ai
-                openSettings()
+                Task {
+                    await model.openSettings(page: .ai)
+                }
             }
 
             Button("发布预览…") {
                 model.preparePublishPreview()
             }
             .keyboardShortcut("p", modifiers: [.command, .shift])
-            .disabled(!model.canPreviewPublish)
+            .disabled(!model.canPreviewPublish || model.isShowingSettings)
         }
     }
 }
