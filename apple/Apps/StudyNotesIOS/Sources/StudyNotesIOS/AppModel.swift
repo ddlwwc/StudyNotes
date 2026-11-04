@@ -185,11 +185,22 @@ final class IOSAppModel {
     }
 
     func updateWorkspaceLayout(isRegular: Bool) {
-        workspace.updateLayout(isRegular ? .regular : .compact)
+        let layout: IOSWorkspaceLayout = isRegular ? .regular : .compact
+        guard workspace.layout != layout else {
+            return
+        }
+        workspace.updateLayout(layout)
+        if let knowledgeBaseID = workspace.knowledgeBaseID {
+            loadExpandedFolders(for: knowledgeBaseID)
+            reconcileCurrentLibraryTree()
+        }
     }
 
     func selectKnowledgeBase(_ id: UUID) {
+        persistExpandedFoldersForCurrentKnowledgeBase()
         workspace.openKnowledgeBase(id)
+        loadExpandedFolders(for: id)
+        reconcileCurrentLibraryTree()
     }
 
     func selectFolder(_ path: String) {
@@ -201,10 +212,72 @@ final class IOSAppModel {
         mediaHistoricalFiles = []
         if let material = material(id: id),
            let knowledgeBaseID = material.manifest.knowledgeBaseID {
-            workspace.openKnowledgeBase(knowledgeBaseID)
-            workspace.openFolder(material.folderPath)
+            if workspace.knowledgeBaseID != knowledgeBaseID {
+                persistExpandedFoldersForCurrentKnowledgeBase()
+                workspace.openKnowledgeBase(knowledgeBaseID)
+                loadExpandedFolders(for: knowledgeBaseID)
+            }
+            workspace.expandAncestors(of: material.folderPath)
+            if workspace.layout == .compact {
+                workspace.openFolder(material.folderPath)
+            }
+            persistExpandedFolders(for: knowledgeBaseID)
         }
-        workspace.openMaterial(id, editing: editing)
+        workspace.selectMaterialForTree(id, editing: editing)
+    }
+
+    func selectTreeFolder(_ path: String) {
+        workspace.selectFolderForOrganization(path)
+    }
+
+    func toggleTreeFolder(_ path: String) {
+        workspace.toggleFolderExpansion(path)
+        persistExpandedFoldersForCurrentKnowledgeBase()
+    }
+
+    func toggleTreeMaterialSelection(_ id: UUID) {
+        workspace.toggleMaterialSelection(id)
+    }
+
+    func extendTreeMaterialSelection(to id: UUID) {
+        workspace.extendMaterialSelection(
+            to: id,
+            visibleMaterialIDs: visibleTreeMaterialIDs()
+        )
+    }
+
+    func treeRows(
+        in knowledgeBase: KnowledgeBaseSummary
+    ) -> [LibraryTreeRow] {
+        LibraryTreeBuilder.visibleRows(
+            knowledgeBase: knowledgeBase,
+            materials: snapshot.materials,
+            folders: snapshot.folders,
+            expandedPaths: workspace.expandedFolderPaths
+        )
+    }
+
+    func visibleTreeMaterialIDs() -> [UUID] {
+        guard let knowledgeBase = snapshot.knowledgeBases.first(
+            where: { $0.id == workspace.knowledgeBaseID }
+        ) else {
+            return []
+        }
+        return treeRows(in: knowledgeBase).compactMap { row in
+            guard case let .material(material, _) = row else {
+                return nil
+            }
+            return material.id
+        }
+    }
+
+    func restoreTreeAfterSearch() {
+        if let materialID = workspace.materialID,
+           let material = material(id: materialID),
+           let knowledgeBaseID = material.manifest.knowledgeBaseID {
+            workspace.expandAncestors(of: material.folderPath)
+            persistExpandedFolders(for: knowledgeBaseID)
+        }
     }
 
     func navigateBack() {
@@ -375,6 +448,9 @@ final class IOSAppModel {
             parentPath: parentPath
         )
         try await refreshSnapshot()
+        workspace.expandAncestors(of: parentPath)
+        workspace.selectFolderForOrganization(folder.path)
+        persistExpandedFolders(for: knowledgeBaseID)
         return folder
     }
 
@@ -457,10 +533,53 @@ final class IOSAppModel {
                 folderPath: folderPath
             )
             try await refreshSnapshot()
-            workspace.openKnowledgeBase(knowledgeBaseID)
-            workspace.openFolder(folderPath)
-            workspace.openMaterial(materialID, editing: true)
+            workspace.expandAncestors(of: folderPath)
+            workspace.selectFolderForOrganization(folderPath)
+            selectMaterial(materialID, editing: true)
             noticeMessage = "笔记已创建"
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func importMaterials(
+        from urls: [URL],
+        in knowledgeBaseID: UUID,
+        folderPath: String
+    ) async {
+        guard let libraryStore else {
+            return
+        }
+        guard !urls.isEmpty else {
+            return
+        }
+        do {
+            let accessed = urls.map {
+                ($0, $0.startAccessingSecurityScopedResource())
+            }
+            defer {
+                for (url, didAccess) in accessed where didAccess {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
+            let batch = try await libraryStore.importFiles(
+                at: urls,
+                toKnowledgeBaseID: knowledgeBaseID,
+                folderPath: folderPath
+            )
+            try await refreshSnapshot()
+            guard let imported = batch.results.first(where: {
+                !$0.isDuplicate
+            }) ?? batch.results.first else {
+                errorMessage = "没有可导入的学习材料。"
+                return
+            }
+            workspace.expandAncestors(of: folderPath)
+            workspace.selectFolderForOrganization(folderPath)
+            selectMaterial(imported.id)
+            noticeMessage = batch.duplicateCount > 0
+                ? "已导入 \(batch.importedCount) 份，跳过 \(batch.duplicateCount) 份重复材料"
+                : "已导入 \(batch.importedCount) 份学习材料"
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -482,10 +601,48 @@ final class IOSAppModel {
         try await refreshSnapshot()
         if workspace.materialID == materialID {
             let wasEditing = workspace.isEditing
-            workspace.openKnowledgeBase(knowledgeBaseID)
-            workspace.openFolder(folderPath)
-            workspace.openMaterial(materialID, editing: wasEditing)
+            workspace.expandAncestors(of: folderPath)
+            if workspace.layout == .compact {
+                workspace.openFolder(folderPath)
+            }
+            workspace.selectMaterialForTree(
+                materialID,
+                editing: wasEditing
+            )
+            persistExpandedFolders(for: knowledgeBaseID)
         }
+    }
+
+    func moveMaterials(
+        _ materialIDs: Set<UUID>,
+        toKnowledgeBaseID knowledgeBaseID: UUID,
+        folderPath: String
+    ) async throws {
+        guard let libraryStore else {
+            throw StudyNotesIOSError.noWorkspace
+        }
+        guard !materialIDs.isEmpty else {
+            return
+        }
+        try await libraryStore.moveMaterials(
+            ids: Array(materialIDs),
+            toKnowledgeBaseID: knowledgeBaseID,
+            folderPath: folderPath
+        )
+        try await refreshSnapshot()
+        workspace.expandAncestors(of: folderPath)
+        if let materialID = workspace.materialID,
+           materialIDs.contains(materialID) {
+            let wasEditing = workspace.isEditing
+            if workspace.layout == .compact {
+                workspace.openFolder(folderPath)
+            }
+            workspace.selectMaterialForTree(
+                materialID,
+                editing: wasEditing
+            )
+        }
+        persistExpandedFolders(for: knowledgeBaseID)
     }
 
     func moveFolderByForm(
@@ -516,23 +673,44 @@ final class IOSAppModel {
         }
     }
 
+    func folderDragToken(
+        for folder: FolderNode,
+        knowledgeBaseID: UUID
+    ) -> String {
+        "folder:\(knowledgeBaseID.uuidString):\(folder.path)"
+    }
+
+    func materialDragToken(
+        for material: LibraryMaterial,
+        knowledgeBaseID: UUID
+    ) -> String {
+        let materialIDs = LibraryTreeDropRules.materialIDsToMove(
+            draggedID: material.id,
+            selectedIDs: workspace.selectedMaterialIDs,
+            visibleIDs: Set(visibleTreeMaterialIDs())
+        )
+        let value = materialIDs.map(\.uuidString).sorted().joined(separator: ",")
+        return "materials:\(knowledgeBaseID.uuidString):\(value)"
+    }
+
     func canDrop(
         _ token: String,
         into folderPath: String,
         knowledgeBaseID: UUID
     ) -> Bool {
-        let parts = token.split(separator: ":", maxSplits: 2).map(String.init)
-        if parts.first == "material" {
-            return parts.count == 2 && UUID(uuidString: parts[1]) != nil
-        }
-        guard parts.first == "folder",
-              parts.count == 3,
-              UUID(uuidString: parts[1]) == knowledgeBaseID else {
+        guard let payload = dragPayload(from: token) else {
             return false
         }
-        return IOSWorkspaceState.isValidFolderMove(
-            sourcePath: parts[2],
-            targetParentPath: folderPath
+        let target: LibraryTreeDropTarget = folderPath.isEmpty
+            ? .root(knowledgeBaseID: knowledgeBaseID)
+            : .folder(
+                knowledgeBaseID: knowledgeBaseID,
+                path: folderPath
+            )
+        return LibraryTreeDropRules.allows(
+            payload,
+            on: target,
+            layout: workspace.layout
         )
     }
 
@@ -551,34 +729,68 @@ final class IOSAppModel {
             }
             return false
         }
-        let parts = token.split(separator: ":", maxSplits: 2).map(String.init)
+        guard let payload = dragPayload(from: token) else {
+            return false
+        }
         do {
-            if parts.first == "folder", parts.count == 3 {
+            switch payload {
+            case let .folder(_, sourcePath):
                 _ = try await moveFolder(
                     FolderNode(
-                        name: parts[2].split(separator: "/").last.map(String.init) ?? "",
-                        path: parts[2],
+                        name: sourcePath.split(separator: "/").last.map(String.init) ?? "",
+                        path: sourcePath,
                         children: [],
                         materialCount: 0
                     ),
                     knowledgeBaseID: knowledgeBaseID,
                     toParentPath: folderPath
                 )
-            } else if parts.first == "material",
-                      parts.count >= 2,
-                      let materialID = UUID(uuidString: parts[1]) {
-                try await moveMaterial(
-                    materialID,
+            case let .materials(_, materialIDs):
+                try await moveMaterials(
+                    Set(materialIDs),
                     toKnowledgeBaseID: knowledgeBaseID,
                     folderPath: folderPath
                 )
-            } else {
-                return false
             }
             return true
         } catch {
             errorMessage = error.localizedDescription
             return false
+        }
+    }
+
+    private func dragPayload(
+        from token: String
+    ) -> LibraryTreeDragPayload? {
+        let parts = token.split(separator: ":", maxSplits: 2).map(String.init)
+        guard parts.count == 3 else {
+            return nil
+        }
+        switch parts[0] {
+        case "folder":
+            guard let knowledgeBaseID = UUID(uuidString: parts[1]) else {
+                return nil
+            }
+            return .folder(
+                knowledgeBaseID: knowledgeBaseID,
+                path: parts[2]
+            )
+        case "materials":
+            guard let knowledgeBaseID = UUID(uuidString: parts[1]) else {
+                return nil
+            }
+            let materialIDs = parts[2]
+                .split(separator: ",")
+                .compactMap { UUID(uuidString: String($0)) }
+            guard !materialIDs.isEmpty else {
+                return nil
+            }
+            return .materials(
+                knowledgeBaseID: knowledgeBaseID,
+                materialIDs: materialIDs
+            )
+        default:
+            return nil
         }
     }
 
@@ -1243,18 +1455,68 @@ final class IOSAppModel {
     }
 
     private func reconcileWorkspace() {
+        let knowledgeBaseID = workspace.knowledgeBaseID
+        let folderPaths = Set(
+            snapshot.folders
+                .filter { $0.knowledgeBaseID == knowledgeBaseID }
+                .map(\.path)
+        )
+        let materialIDs = Set(
+            snapshot.materials
+                .filter {
+                    $0.manifest.knowledgeBaseID == knowledgeBaseID
+                }
+                .map(\.id)
+        )
         workspace.reconcile(
             validKnowledgeBaseIDs: Set(snapshot.knowledgeBases.map(\.id)),
-            folderPaths: Set(snapshot.folders.map(\.path)),
-            materialIDs: Set(snapshot.materials.map(\.id))
+            folderPaths: folderPaths,
+            materialIDs: materialIDs
         )
+        reconcileCurrentLibraryTree()
     }
 
     private func rebaseWorkspaceFolder(from oldPath: String, to newPath: String) {
         workspace.rebaseFolderPath(from: oldPath, to: newPath)
+        workspace.rebaseExpandedFolderPaths(from: oldPath, to: newPath)
+        persistExpandedFoldersForCurrentKnowledgeBase()
     }
 
     private func flatten(_ folder: FolderNode) -> [FolderNode] {
         [folder] + folder.children.flatMap(flatten)
+    }
+
+    private func reconcileCurrentLibraryTree() {
+        guard let knowledgeBaseID = workspace.knowledgeBaseID else {
+            workspace.reconcileExpandedFolders(validPaths: [""])
+            return
+        }
+        let validPaths = Set(
+            snapshot.folders
+                .filter { $0.knowledgeBaseID == knowledgeBaseID }
+                .map(\.path)
+        ).union([""])
+        workspace.reconcileExpandedFolders(validPaths: validPaths)
+        persistExpandedFolders(for: knowledgeBaseID)
+    }
+
+    private func loadExpandedFolders(for knowledgeBaseID: UUID) {
+        workspace.setExpandedFolderPaths(
+            settingsStore.loadExpandedFolderPaths(for: knowledgeBaseID)
+        )
+    }
+
+    private func persistExpandedFoldersForCurrentKnowledgeBase() {
+        guard let knowledgeBaseID = workspace.knowledgeBaseID else {
+            return
+        }
+        persistExpandedFolders(for: knowledgeBaseID)
+    }
+
+    private func persistExpandedFolders(for knowledgeBaseID: UUID) {
+        settingsStore.saveExpandedFolderPaths(
+            workspace.expandedFolderPaths,
+            for: knowledgeBaseID
+        )
     }
 }

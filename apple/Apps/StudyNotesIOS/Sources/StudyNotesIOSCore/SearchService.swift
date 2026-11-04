@@ -19,7 +19,7 @@ public struct SearchScopeSummary: Equatable, Sendable {
     }
 
     public var metadataLabel: String {
-        "全部 \(metadataCount) 份材料的标题、标签、目录"
+        "全部 \(metadataCount) 份材料的标题与标签"
     }
 
     public var fullTextLabel: String {
@@ -56,8 +56,6 @@ public actor LibrarySearchService {
         for material in snapshot.materials {
             let metadata = [
                 material.title,
-                material.knowledgeBaseName,
-                material.folderPath,
                 material.tags.joined(separator: " ")
             ].joined(separator: " ")
             if metadata.localizedCaseInsensitiveContains(trimmed) {
@@ -215,6 +213,58 @@ public actor LibrarySearchService {
     }
 }
 
+public enum LibraryTreeRow: Identifiable, Equatable, Sendable {
+    case root(
+        knowledgeBase: KnowledgeBaseSummary,
+        materialCount: Int,
+        isExpanded: Bool
+    )
+    case folder(FolderNode, depth: Int, isExpanded: Bool)
+    case material(LibraryMaterial, depth: Int)
+
+    public var id: String {
+        switch self {
+        case let .root(knowledgeBase, _, _):
+            "root:\(knowledgeBase.id.uuidString)"
+        case let .folder(folder, _, _):
+            "folder:\(folder.path)"
+        case let .material(material, _):
+            "material:\(material.id.uuidString)"
+        }
+    }
+
+    public var title: String {
+        switch self {
+        case let .root(knowledgeBase, _, _):
+            knowledgeBase.name
+        case let .folder(folder, _, _):
+            folder.name
+        case let .material(material, _):
+            material.title
+        }
+    }
+
+    public var depth: Int {
+        switch self {
+        case .root:
+            0
+        case let .folder(_, depth, _), let .material(_, depth):
+            depth
+        }
+    }
+
+    public var materialCount: Int {
+        switch self {
+        case let .root(_, count, _):
+            count
+        case let .folder(folder, _, _):
+            folder.materialCount
+        case .material:
+            1
+        }
+    }
+}
+
 public enum LibraryTreeBuilder {
     public static func folders(
         for knowledgeBaseID: UUID,
@@ -262,6 +312,50 @@ public enum LibraryTreeBuilder {
         return nil
     }
 
+    public static func visibleRows(
+        knowledgeBase: KnowledgeBaseSummary,
+        materials: [LibraryMaterial],
+        folders: [IOSFolder],
+        expandedPaths: Set<String>
+    ) -> [LibraryTreeRow] {
+        let scopedMaterials = materials.filter {
+            $0.manifest.knowledgeBaseID == knowledgeBase.id
+        }
+        var rows = [
+            LibraryTreeRow.root(
+                knowledgeBase: knowledgeBase,
+                materialCount: scopedMaterials.count,
+                isExpanded: expandedPaths.contains("")
+            )
+        ]
+        guard expandedPaths.contains("") else {
+            return rows
+        }
+
+        let tree = self.folders(
+            for: knowledgeBase.id,
+            in: scopedMaterials,
+            knownFolders: folders
+        )
+        for folder in tree {
+            append(
+                folder,
+                depth: 1,
+                materials: scopedMaterials,
+                expandedPaths: expandedPaths,
+                to: &rows
+            )
+        }
+        rows.append(
+            contentsOf: Self.materials(
+                in: "",
+                from: scopedMaterials,
+                depth: 1
+            )
+        )
+        return rows
+    }
+
     private static func nodes(
         parentPath: String,
         paths: Set<String>,
@@ -296,5 +390,50 @@ public enum LibraryTreeBuilder {
                 materialCount: count
             )
         }
+    }
+
+    private static func append(
+        _ folder: FolderNode,
+        depth: Int,
+        materials: [LibraryMaterial],
+        expandedPaths: Set<String>,
+        to rows: inout [LibraryTreeRow]
+    ) {
+        let isExpanded = expandedPaths.contains(folder.path)
+        rows.append(
+            .folder(folder, depth: depth, isExpanded: isExpanded)
+        )
+        guard isExpanded else {
+            return
+        }
+        for child in folder.children {
+            append(
+                child,
+                depth: depth + 1,
+                materials: materials,
+                expandedPaths: expandedPaths,
+                to: &rows
+            )
+        }
+        rows.append(
+            contentsOf: self.materials(
+                in: folder.path,
+                from: materials,
+                depth: depth + 1
+            )
+        )
+    }
+
+    private static func materials(
+        in folderPath: String,
+        from materials: [LibraryMaterial],
+        depth: Int
+    ) -> [LibraryTreeRow] {
+        materials
+            .filter { $0.folderPath == folderPath }
+            .sorted {
+                $0.title.localizedStandardCompare($1.title) == .orderedAscending
+            }
+            .map { .material($0, depth: depth) }
     }
 }

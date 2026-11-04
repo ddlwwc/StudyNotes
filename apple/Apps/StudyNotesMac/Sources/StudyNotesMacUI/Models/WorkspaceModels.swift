@@ -97,6 +97,12 @@ public enum WorkspaceCollection: Hashable, Sendable {
     case tag(String)
 }
 
+public enum WorkspaceTreeSelectionMode: Sendable {
+    case replace
+    case toggle
+    case extendRange
+}
+
 public enum WorkspacePane: String, CaseIterable, Identifiable, Sendable {
     case library
     case materials

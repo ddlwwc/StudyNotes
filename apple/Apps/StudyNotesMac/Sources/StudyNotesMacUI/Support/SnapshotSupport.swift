@@ -244,52 +244,12 @@ private struct SnapshotMaterialList: View {
             }
             .padding(.horizontal, 12)
 
-            VStack(alignment: .leading, spacing: 2) {
-                HStack {
-                    Text("文件夹树")
-                        .font(.sn(9, weight: .medium))
-                        .foregroundStyle(SNColor.muted)
-                    Spacer()
-                    Image(systemName: "folder.badge.plus")
-                        .font(.system(size: 9))
-                        .foregroundStyle(SNColor.muted)
-                }
-                .padding(.horizontal, 13)
-                .frame(height: 28)
-
-                SnapshotFolderRow(title: "基础", count: "3", isSelected: true)
-                SnapshotFolderRow(title: "图论", count: "2", depth: 1)
-            }
-            .padding(.bottom, 5)
-
-            Rectangle()
-                .fill(SNColor.border)
-                .frame(height: 1)
-
             HStack {
-                Text("当前层文件夹")
-                    .font(.sn(9, weight: .medium))
-                    .foregroundStyle(SNColor.muted)
-                Spacer()
-                Text("1")
-                    .font(.sn(9))
-                    .foregroundStyle(SNColor.muted)
-            }
-            .padding(.horizontal, 16)
-            .frame(height: 27)
-
-            SnapshotFolderRow(title: "图论", count: "2")
-
-            Rectangle()
-                .fill(SNColor.border)
-                .frame(height: 1)
-
-            HStack {
-                Text("全部 2")
+                Text("全部 5")
                     .font(.sn(11, weight: .medium))
                     .foregroundStyle(SNColor.blue)
                 Spacer()
-                Text("当前层 · 按名称")
+                Text("文件夹优先 · 按名称")
                     .font(.sn(10))
                     .foregroundStyle(SNColor.muted)
             }
@@ -300,18 +260,35 @@ private struct SnapshotMaterialList: View {
                 .fill(SNColor.border)
                 .frame(height: 1)
 
-            SnapshotMaterialRow(
-                title: "认知负荷理论与学习设计",
-                metadata: "学习科学 / 基础 · 今天 10:42",
-                tags: "#认知负荷  #教学设计",
+            SnapshotRootRow(count: "5")
+            SnapshotFolderRow(
+                title: "基础",
+                count: "3",
+                expanded: true,
                 isSelected: true
             )
-
-            SnapshotMaterialRow(
+            SnapshotTreeMaterialRow(
+                title: "认知负荷理论与学习设计",
+                depth: 1,
+                isSelected: true
+            )
+            SnapshotFolderRow(
+                title: "图论",
+                count: "2",
+                depth: 1,
+                expanded: true
+            )
+            SnapshotTreeMaterialRow(
                 title: "多媒体学习的双通道假设",
-                metadata: "学习科学 / 基础 / 图论 · 昨天",
-                tags: "#认知负荷",
-                isSelected: false
+                depth: 2
+            )
+            SnapshotFolderRow(
+                title: "归档",
+                count: "0"
+            )
+            SnapshotTreeMaterialRow(
+                title: "工作记忆模型",
+                depth: 0
             )
 
             Spacer()
@@ -325,23 +302,53 @@ private struct SnapshotMaterialList: View {
     }
 }
 
+private struct SnapshotRootRow: View {
+    let count: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .semibold))
+                .frame(width: 14)
+            Image(systemName: "books.vertical")
+                .font(.system(size: 11, weight: .medium))
+                .frame(width: 15)
+            Text("知识库根目录")
+                .font(.sn(11, weight: .medium))
+                .lineLimit(1)
+            Spacer()
+            Text(count)
+                .font(.sn(9))
+                .foregroundStyle(SNColor.muted)
+        }
+        .foregroundStyle(SNColor.blue)
+        .padding(.horizontal, 8)
+        .frame(height: 32)
+        .background(SNColor.blueSoft)
+        .clipShape(RoundedRectangle(cornerRadius: SNRadius.small))
+        .padding(.horizontal, 8)
+    }
+}
+
 private struct SnapshotFolderRow: View {
     let title: String
     let count: String
     var depth = 0
+    var expanded = false
     var isSelected = false
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             Color.clear
-                .frame(width: CGFloat(depth) * 13)
-            Image(systemName: depth == 0 ? "chevron.right" : "folder")
+                .frame(width: CGFloat(depth) * 14)
+            Image(systemName: expanded ? "chevron.down" : "chevron.right")
                 .font(.system(size: 8))
-                .frame(width: 12)
-            Image(systemName: "folder")
-                .font(.system(size: 10))
+                .frame(width: 14)
+            Image(systemName: isSelected ? "folder.fill" : "folder")
+                .font(.system(size: 11))
+                .frame(width: 15)
             Text(title)
-                .font(.sn(10, weight: isSelected ? .medium : .regular))
+                .font(.sn(11, weight: isSelected ? .medium : .regular))
                 .lineLimit(1)
             Spacer()
             Text(count)
@@ -349,70 +356,40 @@ private struct SnapshotFolderRow: View {
                 .foregroundStyle(SNColor.muted)
         }
         .foregroundStyle(isSelected ? SNColor.blue : SNColor.text)
-        .padding(.horizontal, 13)
-        .frame(height: 28)
+        .padding(.horizontal, 8)
+        .frame(height: 30)
         .background(isSelected ? SNColor.blueSoft : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: SNRadius.small))
+        .padding(.horizontal, 8)
     }
 }
 
-private struct SnapshotMaterialRow: View {
+private struct SnapshotTreeMaterialRow: View {
     let title: String
-    let metadata: String
-    let tags: String
-    let isSelected: Bool
+    var depth = 0
+    var isSelected = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 11) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(isSelected ? SNColor.white : SNColor.blueSoft)
-                Image(systemName: "doc.text")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(SNColor.blue)
-            }
-            .frame(width: 24, height: 24)
-            .overlay {
-                if isSelected {
-                    RoundedRectangle(cornerRadius: 5)
-                        .stroke(SNColor.blueLine, lineWidth: 1)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.sn(12, weight: isSelected ? .semibold : .medium))
-                    .foregroundStyle(SNColor.ink)
-                    .lineLimit(2)
-                Text(metadata)
-                    .font(.sn(9))
-                    .foregroundStyle(SNColor.muted)
-                    .lineLimit(1)
-                Text(tags)
-                    .font(.sn(9))
-                    .foregroundStyle(SNColor.muted)
-                    .lineLimit(1)
-            }
-
+        HStack(spacing: 6) {
+            Color.clear
+                .frame(width: CGFloat(depth) * 14 + 16)
+            Image(systemName: "doc.text")
+                .font(.system(size: 10, weight: .medium))
+                .frame(width: 14)
+            Text(title)
+                .font(.sn(11, weight: isSelected ? .semibold : .regular))
+                .foregroundStyle(SNColor.ink)
+                .lineLimit(1)
             Spacer(minLength: 4)
+            Image(systemName: "globe")
+                .font(.system(size: 9))
+                .foregroundStyle(SNColor.muted.opacity(0.55))
         }
-        .padding(.leading, isSelected ? 13 : 16)
-        .padding(.trailing, 12)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, minHeight: 76, alignment: .leading)
+        .padding(.horizontal, 8)
+        .frame(height: 36)
         .background(isSelected ? SNColor.blueSoft : SNColor.white)
-        .overlay(alignment: .leading) {
-            if isSelected {
-                Rectangle()
-                    .fill(SNColor.blue)
-                    .frame(width: 3)
-            }
-        }
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(SNColor.border)
-                .frame(height: 1)
-                .padding(.leading, 16)
-        }
+        .clipShape(RoundedRectangle(cornerRadius: SNRadius.small))
+        .padding(.horizontal, 8)
     }
 }
 

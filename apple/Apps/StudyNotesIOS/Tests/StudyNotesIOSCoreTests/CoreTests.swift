@@ -102,7 +102,7 @@ final class CoreTests: XCTestCase {
         let search = LibrarySearchService(libraryStore: store)
         let metadataHits = await search.search(query: "学习科学", snapshot: snapshot)
         let contentHits = await search.search(query: "工作记忆", snapshot: snapshot)
-        XCTAssertTrue(metadataHits.contains { $0.kind == .metadata })
+        XCTAssertFalse(metadataHits.contains { $0.kind == .metadata })
         XCTAssertTrue(contentHits.contains { $0.kind == .content })
     }
 

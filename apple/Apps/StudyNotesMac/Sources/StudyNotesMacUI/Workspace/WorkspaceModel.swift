@@ -50,6 +50,9 @@ public final class WorkspaceModel {
 
     public var selectedCollection: WorkspaceCollection = .all
     public var selectedMaterialIDs: Set<UUID> = []
+    public private(set) var readingMaterialID: UUID?
+    public private(set) var expandedDirectoryPathsByKnowledgeBase:
+        [UUID: Set<String>] = [:]
     public var searchText = ""
     public var studyPanelTab: StudyPanelTab = .annotations
     public var isShowingCreateKnowledgeBase = false
@@ -101,6 +104,8 @@ public final class WorkspaceModel {
     )
     @ObservationIgnored private let devicePreferences: DevicePreferencesStore
     @ObservationIgnored private let appSettingsStore: AppSettingsStore
+    @ObservationIgnored private let treeExpansionStore:
+        WorkspaceTreeExpansionStore
     @ObservationIgnored private let aiClient: OpenAICompatibleClient
     @ObservationIgnored private let webArticleFetcher: WebArticleFetcher
     @ObservationIgnored private var aiTask: Task<Void, Never>?
@@ -108,6 +113,7 @@ public final class WorkspaceModel {
     @ObservationIgnored private var didRestoreWorkspace = false
     @ObservationIgnored private var noteLoadGeneration = 0
     @ObservationIgnored private var refreshGeneration = 0
+    @ObservationIgnored private var treeSelectionAnchorID: UUID?
 
     public init(
         rootStore: WorkspaceRootStore = WorkspaceRootStore(),
@@ -117,6 +123,8 @@ public final class WorkspaceModel {
         ),
         devicePreferences: DevicePreferencesStore = DevicePreferencesStore(),
         appSettingsStore: AppSettingsStore = AppSettingsStore(),
+        treeExpansionStore: WorkspaceTreeExpansionStore =
+            WorkspaceTreeExpansionStore(),
         aiClient: OpenAICompatibleClient = OpenAICompatibleClient(),
         webArticleFetcher: WebArticleFetcher = WebArticleFetcher(),
         mediaCoordinator: NoteMediaCoordinator? = nil
@@ -145,6 +153,7 @@ public final class WorkspaceModel {
         }
         self.devicePreferences = devicePreferences
         self.appSettingsStore = appSettingsStore
+        self.treeExpansionStore = treeExpansionStore
         self.aiClient = aiClient
         self.webArticleFetcher = webArticleFetcher
         workspacePreferences = devicePreferences.loadWorkspacePreferences()
@@ -353,14 +362,9 @@ public final class WorkspaceModel {
             guard !query.isEmpty else {
                 return true
             }
-            let knowledgeBaseName = knowledgeBases.first {
-                $0.id == material.knowledgeBaseID
-            }?.name ?? ""
             let haystack = [
                 material.title,
-                material.folderPath,
-                material.tags.joined(separator: " "),
-                knowledgeBaseName
+                material.tags.joined(separator: " ")
             ].joined(separator: " ")
             return haystack.localizedCaseInsensitiveContains(query)
         }
@@ -379,9 +383,30 @@ public final class WorkspaceModel {
             return []
         }
         let parentPath = currentDirectoryFolderPath
-        return folders(in: selectedKnowledgeBaseID)
+        return childFolders(
+            in: selectedKnowledgeBaseID,
+            parentPath: parentPath
+        )
+    }
+
+    public func childFolders(
+        in knowledgeBaseID: UUID,
+        parentPath: String
+    ) -> [KnowledgeFolder] {
+        folders(in: knowledgeBaseID)
             .filter { $0.parentPath == parentPath }
-            .sorted(by: folderNameOrder)
+    }
+
+    public func childMaterials(
+        in knowledgeBaseID: UUID,
+        parentPath: String
+    ) -> [StudyMaterialSummary] {
+        materials
+            .filter {
+                $0.knowledgeBaseID == knowledgeBaseID
+                    && $0.folderPath == parentPath
+            }
+            .sorted(by: materialNameOrder)
     }
 
     public var directoryMaterials: [StudyMaterialSummary] {
@@ -625,6 +650,8 @@ public final class WorkspaceModel {
         invalidateNoteLoad()
         selectedCollection = collection
         selectedMaterialIDs = []
+        readingMaterialID = nil
+        treeSelectionAnchorID = nil
         selectedNote = nil
         selectedDocument = nil
         annotations = []
@@ -643,6 +670,36 @@ public final class WorkspaceModel {
         await selectCollection(.folder(knowledgeBaseID: knowledgeBaseID, path: path))
     }
 
+    public func selectTreeKnowledgeBase(_ knowledgeBaseID: UUID) async {
+        guard await flushMarkdownEditorBeforeSelectionChange() else {
+            return
+        }
+        selectedCollection = .knowledgeBase(knowledgeBaseID)
+        selectedMaterialIDs = []
+        treeSelectionAnchorID = nil
+        searchHits = []
+        searchHitsQuery = ""
+        expandDirectoryAncestors(of: "", in: knowledgeBaseID)
+    }
+
+    public func selectTreeFolder(
+        knowledgeBaseID: UUID,
+        path: String
+    ) async {
+        guard await flushMarkdownEditorBeforeSelectionChange() else {
+            return
+        }
+        selectedCollection = .folder(
+            knowledgeBaseID: knowledgeBaseID,
+            path: path
+        )
+        selectedMaterialIDs = []
+        treeSelectionAnchorID = nil
+        searchHits = []
+        searchHitsQuery = ""
+        expandDirectoryAncestors(of: path, in: knowledgeBaseID)
+    }
+
     public func selectInbox() async {
         await selectCollection(.inbox)
     }
@@ -658,6 +715,10 @@ public final class WorkspaceModel {
     public func selectionDidChange() async {
         guard !isLoadingIndex else {
             return
+        }
+        if selectedMaterialIDs.count == 1 {
+            readingMaterialID = selectedMaterialIDs.first
+            treeSelectionAnchorID = readingMaterialID
         }
         if selectedMaterialIDs.count == 1,
            let id = selectedMaterialIDs.first,
@@ -679,6 +740,18 @@ public final class WorkspaceModel {
             searchHitsQuery = ""
             let visibleIDs = Set(filteredMaterials.map(\.id))
             selectedMaterialIDs.formIntersection(visibleIDs)
+            if let readingMaterialID,
+               let knowledgeBaseID = allActiveMaterials.first(where: {
+                   $0.id == readingMaterialID
+               })?.knowledgeBaseID,
+               let material = allActiveMaterials.first(where: {
+                   $0.id == readingMaterialID
+               }) {
+                expandDirectoryAncestors(
+                    of: material.folderPath,
+                    in: knowledgeBaseID
+                )
+            }
             await updateReaderForSelection()
             return
         }
@@ -721,7 +794,117 @@ public final class WorkspaceModel {
             }
         }
         selectedMaterialIDs = [id]
+        readingMaterialID = id
+        treeSelectionAnchorID = id
+        if let material = allMaterials.first(where: { $0.id == id }),
+           let knowledgeBaseID = material.knowledgeBaseID {
+            expandDirectoryAncestors(
+                of: material.folderPath,
+                in: knowledgeBaseID
+            )
+        }
         await updateReaderForSelection()
+    }
+
+    public func selectTreeMaterial(
+        _ id: UUID,
+        mode: WorkspaceTreeSelectionMode
+    ) async {
+        guard let material = allMaterials.first(where: { $0.id == id }) else {
+            return
+        }
+        if let knowledgeBaseID = material.knowledgeBaseID {
+            expandDirectoryAncestors(
+                of: material.folderPath,
+                in: knowledgeBaseID
+            )
+        }
+
+        switch mode {
+        case .replace:
+            await selectMaterial(id)
+        case .toggle:
+            if selectedMaterialIDs.contains(id) {
+                selectedMaterialIDs.remove(id)
+            } else {
+                selectedMaterialIDs.insert(id)
+            }
+            treeSelectionAnchorID = id
+        case .extendRange:
+            guard let knowledgeBaseID = material.knowledgeBaseID else {
+                return
+            }
+            let visibleIDs = visibleDirectoryMaterialIDs(in: knowledgeBaseID)
+            let anchorID = treeSelectionAnchorID ?? readingMaterialID
+            guard let anchorID,
+                  let start = visibleIDs.firstIndex(of: anchorID),
+                  let end = visibleIDs.firstIndex(of: id) else {
+                selectedMaterialIDs = [id]
+                treeSelectionAnchorID = id
+                return
+            }
+            selectedMaterialIDs = Set(
+                visibleIDs[min(start, end)...max(start, end)]
+            )
+        }
+    }
+
+    public func expandedDirectoryPaths(
+        in knowledgeBaseID: UUID
+    ) -> Set<String> {
+        expandedDirectoryPathsByKnowledgeBase[knowledgeBaseID] ?? [""]
+    }
+
+    public func isDirectoryExpanded(
+        path: String,
+        in knowledgeBaseID: UUID
+    ) -> Bool {
+        expandedDirectoryPaths(in: knowledgeBaseID).contains(path)
+    }
+
+    public func toggleDirectoryExpansion(
+        path: String,
+        in knowledgeBaseID: UUID
+    ) {
+        var paths = expandedDirectoryPaths(in: knowledgeBaseID)
+        if paths.contains(path) {
+            paths.remove(path)
+        } else {
+            paths.insert(path)
+        }
+        persistDirectoryExpansion(paths, in: knowledgeBaseID)
+    }
+
+    public func expandDirectoryAncestors(
+        of path: String,
+        in knowledgeBaseID: UUID
+    ) {
+        var paths = expandedDirectoryPaths(in: knowledgeBaseID)
+        paths.insert("")
+        guard !path.isEmpty else {
+            persistDirectoryExpansion(paths, in: knowledgeBaseID)
+            return
+        }
+        let components = path.split(separator: "/").map(String.init)
+        for index in 1...components.count {
+            paths.insert(components.prefix(index).joined(separator: "/"))
+        }
+        persistDirectoryExpansion(paths, in: knowledgeBaseID)
+    }
+
+    public func visibleDirectoryMaterialIDs(
+        in knowledgeBaseID: UUID
+    ) -> [UUID] {
+        guard isDirectoryExpanded(path: "", in: knowledgeBaseID) else {
+            return []
+        }
+        var result: [UUID] = []
+        appendVisibleDirectoryMaterialIDs(
+            in: knowledgeBaseID,
+            parentPath: "",
+            to: &result
+        )
+        return result
     }
 
     public func materials(in collection: WorkspaceCollection) -> [StudyMaterialSummary] {
@@ -1360,9 +1543,14 @@ public final class WorkspaceModel {
                     knowledgeBaseID: knowledgeBaseID,
                     path: folder.path
                 ),
-                preferredSelection: []
+                preferredSelection: [],
+                autoSelectFirst: false
             )
             if succeeded {
+                expandDirectoryAncestors(
+                    of: folder.parentPath,
+                    in: knowledgeBaseID
+                )
                 createFolderRequest = nil
                 actionNotice = "已创建文件夹“\(folder.name)”"
             }
@@ -1598,6 +1786,10 @@ public final class WorkspaceModel {
                 preferredSelection: [note.summary.id]
             )
             if succeeded {
+                expandDirectoryAncestors(
+                    of: folderPath,
+                    in: knowledgeBaseID
+                )
                 selectedNote = note
                 isShowingCreateNote = false
                 createNoteTarget = nil
@@ -1917,6 +2109,12 @@ public final class WorkspaceModel {
                 preferredSelection: preferredID.map { Set([$0]) } ?? []
             )
             if succeeded {
+                if let knowledgeBaseID {
+                    expandDirectoryAncestors(
+                        of: folderPath,
+                        in: knowledgeBaseID
+                    )
+                }
                 isShowingImport = false
                 importTarget = nil
                 let mediaFailureCount = batch.results.reduce(0) {
@@ -2004,6 +2202,12 @@ public final class WorkspaceModel {
                 preferredSelection: result.isDuplicate ? [] : [result.summary.id]
             )
             if succeeded {
+                if let knowledgeBaseID {
+                    expandDirectoryAncestors(
+                        of: folderPath,
+                        in: knowledgeBaseID
+                    )
+                }
                 isShowingWebImport = false
                 importTarget = nil
                 webArticleDraft = nil
@@ -3021,6 +3225,8 @@ public final class WorkspaceModel {
             store = newStore
             selectedCollection = .all
             selectedMaterialIDs = []
+            readingMaterialID = nil
+            treeSelectionAnchorID = nil
             selectedNote = nil
             apply(index: index)
             connectionState = .connected(location)
@@ -3075,6 +3281,19 @@ public final class WorkspaceModel {
                 nextSelection = [firstMaterial.id]
             }
             selectedMaterialIDs = nextSelection
+            if !preferredSelection.isEmpty,
+               let preferredReadingID = nextSelection.first {
+                readingMaterialID = preferredReadingID
+                treeSelectionAnchorID = preferredReadingID
+            } else if let readingMaterialID,
+               allActiveMaterials.contains(where: {
+                   $0.id == readingMaterialID
+               }) {
+                treeSelectionAnchorID = readingMaterialID
+            } else {
+                readingMaterialID = nextSelection.first
+                treeSelectionAnchorID = readingMaterialID
+            }
             await updateReaderForSelection()
             return true
         } catch {
@@ -3093,10 +3312,18 @@ public final class WorkspaceModel {
         inboxMaterials = index.inboxMaterials
         recycledMaterials = index.recycledMaterials
         tags = index.tags
+        reconcileDirectoryExpansions()
         settleSelectedCollection()
 
         let visibleIDs = Set(filteredMaterials.map(\.id))
         selectedMaterialIDs.formIntersection(visibleIDs)
+        if let readingMaterialID,
+           !allActiveMaterials.contains(where: {
+               $0.id == readingMaterialID
+           }) {
+            self.readingMaterialID = nil
+            treeSelectionAnchorID = nil
+        }
         if let selectedNote,
            !allMaterials.contains(where: { $0.id == selectedNote.summary.id }) {
             invalidateNoteLoad()
@@ -3123,6 +3350,9 @@ public final class WorkspaceModel {
         tags = []
         selectedCollection = .all
         selectedMaterialIDs = []
+        readingMaterialID = nil
+        treeSelectionAnchorID = nil
+        expandedDirectoryPathsByKnowledgeBase = [:]
         selectedNote = nil
         selectedDocument = nil
         annotations = []
@@ -3138,6 +3368,8 @@ public final class WorkspaceModel {
             return
         }
         selectedMaterialIDs = [firstMaterial.id]
+        readingMaterialID = firstMaterial.id
+        treeSelectionAnchorID = firstMaterial.id
         await updateReaderForSelection()
     }
 
@@ -3146,8 +3378,7 @@ public final class WorkspaceModel {
         noteMediaScan = nil
         noteMediaHistoricalFiles = []
 
-        guard selectedMaterialIDs.count == 1,
-              let materialID = selectedMaterialIDs.first else {
+        guard let materialID = readingMaterialID else {
             selectedNote = nil
             selectedDocument = nil
             annotations = []
@@ -3334,6 +3565,70 @@ public final class WorkspaceModel {
         _ rhs: KnowledgeFolder
     ) -> Bool {
         lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+    }
+
+    private func materialNameOrder(
+        _ lhs: StudyMaterialSummary,
+        _ rhs: StudyMaterialSummary
+    ) -> Bool {
+        lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+    }
+
+    private func appendVisibleDirectoryMaterialIDs(
+        in knowledgeBaseID: UUID,
+        parentPath: String,
+        to result: inout [UUID]
+    ) {
+        for folder in childFolders(
+            in: knowledgeBaseID,
+            parentPath: parentPath
+        ) where isDirectoryExpanded(
+            path: folder.path,
+            in: knowledgeBaseID
+        ) {
+            appendVisibleDirectoryMaterialIDs(
+                in: knowledgeBaseID,
+                parentPath: folder.path,
+                to: &result
+            )
+        }
+        result.append(
+            contentsOf: childMaterials(
+                in: knowledgeBaseID,
+                parentPath: parentPath
+            ).map(\.id)
+        )
+    }
+
+    private func reconcileDirectoryExpansions() {
+        let knowledgeBaseIDs = Set(knowledgeBases.map(\.id))
+        expandedDirectoryPathsByKnowledgeBase =
+            expandedDirectoryPathsByKnowledgeBase.filter {
+                knowledgeBaseIDs.contains($0.key)
+            }
+        for knowledgeBaseID in knowledgeBaseIDs {
+            let validPaths = Set(
+                [""] + folders
+                    .filter { $0.knowledgeBaseID == knowledgeBaseID }
+                    .map(\.path)
+            )
+            var paths = expandedDirectoryPathsByKnowledgeBase[
+                knowledgeBaseID
+            ] ?? treeExpansionStore.load(
+                knowledgeBaseID: knowledgeBaseID
+            ) ?? [""]
+            paths.formIntersection(validPaths)
+            paths.insert("")
+            persistDirectoryExpansion(paths, in: knowledgeBaseID)
+        }
+    }
+
+    private func persistDirectoryExpansion(
+        _ paths: Set<String>,
+        in knowledgeBaseID: UUID
+    ) {
+        expandedDirectoryPathsByKnowledgeBase[knowledgeBaseID] = paths
+        treeExpansionStore.save(paths, knowledgeBaseID: knowledgeBaseID)
     }
 
     private func persistWorkspacePreferences() {

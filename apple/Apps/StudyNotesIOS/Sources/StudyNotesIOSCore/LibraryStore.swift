@@ -58,7 +58,13 @@ public actor IOSLibraryStore {
             path: "Libraries",
             directoryHint: .isDirectory
         )
-        let indexedFolders = (try? await sharedStore.loadIndex().folders) ?? []
+        let index = try? await sharedStore.loadIndex()
+        let indexedSummaries = Dictionary(
+            uniqueKeysWithValues: (index?.materials ?? []).map {
+                ($0.id, $0)
+            }
+        )
+        let indexedFolders = index?.folders ?? []
         let folders = indexedFolders.map {
             IOSFolder(
                 knowledgeBaseID: $0.knowledgeBaseID,
@@ -97,7 +103,12 @@ public actor IOSLibraryStore {
                             manifest: manifest,
                             knowledgeBaseName: fallbackName,
                             packageURL: packageURL,
-                            accessState: accessState(for: packageURL)
+                            accessState: accessState(for: packageURL),
+                            conflictCopies:
+                                indexedSummaries[manifest.id]?.conflictCopies
+                                ?? [],
+                            publishMapping:
+                                indexedSummaries[manifest.id]?.publishMapping
                         )
                     )
                 } catch {
@@ -198,6 +209,18 @@ public actor IOSLibraryStore {
         _ = try await sharedStore.moveMaterials(
             ids: ids,
             toKnowledgeBaseID: knowledgeBaseID,
+            folderPath: folderPath
+        )
+    }
+
+    public func importFiles(
+        at fileURLs: [URL],
+        toKnowledgeBaseID knowledgeBaseID: UUID,
+        folderPath: String = ""
+    ) async throws -> MaterialImportBatch {
+        try await sharedStore.importFiles(
+            at: fileURLs,
+            knowledgeBaseID: knowledgeBaseID,
             folderPath: folderPath
         )
     }

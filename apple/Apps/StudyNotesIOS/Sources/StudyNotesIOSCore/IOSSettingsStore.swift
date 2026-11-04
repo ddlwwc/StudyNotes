@@ -46,6 +46,8 @@ public final class IOSSettingsStore {
 
     private static let publishingServerURLKey =
         "StudyNotes.Publishing.ServerURL"
+    private static let expandedFolderPathsPrefix =
+        "StudyNotes.LibraryTree.Expanded."
     private let userDefaults: UserDefaults
     private let preferences: DevicePreferencesStore
 
@@ -107,5 +109,35 @@ public final class IOSSettingsStore {
 
     public func removeMediaKey() throws {
         try mediaCredentialStore.delete()
+    }
+
+    public func loadExpandedFolderPaths(
+        for knowledgeBaseID: UUID
+    ) -> Set<String> {
+        let paths = userDefaults.stringArray(
+            forKey: Self.expandedFolderPathsKey(
+                knowledgeBaseID: knowledgeBaseID
+            )
+        ) ?? []
+        return Set(paths + [""])
+    }
+
+    public func saveExpandedFolderPaths(
+        _ paths: Set<String>,
+        for knowledgeBaseID: UUID
+    ) {
+        let values = Array(paths.union([""])).sorted()
+        userDefaults.set(
+            values,
+            forKey: Self.expandedFolderPathsKey(
+                knowledgeBaseID: knowledgeBaseID
+            )
+        )
+    }
+
+    private static func expandedFolderPathsKey(
+        knowledgeBaseID: UUID
+    ) -> String {
+        expandedFolderPathsPrefix + knowledgeBaseID.uuidString
     }
 }

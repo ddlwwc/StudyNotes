@@ -1,4 +1,5 @@
 import Foundation
+import StudyNotesKit
 
 public struct KnowledgeBaseSummary: Identifiable, Codable, Equatable, Sendable {
     public let id: UUID
@@ -187,18 +188,24 @@ public struct LibraryMaterial: Identifiable, Equatable, Sendable {
     public let knowledgeBaseName: String
     public let packageURL: URL
     public let accessState: MaterialAccessState
+    public let conflictCopies: [ConflictCopy]
+    public let publishMapping: PublishMapping?
 
     public init(
         manifest: MaterialManifestRecord,
         knowledgeBaseName: String,
         packageURL: URL,
-        accessState: MaterialAccessState
+        accessState: MaterialAccessState,
+        conflictCopies: [ConflictCopy] = [],
+        publishMapping: PublishMapping? = nil
     ) {
         self.id = manifest.id
         self.manifest = manifest
         self.knowledgeBaseName = knowledgeBaseName
         self.packageURL = packageURL
         self.accessState = accessState
+        self.conflictCopies = conflictCopies
+        self.publishMapping = publishMapping
     }
 
     public var title: String { manifest.title }
@@ -554,7 +561,7 @@ public struct SearchHit: Identifiable, Equatable, Sendable {
         public var label: String {
             switch self {
             case .metadata:
-                "标题、标签、目录"
+                "标题、标签"
             case .content:
                 "正文"
             case .annotation:
