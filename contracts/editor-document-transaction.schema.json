@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://studynotes.local/contracts/editor-document-transaction.schema.json",
+  "title": "StudyNotes editor document recovery transaction",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "id",
+    "materialID",
+    "createdAt",
+    "baseContentFingerprint",
+    "generationID",
+    "contentFingerprint",
+    "title",
+    "markdown",
+    "blocks"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "materialID": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "baseContentFingerprint": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "generationID": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "contentFingerprint": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "title": {
+      "type": "string"
+    },
+    "markdown": {
+      "type": "string"
+    },
+    "blocks": {
+      "type": "array",
+      "items": {
+        "$ref": "editor-bypass-block.schema.json"
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -33,6 +33,7 @@ private struct ArticleMaterialReader: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var showsImageImporter = false
     @State private var showsFileImporter = false
+    @State private var lockError: String?
 
     var body: some View {
         Group {
@@ -51,7 +52,78 @@ private struct ArticleMaterialReader: View {
                                 .controlSize(.mini)
                         }
 
+                        if session.isLocked {
+                            Label("已锁定", systemImage: "lock.fill")
+                                .font(.sn(10))
+                                .foregroundStyle(SNColor.muted)
+                        } else {
+                            Picker(
+                                "编辑模式",
+                                selection: Binding(
+                                    get: { session.mode },
+                                    set: { newMode in
+                                        if case let .blocked(reason) =
+                                            session.setMode(newMode) {
+                                            lockError = reason
+                                        }
+                                    }
+                                )
+                            ) {
+                                Text("编辑")
+                                    .tag(MarkdownEditorMode.edit)
+                                Text("标注")
+                                    .tag(MarkdownEditorMode.annotate)
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
+                            .frame(width: 124)
+                        }
+
                         Spacer()
+
+                        Button {
+                            if case let .blocked(reason) =
+                                session.requestAnnotation() {
+                                lockError = reason
+                            }
+                        } label: {
+                            Label("标注所选", systemImage: "highlighter")
+                                .font(.sn(10))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(
+                            session.mode != .annotate
+                                || session.selection?.hasTarget != true
+                        )
+                        .help(
+                            session.mode == .annotate
+                                ? "标注当前选区"
+                                : "切换到标注模式后创建标注"
+                        )
+
+                        Button {
+                            Task {
+                                if case let .blocked(reason) =
+                                    await session.lock() {
+                                    lockError = reason
+                                }
+                            }
+                        } label: {
+                            Label(
+                                session.isLocked ? "已锁定" : "完成编辑",
+                                systemImage: session.isLocked
+                                    ? "lock.fill"
+                                    : "checkmark.circle"
+                            )
+                            .font(.sn(10))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(session.isLocked)
+                        .help(
+                            session.isLocked
+                                ? "正文已锁定，仍可创建和编辑标注"
+                                : "保存正文并锁定编辑"
+                        )
 
                         Button {
                             Task {
@@ -70,6 +142,8 @@ private struct ArticleMaterialReader: View {
 
                     MarkdownEditorView(
                         session: session,
+                        annotations: model.annotations,
+                        activeAnnotationID: model.annotationJumpID,
                         readingPreferences: model.readingPreferences,
                         mediaCoordinator: model.readerMediaCoordinator
                     ) { kind in
@@ -131,6 +205,9 @@ private struct ArticleMaterialReader: View {
                 )
             }
         }
+        .task(id: model.markdownEditorSession?.materialID) {
+            configureMarkdownSession()
+        }
         .background(SNColor.white)
         .alert(
             "标题不一致",
@@ -158,6 +235,21 @@ private struct ArticleMaterialReader: View {
             }
         } message: {
             Text("保存前需要确认以哪个标题为准，正文内容尚未写入磁盘。")
+        }
+        .alert(
+            "无法完成编辑",
+            isPresented: Binding(
+                get: { lockError != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        lockError = nil
+                    }
+                }
+            )
+        ) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(lockError ?? "正文尚未保存。")
         }
         .alert(
             "编辑冲突",
@@ -237,6 +329,57 @@ private struct ArticleMaterialReader: View {
             await model.uploadNoteMedia(id: insertion.item.id)
             await model.reloadSelectedDocumentMedia()
         }
+    }
+
+    private func configureMarkdownSession() {
+        guard let session = model.markdownEditorSession else {
+            return
+        }
+        session.onSelectionChanged = { selection in
+            model.updateReaderSelection(
+                selection.map(ReaderSelection.init(editorSelection:))
+            )
+        }
+        session.onAnnotationRequested = { selection in
+            model.updateReaderSelection(
+                ReaderSelection(editorSelection: selection)
+            )
+            model.presentAnnotationForCurrentSelection()
+        }
+        session.onAnnotationClicked = { annotationID in
+            model.annotationJumpID = annotationID
+            model.studyPanelTab = .annotations
+            model.isStudyPanelVisible = true
+            if let annotation = model.annotations.first(
+                where: { $0.id == annotationID }
+            ) {
+                model.presentAnnotationEditor(for: annotation)
+            }
+        }
+        session.onAnnotationLayoutChanged = { positions in
+            model.updateAnnotationLayoutPositions(positions)
+        }
+        session.updateAnnotations(model.annotations)
+        session.selectAnnotation(model.annotationJumpID)
+    }
+}
+
+private extension ReaderSelection {
+    init(editorSelection: MarkdownEditorSelection) {
+        self.init(
+            quote: editorSelection.quote,
+            prefix: editorSelection.prefix,
+            suffix: editorSelection.suffix,
+            offset: editorSelection.offset,
+            blockPath: editorSelection.blockPath,
+            anchorKind: .text,
+            elementType: editorSelection.elementType,
+            contentFingerprint: editorSelection.contentFingerprint,
+            contentSummary: editorSelection.quote,
+            viewportY: editorSelection.viewportY.map {
+                CGFloat($0)
+            }
+        )
     }
 }
 

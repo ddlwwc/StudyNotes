@@ -192,6 +192,11 @@ public struct MaterialDocument: Identifiable, Equatable, Sendable {
     public let mediaURLs: [String: URL]
     public let pageCount: Int?
     public let hasTextLayer: Bool?
+    public let isLocked: Bool
+    public let currentGenerationID: UUID?
+    public let contentFingerprint: String?
+    public let blocks: [EditorDocumentBlockEnvelope]
+    public let derivedRebuildPending: Bool
 
     public var id: UUID { summary.id }
 
@@ -204,7 +209,12 @@ public struct MaterialDocument: Identifiable, Equatable, Sendable {
         sourceFileURL: URL?,
         mediaURLs: [String: URL] = [:],
         pageCount: Int? = nil,
-        hasTextLayer: Bool? = nil
+        hasTextLayer: Bool? = nil,
+        isLocked: Bool = false,
+        currentGenerationID: UUID? = nil,
+        contentFingerprint: String? = nil,
+        blocks: [EditorDocumentBlockEnvelope] = [],
+        derivedRebuildPending: Bool = false
     ) {
         self.summary = summary
         self.markdown = markdown
@@ -215,6 +225,11 @@ public struct MaterialDocument: Identifiable, Equatable, Sendable {
         self.mediaURLs = mediaURLs
         self.pageCount = pageCount
         self.hasTextLayer = hasTextLayer
+        self.isLocked = isLocked
+        self.currentGenerationID = currentGenerationID
+        self.contentFingerprint = contentFingerprint
+        self.blocks = blocks
+        self.derivedRebuildPending = derivedRebuildPending
     }
 }
 

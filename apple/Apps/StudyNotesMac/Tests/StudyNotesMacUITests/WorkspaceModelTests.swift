@@ -6,18 +6,22 @@ import Testing
 @Suite("Mac workspace and settings seams")
 @MainActor
 struct WorkspaceModelTests {
-    @Test("pane collapse, resize, reset, and relaunch restore are device-local")
+    @Test("three pane visibility, resize, reset, and relaunch restore are device-local")
     func panePreferencesPersist() {
         let (defaults, suite) = isolatedDefaults()
         defer { defaults.removePersistentDomain(forName: suite) }
         let model = makeModel(defaults: defaults)
 
         model.togglePane(.library)
+        model.togglePane(.materials)
+        model.togglePane(.study)
         model.setPaneWidth(.library, width: 10_000)
         model.setPaneWidth(.materials, width: 1)
         model.setPaneWidth(.study, width: 300)
 
         #expect(!model.isLibraryPaneVisible)
+        #expect(!model.isMaterialPaneVisible)
+        #expect(!model.isStudyPanelVisible)
         #expect(model.libraryPaneWidth == 320)
         #expect(model.materialPaneWidth == 240)
         #expect(model.studyPaneWidth == 300)
@@ -25,6 +29,8 @@ struct WorkspaceModelTests {
         model.restoreDefaultWidth(.study)
         let relaunched = makeModel(defaults: defaults)
         #expect(!relaunched.isLibraryPaneVisible)
+        #expect(!relaunched.isMaterialPaneVisible)
+        #expect(!relaunched.isStudyPanelVisible)
         #expect(relaunched.libraryPaneWidth == 320)
         #expect(relaunched.materialPaneWidth == 240)
         #expect(relaunched.studyPaneWidth == WorkspacePreferences.defaultStudyWidth)
@@ -709,6 +715,21 @@ struct WorkspaceModelTests {
         #expect(!model.isReaderOutlineVisible)
         model.toggleReaderOutline()
         #expect(model.isReaderOutlineVisible)
+    }
+
+    @Test("snapshot modes cover structural annotations and compact outline overlays")
+    func readerSnapshotModes() {
+        #expect(
+            SnapshotWorkspaceMode.readerAnnotations.canvasSize
+                == CGSize(width: 1_440, height: 1_024)
+        )
+        #expect(
+            SnapshotWorkspaceMode.readerOutlineOverlay.canvasSize
+                == CGSize(
+                    width: SNMetric.minimumWindowWidth,
+                    height: SNMetric.minimumWindowHeight
+                )
+        )
     }
 
     @Test("annotation cards align, stack, and move unresolved items to the end")

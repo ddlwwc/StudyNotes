@@ -187,9 +187,238 @@ struct MarkdownEditorSessionTests {
         #expect(!session.markdown.contains("http"))
     }
 
+    @Test("new documents start unlocked in edit mode")
+    func newDocumentRuntimeDefaults() {
+        let session = MarkdownEditorSession(
+            snapshot: snapshot(title: "新笔记", markdown: "# 新笔记\n\n正文")
+        ) { request in
+            .saved(
+                title: request.title,
+                markdown: request.markdown,
+                fingerprint: "sha256:saved"
+            )
+        }
+
+        #expect(!session.isLocked)
+        #expect(session.mode == .edit)
+        #expect(session.lockErrorMessage == nil)
+    }
+
+    @Test("locked snapshots start in annotate mode and reject edit mode")
+    func lockedSnapshotStartsAnnotating() {
+        let session = MarkdownEditorSession(
+            snapshot: snapshot(
+                title: "锁定文档",
+                markdown: "# 锁定文档\n\n正文",
+                isLocked: true
+            )
+        ) { request in
+            .saved(
+                title: request.title,
+                markdown: request.markdown,
+                fingerprint: "sha256:saved"
+            )
+        }
+
+        #expect(session.isLocked)
+        #expect(session.mode == .annotate)
+        #expect(
+            session.setMode(.edit)
+                == .blocked(reason: "文档已锁定，只能继续标注。")
+        )
+        #expect(session.mode == .annotate)
+    }
+
+    @Test("mode arbitration preserves the current annotation selection")
+    func modeArbitrationPreservesSelection() {
+        let selection = MarkdownEditorSelection(
+            quote: "正文",
+            prefix: "标题\n\n",
+            offset: 4,
+            blockPath: [1],
+            elementType: .paragraph,
+            contentFingerprint: "正文",
+            viewportY: 80
+        )
+        let session = MarkdownEditorSession(
+            snapshot: snapshot(title: "标题", markdown: "# 标题\n\n正文")
+        ) { request in
+            .saved(
+                title: request.title,
+                markdown: request.markdown,
+                fingerprint: "sha256:saved"
+            )
+        }
+
+        #expect(session.setMode(.annotate) == .allowed)
+        session.receive(.selectionChanged(selection))
+        #expect(session.selection == selection)
+        #expect(session.setMode(.edit) == .allowed)
+        #expect(session.selection == selection)
+    }
+
+    @Test("new annotations require annotate mode")
+    func annotationsRequireAnnotateMode() {
+        let selection = MarkdownEditorSelection(
+            quote: "正文",
+            offset: 4,
+            blockPath: [1],
+            elementType: .paragraph,
+            contentFingerprint: "正文"
+        )
+        let session = MarkdownEditorSession(
+            snapshot: snapshot(title: "标题", markdown: "# 标题\n\n正文")
+        ) { request in
+            .saved(
+                title: request.title,
+                markdown: request.markdown,
+                fingerprint: "sha256:saved"
+            )
+        }
+        var requestedSelection: MarkdownEditorSelection?
+        session.onAnnotationRequested = {
+            requestedSelection = $0
+        }
+        session.receive(.selectionChanged(selection))
+
+        #expect(
+            session.requestAnnotation()
+                == .blocked(reason: "请先切换到标注模式。")
+        )
+        #expect(requestedSelection == nil)
+
+        #expect(session.setMode(.annotate) == .allowed)
+        #expect(session.requestAnnotation() == .allowed)
+        #expect(requestedSelection == selection)
+    }
+
+    @Test("locking saves the body before switching to annotate")
+    func successfulLockSavesBody() async {
+        let saveCounter = SaveCounter()
+        let session = MarkdownEditorSession(
+            snapshot: snapshot(title: "标题", markdown: "# 标题\n\n正文")
+        ) { request in
+            _ = await saveCounter.increment()
+            return .saved(
+                title: request.title,
+                markdown: request.markdown,
+                fingerprint: "sha256:saved"
+            )
+        }
+        session.receive(.markdownChanged("# 标题\n\n正文已更新"))
+
+        let decision = await session.lock()
+
+        #expect(decision == .allowed)
+        #expect(session.isLocked)
+        #expect(session.mode == .annotate)
+        #expect(session.saveState.status == .saved)
+        let saveCount = await saveCounter.value
+        #expect(saveCount == 1)
+        #expect(session.lockErrorMessage == nil)
+    }
+
+    @Test("failed save blocks locking and retains the edit mode")
+    func failedSaveBlocksLock() async {
+        let session = MarkdownEditorSession(
+            snapshot: snapshot(title: "标题", markdown: "# 标题\n\n正文")
+        ) { _ in
+            .failed(reason: "磁盘不可写")
+        }
+
+        let decision = await session.lock()
+
+        #expect(decision == .blocked(reason: "磁盘不可写"))
+        #expect(!session.isLocked)
+        #expect(session.mode == .edit)
+        #expect(session.lockErrorMessage == "磁盘不可写")
+    }
+
+    @Test("pending annotation draft can block locking")
+    func annotationDraftBlocksLock() async {
+        let session = MarkdownEditorSession(
+            snapshot: snapshot(title: "标题", markdown: "# 标题\n\n正文"),
+            saveHandler: { request in
+                .saved(
+                    title: request.title,
+                    markdown: request.markdown,
+                    fingerprint: "sha256:saved"
+                )
+            },
+            lockHandler: {
+                .blocked(reason: "请先保存或取消标注草稿。")
+            }
+        )
+
+        let decision = await session.lock()
+
+        #expect(
+            decision
+                == .blocked(reason: "请先保存或取消标注草稿。")
+        )
+        #expect(!session.isLocked)
+        #expect(session.mode == .edit)
+        #expect(session.lockErrorMessage == "请先保存或取消标注草稿。")
+    }
+
+    @Test("runtime reports unresolved anchors and layout positions")
+    func runtimeAnnotationState() {
+        let annotationID = UUID()
+        let session = MarkdownEditorSession(
+            snapshot: snapshot(title: "标题", markdown: "# 标题\n\n正文")
+        ) { request in
+            .saved(
+                title: request.title,
+                markdown: request.markdown,
+                fingerprint: "sha256:saved"
+            )
+        }
+
+        session.receive(
+            .unresolvedAnnotationIDsChanged([annotationID])
+        )
+        session.receive(
+            .annotationLayoutChanged([
+                annotationID.uuidString: 96
+            ])
+        )
+
+        #expect(
+            session.unresolvedAnnotationIDs == Set([annotationID])
+        )
+        #expect(
+            session.annotationLayoutPositions[annotationID] == 96
+        )
+    }
+
+    @Test("clicking an existing highlight selects it for the Mac surface")
+    func annotationClickSelectsHighlight() {
+        let annotationID = UUID()
+        var clickedID: UUID?
+        let session = MarkdownEditorSession(
+            snapshot: snapshot(title: "标题", markdown: "# 标题\n\n正文")
+        ) { request in
+            .saved(
+                title: request.title,
+                markdown: request.markdown,
+                fingerprint: "sha256:saved"
+            )
+        }
+        session.onAnnotationClicked = {
+            clickedID = $0
+        }
+
+        session.receive(.annotationClicked(annotationID))
+
+        #expect(session.activeAnnotationID == annotationID)
+        #expect(clickedID == annotationID)
+        #expect(session.mode == .edit)
+    }
+
     private func snapshot(
         title: String,
-        markdown: String
+        markdown: String,
+        isLocked: Bool = false
     ) -> MarkdownEditorSnapshot {
         MarkdownEditorSnapshot(
             materialID: UUID(),
@@ -198,7 +427,8 @@ struct MarkdownEditorSessionTests {
             fingerprint: "sha256:initial",
             compatibilityBlocks: (
                 try? MarkdownEditorCodec().decode(markdown)
-            )?.compatibilityBlocks ?? []
+            )?.compatibilityBlocks ?? [],
+            isLocked: isLocked
         )
     }
 

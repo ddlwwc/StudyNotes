@@ -7,19 +7,22 @@ public struct MarkdownEditorSnapshot: Equatable, Sendable {
     public let markdown: String
     public let fingerprint: String
     public let compatibilityBlocks: [MarkdownCompatibilityBlock]
+    public let isLocked: Bool
 
     public init(
         materialID: UUID,
         title: String,
         markdown: String,
         fingerprint: String,
-        compatibilityBlocks: [MarkdownCompatibilityBlock]
+        compatibilityBlocks: [MarkdownCompatibilityBlock],
+        isLocked: Bool = false
     ) {
         self.materialID = materialID
         self.title = title
         self.markdown = markdown
         self.fingerprint = fingerprint
         self.compatibilityBlocks = compatibilityBlocks
+        self.isLocked = isLocked
     }
 }
 
@@ -67,6 +70,9 @@ public typealias MarkdownEditorSaveHandler =
     @MainActor @Sendable (MarkdownEditorSaveRequest) async
         -> MarkdownEditorSaveResult
 
+public typealias MarkdownEditorLockHandler =
+    @MainActor @Sendable () async -> MarkdownEditorActionDecision
+
 @MainActor
 @Observable
 public final class MarkdownEditorSession {
@@ -78,8 +84,17 @@ public final class MarkdownEditorSession {
     public private(set) var titleConflict: MarkdownEditorTitleConflict?
     public private(set) var errorMessage: String?
     public private(set) var isSourceMode = false
+    public private(set) var isLocked: Bool
+    public private(set) var mode: MarkdownEditorMode
+    public private(set) var selection: MarkdownEditorSelection?
+    public private(set) var annotations: [MaterialAnnotation] = []
+    public private(set) var activeAnnotationID: UUID?
+    public private(set) var unresolvedAnnotationIDs: Set<UUID> = []
+    public private(set) var annotationLayoutPositions: [UUID: CGFloat] = [:]
+    public private(set) var lockErrorMessage: String?
 
     @ObservationIgnored private let saveHandler: MarkdownEditorSaveHandler
+    @ObservationIgnored private let lockHandler: MarkdownEditorLockHandler?
     @ObservationIgnored private let codec: MarkdownEditorCodec
     @ObservationIgnored private let titleSync: MarkdownTitleSync
     @ObservationIgnored private let policy = MarkdownSavePolicy()
@@ -87,15 +102,23 @@ public final class MarkdownEditorSession {
     @ObservationIgnored private var expectedFingerprint: String
     @ObservationIgnored private var conflictFingerprint: String?
     @ObservationIgnored private var autosaveTask: Task<Void, Never>?
+    @ObservationIgnored private var contentChangeTask: Task<Void, Never>?
+    @ObservationIgnored private var contentChangeGeneration = 0
     @ObservationIgnored private var didBecomeReady = false
 
     public var onAttachmentRequested:
         ((MarkdownEditorAttachmentKind) -> Void)?
+    public var onSelectionChanged: ((MarkdownEditorSelection?) -> Void)?
+    public var onAnnotationRequested: ((MarkdownEditorSelection) -> Void)?
+    public var onAnnotationClicked: ((UUID) -> Void)?
+    public var onAnnotationLayoutChanged: (([UUID: CGFloat]) -> Void)?
+    public var onPrepareLock: MarkdownEditorLockHandler?
 
     public init(
         snapshot: MarkdownEditorSnapshot,
         codec: MarkdownEditorCodec = MarkdownEditorCodec(),
-        saveHandler: @escaping MarkdownEditorSaveHandler
+        saveHandler: @escaping MarkdownEditorSaveHandler,
+        lockHandler: MarkdownEditorLockHandler? = nil
     ) {
         materialID = snapshot.materialID
         title = snapshot.title
@@ -106,6 +129,9 @@ public final class MarkdownEditorSession {
         self.codec = codec
         titleSync = MarkdownTitleSync(codec: codec)
         self.saveHandler = saveHandler
+        self.lockHandler = lockHandler
+        isLocked = snapshot.isLocked
+        mode = snapshot.isLocked ? .annotate : .edit
     }
 
     public var isSaving: Bool {
@@ -134,7 +160,7 @@ public final class MarkdownEditorSession {
     public func attach(_ host: any MarkdownEditorHosting) {
         self.host = host
         if didBecomeReady {
-            sendLoadedDocument()
+            sendDocumentRuntime()
         }
     }
 
@@ -142,23 +168,23 @@ public final class MarkdownEditorSession {
         switch message {
         case .ready:
             didBecomeReady = true
-            sendLoadedDocument()
+            sendDocumentRuntime()
         case let .loadDocument(markdown, title, compatibilityBlocks):
             self.markdown = markdown
             self.title = title
             self.compatibilityBlocks = compatibilityBlocks
         case let .markdownChanged(markdown):
             self.markdown = markdown
-            Task { await reduce(.contentChanged) }
+            scheduleContentChanged()
         case let .titleChanged(title):
             self.title = title
-            Task { await reduce(.contentChanged) }
+            scheduleContentChanged()
         case let .sourceChanged(markdown):
             self.markdown = markdown
             if let decoded = try? codec.decode(markdown) {
                 compatibilityBlocks = decoded.compatibilityBlocks
             }
-            Task { await reduce(.contentChanged) }
+            scheduleContentChanged()
         case let .sourceModeChanged(enabled):
             isSourceMode = enabled
             if !enabled {
@@ -172,6 +198,35 @@ public final class MarkdownEditorSession {
             break
         case let .attachRequested(kind):
             onAttachmentRequested?(kind)
+        case .documentRuntimeChanged:
+            break
+        case .annotationsChanged:
+            break
+        case .activeAnnotationChanged:
+            break
+        case let .selectionChanged(selection):
+            self.selection = selection
+            onSelectionChanged?(selection)
+        case let .annotationRequested(selection):
+            self.selection = selection
+            if mode == .annotate, selection.hasTarget {
+                onAnnotationRequested?(selection)
+            }
+        case let .annotationClicked(annotationID):
+            activeAnnotationID = annotationID
+            onAnnotationClicked?(annotationID)
+        case let .unresolvedAnnotationIDsChanged(annotationIDs):
+            unresolvedAnnotationIDs = Set(annotationIDs)
+        case let .annotationLayoutChanged(positions):
+            let converted = positions.reduce(into: [UUID: CGFloat]()) {
+                result, entry in
+                guard let id = UUID(uuidString: entry.key) else {
+                    return
+                }
+                result[id] = CGFloat(entry.value)
+            }
+            annotationLayoutPositions = converted
+            onAnnotationLayoutChanged?(converted)
         case let .failed(reason):
             errorMessage = reason
             Task { await reduce(.saveFailed(reason: reason)) }
@@ -179,15 +234,100 @@ public final class MarkdownEditorSession {
     }
 
     public func flush(_ reason: MarkdownFlushReason) async {
+        await settleEditorInput()
         await reduce(.immediateFlush(reason))
     }
 
     public func requestExplicitSave() async {
+        await settleEditorInput()
         await reduce(.explicitSave)
     }
 
     public func endEditing() async {
+        await settleEditorInput()
         await reduce(.endEditing)
+    }
+
+    @discardableResult
+    public func setMode(
+        _ newMode: MarkdownEditorMode
+    ) -> MarkdownEditorActionDecision {
+        if isLocked, newMode == .edit {
+            return .blocked(reason: "文档已锁定，只能继续标注。")
+        }
+        guard mode != newMode else {
+            return .allowed
+        }
+        mode = newMode
+        sendRuntimeState()
+        return .allowed
+    }
+
+    @discardableResult
+    public func requestAnnotation() -> MarkdownEditorActionDecision {
+        guard mode == .annotate else {
+            return .blocked(reason: "请先切换到标注模式。")
+        }
+        guard let selection, selection.hasTarget else {
+            return .blocked(reason: "请先选择要标注的正文或块。")
+        }
+        onAnnotationRequested?(selection)
+        return .allowed
+    }
+
+    @discardableResult
+    public func lock() async -> MarkdownEditorActionDecision {
+        guard !isLocked else {
+            return .allowed
+        }
+        let previousMode = mode
+        lockErrorMessage = nil
+        await endEditing()
+        await waitForActiveSave()
+        if let message = lockBlockingMessage {
+            lockErrorMessage = message
+            errorMessage = message
+            return .blocked(reason: message)
+        }
+        if let lockHandler = lockHandler ?? onPrepareLock {
+            let decision = await lockHandler()
+            if case let .blocked(reason) = decision {
+                lockErrorMessage = reason
+                mode = previousMode
+                sendRuntimeState()
+                return decision
+            }
+        }
+        isLocked = true
+        mode = .annotate
+        errorMessage = nil
+        lockErrorMessage = nil
+        sendRuntimeState()
+        return .allowed
+    }
+
+    public func updateAnnotations(_ annotations: [MaterialAnnotation]) {
+        self.annotations = annotations
+        if let activeAnnotationID,
+           !annotations.contains(where: { $0.id == activeAnnotationID }) {
+            self.activeAnnotationID = nil
+        }
+        sendAnnotations()
+        sendActiveAnnotation()
+    }
+
+    public func selectAnnotation(_ id: UUID?) {
+        guard activeAnnotationID != id else {
+            return
+        }
+        activeAnnotationID = id
+        sendActiveAnnotation()
+    }
+
+    public func editorRuntimeDidLoad() {
+        sendRuntimeState()
+        sendAnnotations()
+        sendActiveAnnotation()
     }
 
     public func prepareForAction(
@@ -276,11 +416,19 @@ public final class MarkdownEditorSession {
         markdown = snapshot.markdown
         compatibilityBlocks = snapshot.compatibilityBlocks
         expectedFingerprint = snapshot.fingerprint
+        isLocked = snapshot.isLocked
+        mode = snapshot.isLocked ? .annotate : .edit
+        selection = nil
+        annotations = []
+        activeAnnotationID = nil
+        unresolvedAnnotationIDs = []
+        annotationLayoutPositions = [:]
+        lockErrorMessage = nil
         conflictFingerprint = nil
         titleConflict = nil
         errorMessage = nil
         saveState = MarkdownSaveState()
-        sendLoadedDocument()
+        sendDocumentRuntime()
     }
 
     public func overrideConflictAndSave() async {
@@ -343,6 +491,40 @@ public final class MarkdownEditorSession {
                 break
             case .waitForSave, .allow:
                 break
+            }
+        }
+    }
+
+    private func scheduleContentChanged() {
+        contentChangeGeneration += 1
+        let generation = contentChangeGeneration
+        let previous = contentChangeTask
+        contentChangeTask = Task { [weak self] in
+            if let previous {
+                await previous.value
+            }
+            guard let self, generation == self.contentChangeGeneration else {
+                return
+            }
+            await self.reduce(.contentChanged)
+        }
+    }
+
+    private func settleEditorInput() async {
+        if isSourceMode {
+            send(.command(.exitSourceMode))
+            for _ in 0..<50 where isSourceMode {
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        while true {
+            let generation = contentChangeGeneration
+            if let task = contentChangeTask {
+                await task.value
+            }
+            if generation == contentChangeGeneration {
+                contentChangeTask = nil
+                return
             }
         }
     }
@@ -413,6 +595,7 @@ public final class MarkdownEditorSession {
                     compatibilityBlocks = decoded.compatibilityBlocks
                 }
                 await reduce(.saveSucceeded)
+                sendAnnotations()
             case let .conflict(currentFingerprint):
                 conflictFingerprint = currentFingerprint
                 errorMessage = "文件已被其他设备或工具修改，当前编辑内容未覆盖磁盘。"
@@ -435,6 +618,36 @@ public final class MarkdownEditorSession {
                 compatibilityBlocks: compatibilityBlocks
             )
         )
+    }
+
+    private func sendDocumentRuntime() {
+        sendLoadedDocument()
+        sendRuntimeState()
+        sendAnnotations()
+        sendActiveAnnotation()
+    }
+
+    private func sendRuntimeState() {
+        send(
+            .documentRuntimeChanged(
+                isLocked: isLocked,
+                mode: mode
+            )
+        )
+    }
+
+    private func sendAnnotations() {
+        send(
+            .annotationsChanged(
+                annotations.map {
+                    MarkdownEditorAnnotationPayload(annotation: $0)
+                }
+            )
+        )
+    }
+
+    private func sendActiveAnnotation() {
+        send(.activeAnnotationChanged(activeAnnotationID))
     }
 
     private func send(_ message: MarkdownEditorBridgeMessage) {
@@ -464,8 +677,32 @@ public final class MarkdownEditorSession {
     }
 
     private func waitForActiveSave() async {
-        for _ in 0..<250 where saveState.status == .saving {
+        for _ in 0..<250 {
+            guard saveState.status == .saving else {
+                return
+            }
             try? await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    private var lockBlockingMessage: String? {
+        if let titleConflict {
+            switch titleConflict {
+            case let .manifestAndHeading(manifestTitle, headingTitle):
+                return "标题尚未确认：清单为“\(manifestTitle)”，正文为“\(headingTitle)”。"
+            }
+        }
+        switch saveState.status {
+        case .saved:
+            return nil
+        case let .failed(reason):
+            return reason
+        case .conflict:
+            return "存在编辑冲突，请先选择保留的版本。"
+        case .pendingChanges:
+            return "正文尚未保存，已阻止锁定。"
+        case .saving:
+            return "正文仍在保存，请稍后重试。"
         }
     }
 }

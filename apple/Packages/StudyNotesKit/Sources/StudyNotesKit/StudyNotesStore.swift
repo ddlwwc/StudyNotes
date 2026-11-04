@@ -19,6 +19,15 @@ public enum StudyNotesError: Error, Equatable, Sendable, LocalizedError {
     case conversationNotFound
     case revisionNotFound
     case invalidLinkedMaterial
+    case editorDocumentLocked
+    case editorDocumentConflict(expected: String, current: String)
+    case editorDocumentTransactionInvalid(String)
+    case editorDocumentBlockInvalid(blockID: UUID, reason: String)
+    case editorDocumentBlockMissing(blockID: UUID)
+    case editorDocumentBlockVersionUnsupported(blockID: UUID, version: Int)
+    case editorDocumentBlockMarkerMissing(blockID: UUID)
+    case editorDocumentMarkersInvalid(reason: String)
+    case editorDocumentHasPendingTransaction
 
     public var errorDescription: String? {
         switch self {
@@ -54,6 +63,24 @@ public enum StudyNotesError: Error, Equatable, Sendable, LocalizedError {
             "没有找到对应的文字版本。"
         case .invalidLinkedMaterial:
             "关联材料不存在，或不能关联自身。"
+        case .editorDocumentLocked:
+            "文档已完成编辑并锁定，不能修改正文。"
+        case let .editorDocumentConflict(expected, current):
+            "文档已在其他位置被修改。编辑基线 \(expected)，当前指纹 \(current)。"
+        case let .editorDocumentTransactionInvalid(reason):
+            "文档恢复事务无效：\(reason)"
+        case let .editorDocumentBlockInvalid(blockID, reason):
+            "旁路块 \(blockID.uuidString) 无效：\(reason)"
+        case let .editorDocumentBlockMissing(blockID):
+            "旁路块 \(blockID.uuidString) 缺失。"
+        case let .editorDocumentBlockVersionUnsupported(blockID, version):
+            "旁路块 \(blockID.uuidString) 使用了不支持的版本 \(version)。"
+        case let .editorDocumentBlockMarkerMissing(blockID):
+            "旁路块 \(blockID.uuidString) 没有对应的 Markdown 标记。"
+        case let .editorDocumentMarkersInvalid(reason):
+            "Markdown 旁路块标记无效：\(reason)"
+        case .editorDocumentHasPendingTransaction:
+            "文档仍有未提交事务，不能锁定。"
         }
     }
 }
@@ -510,14 +537,11 @@ public actor StudyNotesStore {
             ) else {
                 throw StudyNotesError.materialNotFound
             }
-            let markdownURL = locatedMaterial.packageURL
-                .appending(path: "content", directoryHint: .isDirectory)
-                .appending(path: "note.md")
-            let markdown = try String(contentsOf: markdownURL, encoding: .utf8)
+            let content = try loadEditorDocumentContent(for: locatedMaterial)
 
             return MarkdownNote(
                 summary: try summary(for: locatedMaterial),
-                markdown: markdown
+                markdown: content.markdown
             )
         }
     }
@@ -539,17 +563,13 @@ public actor StudyNotesStore {
             }
             let packageURL = located.packageURL
             let manifest = located.manifest
-            let contentURL = contentFileURL(
-                kind: manifest.kind,
-                packageURL: packageURL
-            )
-            let markdown: String
-            if let contentURL,
-               fileManager.fileExists(atPath: contentURL.path) {
-                markdown = try String(contentsOf: contentURL, encoding: .utf8)
+            let editorContent: EditorDocumentContent?
+            if manifest.kind.isTextDocument {
+                editorContent = try loadEditorDocumentContent(for: located)
             } else {
-                markdown = ""
+                editorContent = nil
             }
+            let markdown = editorContent?.markdown ?? ""
             let mediaURLs = mediaFileURLs(in: packageURL)
             let content = ReaderContentBuilder.build(
                 markdown: markdown,
@@ -588,8 +608,140 @@ public actor StudyNotesStore {
                 sourceFileURL: sourceFileURL,
                 mediaURLs: mediaURLs,
                 pageCount: pdfDocument?.pageCount,
-                hasTextLayer: hasTextLayer
+                hasTextLayer: hasTextLayer,
+                isLocked: manifest.isLocked,
+                currentGenerationID: editorContent?.generationID,
+                contentFingerprint: editorContent?.fingerprint,
+                blocks: editorContent?.blocks ?? [],
+                derivedRebuildPending: manifest.derivedRebuildPending
             )
+        }
+    }
+
+    public func loadEditorDocument(id: UUID) throws -> EditorDocumentState {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+
+        return try coordinatedRead(at: rootURL) {
+            guard let located = try locateMaterial(
+                id: id,
+                rootURL: rootURL,
+                includeRecycled: true
+            ), located.manifest.kind.isTextDocument else {
+                throw StudyNotesError.materialNotFound
+            }
+            return try editorDocumentState(for: located)
+        }
+    }
+
+    public func saveEditorDocument(
+        _ request: EditorDocumentSaveRequest
+    ) throws -> EditorDocumentState {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+
+        return try coordinatedWrite(at: rootURL) {
+            guard let located = try locateMaterial(
+                id: request.materialID,
+                rootURL: rootURL,
+                includeRecycled: false
+            ), located.manifest.kind.isTextDocument else {
+                throw StudyNotesError.materialNotFound
+            }
+            return try commitEditorDocument(
+                located,
+                request: request,
+                createUserVisibleRevision: false,
+                ensureRevisionExists: false
+            ).state
+        }
+    }
+
+    public func loadPendingEditorDocumentTransaction(
+        id: UUID
+    ) throws -> EditorDocumentTransaction? {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+
+        return try coordinatedRead(at: rootURL) {
+            guard let located = try locateMaterial(
+                id: id,
+                rootURL: rootURL,
+                includeRecycled: true
+            ) else {
+                throw StudyNotesError.materialNotFound
+            }
+            return try pendingEditorDocumentTransaction(
+                packageURL: located.packageURL,
+                materialID: id,
+                committedGenerationID: located.manifest.currentGenerationID
+            )
+        }
+    }
+
+    public func setEditorDocumentLocked(
+        id: UUID,
+        isLocked: Bool
+    ) throws -> EditorDocumentState {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+
+        return try coordinatedWrite(at: rootURL) {
+            guard var located = try locateMaterial(
+                id: id,
+                rootURL: rootURL,
+                includeRecycled: false
+            ), located.manifest.kind.isTextDocument else {
+                throw StudyNotesError.materialNotFound
+            }
+            if isLocked {
+                if try pendingEditorDocumentTransaction(
+                    packageURL: located.packageURL,
+                    materialID: id,
+                    committedGenerationID: located.manifest.currentGenerationID
+                ) != nil {
+                    throw StudyNotesError.editorDocumentHasPendingTransaction
+                }
+                _ = try editorDocumentState(for: located)
+            }
+            located.manifest.isLocked = isLocked
+            located.manifest.updatedAt = Date()
+            try writeManifest(located.manifest, to: located.packageURL)
+            return try editorDocumentState(for: located)
+        }
+    }
+
+    public func retryEditorDocumentDerivedRebuild(
+        id: UUID
+    ) throws -> EditorDocumentState {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+
+        return try coordinatedWrite(at: rootURL) {
+            guard var located = try locateMaterial(
+                id: id,
+                rootURL: rootURL,
+                includeRecycled: false
+            ), located.manifest.kind.isTextDocument else {
+                throw StudyNotesError.materialNotFound
+            }
+            let content = try loadEditorDocumentContent(for: located)
+            do {
+                try refreshAnnotationStatuses(
+                    packageURL: located.packageURL,
+                    materialID: id,
+                    text: content.markdown,
+                    kind: located.manifest.kind
+                )
+            } catch {
+                located.manifest.derivedRebuildPending = true
+                located.manifest.updatedAt = Date()
+                try? writeManifest(located.manifest, to: located.packageURL)
+                throw error
+            }
+            located.manifest.derivedRebuildPending = false
+            try writeManifest(located.manifest, to: located.packageURL)
+            return try editorDocumentState(for: located)
         }
     }
 
@@ -762,55 +914,31 @@ public actor StudyNotesStore {
             ), located.manifest.kind.isTextDocument else {
                 throw StudyNotesError.materialNotFound
             }
-            let contentURL = contentFileURL(
-                kind: located.manifest.kind,
-                packageURL: located.packageURL
-            )
-            guard let contentURL else {
-                throw StudyNotesError.materialNotPublishable
-            }
-            try Data(text.utf8).write(to: contentURL, options: .atomic)
-            let existingRevisions = try revisions(
-                packageURL: located.packageURL,
-                materialID: id
-            )
-            let revision: TextRevision
-            if createRecoveryVersion {
-                revision = try appendRevision(
-                    text: text,
-                    packageURL: located.packageURL,
-                    materialID: id
-                )
-            } else if let current = existingRevisions.first(
-                where: { $0.id == located.manifest.contentVersionID }
-            ) {
-                revision = current
+            let content = try loadEditorDocumentContent(for: located)
+            let normalizedTitle = title?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolvedTitle: String
+            if let normalizedTitle, !normalizedTitle.isEmpty {
+                resolvedTitle = normalizedTitle
             } else {
-                revision = try appendRevision(
-                    text: text,
-                    packageURL: located.packageURL,
-                    materialID: id
-                )
+                resolvedTitle = located.manifest.title
             }
-            var manifest = located.manifest
-            if let title {
-                let normalizedTitle = title.trimmingCharacters(
-                    in: .whitespacesAndNewlines
-                )
-                if !normalizedTitle.isEmpty {
-                    manifest.title = normalizedTitle
-                }
-            }
-            manifest.contentVersionID = revision.id
-            manifest.updatedAt = Date()
-            manifest.contentFingerprint = ContentFingerprint.sha256(text)
-            try writeManifest(manifest, to: located.packageURL)
-            try refreshAnnotationStatuses(
-                packageURL: located.packageURL,
+            let request = EditorDocumentSaveRequest(
                 materialID: id,
-                text: text,
-                kind: manifest.kind
+                title: resolvedTitle,
+                markdown: text,
+                blocks: content.blocks,
+                expectedContentFingerprint: content.fingerprint
             )
+            let result = try commitEditorDocument(
+                located,
+                request: request,
+                createUserVisibleRevision: createRecoveryVersion,
+                ensureRevisionExists: true
+            )
+            guard let revision = result.revision else {
+                throw StudyNotesError.revisionNotFound
+            }
             return revision
         }
     }
@@ -865,9 +993,19 @@ public actor StudyNotesStore {
             )
             var manifest = located.manifest
             manifest.contentVersionID = restoredRevision.id
+            let oldGenerationID = manifest.currentGenerationID
+            manifest.currentGenerationID = nil
             manifest.updatedAt = restoredRevision.createdAt
             manifest.contentFingerprint = ContentFingerprint.sha256(revision.text)
             try writeManifest(manifest, to: located.packageURL)
+            if let oldGenerationID {
+                try? fileManager.removeItem(
+                    at: editorGenerationURL(
+                        generationID: oldGenerationID,
+                        packageURL: located.packageURL
+                    )
+                )
+            }
             try refreshAnnotationStatuses(
                 packageURL: located.packageURL,
                 materialID: id,
@@ -935,7 +1073,7 @@ public actor StudyNotesStore {
             )
             let text = try readerText(
                 packageURL: located.packageURL,
-                kind: located.manifest.kind
+                manifest: located.manifest
             )
             return annotations.map { annotation in
                 var resolved = annotation
@@ -2065,6 +2203,405 @@ public actor StudyNotesStore {
         return nil
     }
 
+    private func editorDocumentState(
+        for located: LocatedMaterial
+    ) throws -> EditorDocumentState {
+        let content = try loadEditorDocumentContent(for: located)
+        return EditorDocumentState(
+            materialID: located.manifest.id,
+            title: located.manifest.title,
+            markdown: content.markdown,
+            blocks: content.blocks,
+            isLocked: located.manifest.isLocked,
+            currentGenerationID: content.generationID,
+            contentFingerprint: content.fingerprint,
+            derivedRebuildPending: located.manifest.derivedRebuildPending
+        )
+    }
+
+    private func loadEditorDocumentContent(
+        for located: LocatedMaterial
+    ) throws -> EditorDocumentContent {
+        try loadEditorDocumentContent(
+            packageURL: located.packageURL,
+            manifest: located.manifest
+        )
+    }
+
+    private func loadEditorDocumentContent(
+        packageURL: URL,
+        manifest: MaterialManifest
+    ) throws -> EditorDocumentContent {
+        guard manifest.kind.isTextDocument else {
+            throw StudyNotesError.materialNotFound
+        }
+        if let generationID = manifest.currentGenerationID {
+            let generationURL = editorGenerationURL(
+                generationID: generationID,
+                packageURL: packageURL
+            )
+            guard fileManager.fileExists(atPath: generationURL.path) else {
+                throw StudyNotesError.malformedMaterialPackage
+            }
+            return try loadEditorGenerationContent(
+                at: generationURL,
+                generationID: generationID
+            )
+        }
+
+        let markdown: String
+        if let contentURL = contentFileURL(
+            kind: manifest.kind,
+            packageURL: packageURL
+        ), fileManager.fileExists(atPath: contentURL.path) {
+            markdown = try String(contentsOf: contentURL, encoding: .utf8)
+        } else {
+            markdown = ""
+        }
+        _ = try validateEditorDocumentBlocks([], markdown: markdown)
+        return EditorDocumentContent(
+            markdown: markdown,
+            blocks: [],
+            generationID: nil,
+            fingerprint: ContentFingerprint.sha256(markdown)
+        )
+    }
+
+    private func loadEditorGenerationContent(
+        at generationURL: URL,
+        generationID: UUID
+    ) throws -> EditorDocumentContent {
+        let documentURL = generationURL.appending(path: "document.md")
+        guard fileManager.fileExists(atPath: documentURL.path) else {
+            throw StudyNotesError.malformedMaterialPackage
+        }
+        let markdown = try String(contentsOf: documentURL, encoding: .utf8)
+        let markers = try EditorDocumentBlockMarkerParser.parse(markdown)
+        var blocks: [EditorDocumentBlockEnvelope] = []
+
+        for marker in markers {
+            let blockURL = generationURL
+                .appending(path: "blocks", directoryHint: .isDirectory)
+                .appending(path: marker.id.uuidString, directoryHint: .isDirectory)
+                .appending(path: "block.json")
+            guard fileManager.fileExists(atPath: blockURL.path) else {
+                throw StudyNotesError.editorDocumentBlockMissing(blockID: marker.id)
+            }
+            do {
+                let data = try Data(contentsOf: blockURL)
+                blocks.append(try decoder.decode(
+                    EditorDocumentBlockEnvelope.self,
+                    from: data
+                ))
+            } catch {
+                throw StudyNotesError.editorDocumentBlockInvalid(
+                    blockID: marker.id,
+                    reason: error.localizedDescription
+                )
+            }
+        }
+        _ = try validateEditorDocumentBlocks(blocks, markdown: markdown)
+        return EditorDocumentContent(
+            markdown: markdown,
+            blocks: blocks,
+            generationID: generationID,
+            fingerprint: try EditorDocumentFingerprint.make(
+                markdown: markdown,
+                blocks: blocks
+            )
+        )
+    }
+
+    private func commitEditorDocument(
+        _ located: LocatedMaterial,
+        request: EditorDocumentSaveRequest,
+        createUserVisibleRevision: Bool,
+        ensureRevisionExists: Bool
+    ) throws -> EditorDocumentCommitResult {
+        let current = try loadEditorDocumentContent(for: located)
+        guard !located.manifest.isLocked else {
+            throw StudyNotesError.editorDocumentLocked
+        }
+        guard current.fingerprint == request.expectedContentFingerprint else {
+            throw StudyNotesError.editorDocumentConflict(
+                expected: request.expectedContentFingerprint,
+                current: current.fingerprint
+            )
+        }
+        let markers = try validateEditorDocumentBlocks(
+            request.blocks,
+            markdown: request.markdown
+        )
+        let blocksByID = Dictionary(
+            uniqueKeysWithValues: request.blocks.map { ($0.id, $0) }
+        )
+        let orderedBlocks = markers.compactMap { blocksByID[$0.id] }
+
+        let normalizedTitle = request.title.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let title = normalizedTitle.isEmpty
+            ? located.manifest.title
+            : normalizedTitle
+        let generationID = UUID()
+        let contentFingerprint = try EditorDocumentFingerprint.make(
+            markdown: request.markdown,
+            blocks: orderedBlocks
+        )
+        let transaction = EditorDocumentTransaction(
+            id: request.transactionID,
+            materialID: located.manifest.id,
+            createdAt: request.createdAt,
+            baseContentFingerprint: request.expectedContentFingerprint,
+            generationID: generationID,
+            contentFingerprint: contentFingerprint,
+            title: title,
+            markdown: request.markdown,
+            blocks: orderedBlocks
+        )
+        try writeEditorDocumentTransaction(
+            transaction,
+            packageURL: located.packageURL
+        )
+
+        let existingRevisions = try revisions(
+            packageURL: located.packageURL,
+            materialID: located.manifest.id
+        )
+        let revision: TextRevision?
+        if createUserVisibleRevision {
+            revision = try appendRevision(
+                text: request.markdown,
+                packageURL: located.packageURL,
+                materialID: located.manifest.id
+            )
+        } else if ensureRevisionExists,
+                  let currentRevision = existingRevisions.first(where: {
+                      $0.id == located.manifest.contentVersionID
+                  }) {
+            revision = currentRevision
+        } else if ensureRevisionExists {
+            revision = try appendRevision(
+                text: request.markdown,
+                packageURL: located.packageURL,
+                materialID: located.manifest.id
+            )
+        } else {
+            revision = existingRevisions.first {
+                $0.id == located.manifest.contentVersionID
+            }
+        }
+
+        var manifest = located.manifest
+        manifest.title = title
+        manifest.contentVersionID = revision?.id
+        manifest.currentGenerationID = generationID
+        manifest.contentFingerprint = contentFingerprint
+        manifest.derivedRebuildPending = false
+        manifest.updatedAt = request.createdAt
+        let generationURL = editorGenerationURL(
+            generationID: generationID,
+            packageURL: located.packageURL
+        )
+
+        do {
+            try writeEditorGeneration(
+                markdown: request.markdown,
+                blocks: orderedBlocks,
+                to: generationURL
+            )
+            try writeManifest(manifest, to: located.packageURL)
+        } catch {
+            try? fileManager.removeItem(at: generationURL)
+            throw error
+        }
+
+        if let oldGenerationID = current.generationID,
+           oldGenerationID != generationID {
+            try? fileManager.removeItem(
+                at: editorGenerationURL(
+                    generationID: oldGenerationID,
+                    packageURL: located.packageURL
+                )
+            )
+        }
+        removeEditorDocumentTransactions(packageURL: located.packageURL)
+
+        var updated = located
+        updated.manifest = manifest
+        do {
+            try refreshAnnotationStatuses(
+                packageURL: located.packageURL,
+                materialID: located.manifest.id,
+                text: request.markdown,
+                kind: located.manifest.kind
+            )
+        } catch {
+            updated.manifest.derivedRebuildPending = true
+            updated.manifest.updatedAt = Date()
+            try? writeManifest(updated.manifest, to: located.packageURL)
+        }
+
+        return EditorDocumentCommitResult(
+            state: try editorDocumentState(for: updated),
+            revision: revision
+        )
+    }
+
+    private func writeEditorGeneration(
+        markdown: String,
+        blocks: [EditorDocumentBlockEnvelope],
+        to generationURL: URL
+    ) throws {
+        let parentURL = generationURL.deletingLastPathComponent()
+        let temporaryURL = parentURL.appending(
+            path: ".tmp-\(generationURL.lastPathComponent)",
+            directoryHint: .isDirectory
+        )
+        try fileManager.createDirectory(
+            at: parentURL,
+            withIntermediateDirectories: true
+        )
+        try? fileManager.removeItem(at: temporaryURL)
+        try? fileManager.removeItem(at: generationURL)
+
+        do {
+            try fileManager.createDirectory(
+                at: temporaryURL,
+                withIntermediateDirectories: false
+            )
+            let documentURL = temporaryURL.appending(path: "document.md")
+            try Data(markdown.utf8).write(to: documentURL, options: .atomic)
+
+            for block in blocks {
+                let blockDirectory = temporaryURL
+                    .appending(path: "blocks", directoryHint: .isDirectory)
+                    .appending(
+                        path: block.id.uuidString,
+                        directoryHint: .isDirectory
+                    )
+                try fileManager.createDirectory(
+                    at: blockDirectory,
+                    withIntermediateDirectories: true
+                )
+                try encode(block).write(
+                    to: blockDirectory.appending(path: "block.json"),
+                    options: .atomic
+                )
+            }
+
+            guard try String(contentsOf: documentURL, encoding: .utf8) == markdown else {
+                throw StudyNotesError.malformedMaterialPackage
+            }
+            for block in blocks {
+                let blockURL = temporaryURL
+                    .appending(path: "blocks", directoryHint: .isDirectory)
+                    .appending(path: block.id.uuidString, directoryHint: .isDirectory)
+                    .appending(path: "block.json")
+                let decoded = try decoder.decode(
+                    EditorDocumentBlockEnvelope.self,
+                    from: Data(contentsOf: blockURL)
+                )
+                guard decoded == block else {
+                    throw StudyNotesError.editorDocumentBlockInvalid(
+                        blockID: block.id,
+                        reason: "block.json 写入校验失败。"
+                    )
+                }
+            }
+            try fileManager.moveItem(at: temporaryURL, to: generationURL)
+        } catch {
+            try? fileManager.removeItem(at: temporaryURL)
+            throw error
+        }
+    }
+
+    private func writeEditorDocumentTransaction(
+        _ transaction: EditorDocumentTransaction,
+        packageURL: URL
+    ) throws {
+        let directory = editorTransactionsURL(packageURL: packageURL)
+        try fileManager.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        try encode(transaction).write(
+            to: directory.appending(
+                path: "\(transaction.id.uuidString).json"
+            ),
+            options: .atomic
+        )
+    }
+
+    private func pendingEditorDocumentTransaction(
+        packageURL: URL,
+        materialID: UUID,
+        committedGenerationID: UUID?
+    ) throws -> EditorDocumentTransaction? {
+        let directory = editorTransactionsURL(packageURL: packageURL)
+        guard fileManager.fileExists(atPath: directory.path) else {
+            return nil
+        }
+        let files = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+        let transactions = try files
+            .filter { $0.pathExtension.lowercased() == "json" }
+            .map { fileURL -> EditorDocumentTransaction in
+                do {
+                    let transaction = try decoder.decode(
+                        EditorDocumentTransaction.self,
+                        from: Data(contentsOf: fileURL)
+                    )
+                    guard transaction.schemaVersion
+                        == EditorDocumentTransaction.currentSchemaVersion else {
+                        throw StudyNotesError.editorDocumentTransactionInvalid(
+                            "不支持的事务版本 \(transaction.schemaVersion)。"
+                        )
+                    }
+                    guard transaction.materialID == materialID else {
+                        throw StudyNotesError.editorDocumentTransactionInvalid(
+                            "事务 materialID 与材料包不一致。"
+                        )
+                    }
+                    return transaction
+                } catch let error as StudyNotesError {
+                    throw error
+                } catch {
+                    throw StudyNotesError.editorDocumentTransactionInvalid(
+                        "\(fileURL.lastPathComponent)：\(error.localizedDescription)"
+                    )
+                }
+            }
+            .filter { $0.generationID != committedGenerationID }
+            .sorted { $0.createdAt > $1.createdAt }
+        return transactions.first
+    }
+
+    private func removeEditorDocumentTransactions(packageURL: URL) {
+        try? fileManager.removeItem(
+            at: editorTransactionsURL(packageURL: packageURL)
+        )
+    }
+
+    private func editorGenerationURL(
+        generationID: UUID,
+        packageURL: URL
+    ) -> URL {
+        packageURL
+            .appending(path: "content", directoryHint: .isDirectory)
+            .appending(path: "generations", directoryHint: .isDirectory)
+            .appending(path: generationID.uuidString, directoryHint: .isDirectory)
+    }
+
+    private func editorTransactionsURL(packageURL: URL) -> URL {
+        packageURL
+            .appending(path: "content", directoryHint: .isDirectory)
+            .appending(path: "transactions", directoryHint: .isDirectory)
+    }
+
     private func contentFileURL(
         kind: StudyMaterialKind,
         packageURL: URL
@@ -2093,13 +2630,15 @@ public actor StudyNotesStore {
 
     private func readerText(
         packageURL: URL,
-        kind: StudyMaterialKind
+        manifest: MaterialManifest
     ) throws -> String {
-        if let contentURL = contentFileURL(kind: kind, packageURL: packageURL),
-           fileManager.fileExists(atPath: contentURL.path) {
-            return try String(contentsOf: contentURL, encoding: .utf8)
+        if manifest.kind.isTextDocument {
+            return try loadEditorDocumentContent(
+                packageURL: packageURL,
+                manifest: manifest
+            ).markdown
         }
-        guard kind == .pdf else {
+        guard manifest.kind == .pdf else {
             return ""
         }
         let sourceURL = packageURL
@@ -2459,7 +2998,7 @@ public actor StudyNotesStore {
             }
             let text = try readerText(
                 packageURL: package.packageURL,
-                kind: manifest.kind
+                manifest: manifest
             )
             let annotations = try loadAnnotationFiles(
                 packageURL: package.packageURL,
@@ -3615,6 +4154,9 @@ private struct MaterialManifest: Codable, Equatable, Sendable {
     var contentVersionID: UUID?
     var sourceFingerprint: String?
     var contentFingerprint: String?
+    var currentGenerationID: UUID?
+    var isLocked: Bool
+    var derivedRebuildPending: Bool
     var publishMapping: PublishMapping?
 
     init(
@@ -3635,6 +4177,9 @@ private struct MaterialManifest: Codable, Equatable, Sendable {
         contentVersionID: UUID? = nil,
         sourceFingerprint: String? = nil,
         contentFingerprint: String? = nil,
+        currentGenerationID: UUID? = nil,
+        isLocked: Bool = false,
+        derivedRebuildPending: Bool = false,
         publishMapping: PublishMapping? = nil
     ) {
         self.schemaVersion = schemaVersion
@@ -3654,7 +4199,34 @@ private struct MaterialManifest: Codable, Equatable, Sendable {
         self.contentVersionID = contentVersionID
         self.sourceFingerprint = sourceFingerprint
         self.contentFingerprint = contentFingerprint
+        self.currentGenerationID = currentGenerationID
+        self.isLocked = isLocked
+        self.derivedRebuildPending = derivedRebuildPending
         self.publishMapping = publishMapping
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case id
+        case knowledgeBaseID
+        case kind
+        case title
+        case createdAt
+        case updatedAt
+        case folderPath
+        case tags
+        case deletedAt
+        case originalLocation
+        case linkedMaterialIDs
+        case originalSourceURL
+        case sourceFileName
+        case contentVersionID
+        case sourceFingerprint
+        case contentFingerprint
+        case currentGenerationID
+        case isLocked = "locked"
+        case derivedRebuildPending
+        case publishMapping
     }
 
     init(from decoder: Decoder) throws {
@@ -3682,7 +4254,49 @@ private struct MaterialManifest: Codable, Equatable, Sendable {
         contentVersionID = try container.decodeIfPresent(UUID.self, forKey: .contentVersionID)
         sourceFingerprint = try container.decodeIfPresent(String.self, forKey: .sourceFingerprint)
         contentFingerprint = try container.decodeIfPresent(String.self, forKey: .contentFingerprint)
+        currentGenerationID = try container.decodeIfPresent(
+            UUID.self,
+            forKey: .currentGenerationID
+        )
+        isLocked = try container.decodeIfPresent(Bool.self, forKey: .isLocked) ?? false
+        derivedRebuildPending = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .derivedRebuildPending
+        ) ?? false
         publishMapping = try container.decodeIfPresent(PublishMapping.self, forKey: .publishMapping)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(id, forKey: .id)
+        try container.encodeIfPresent(knowledgeBaseID, forKey: .knowledgeBaseID)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(title, forKey: .title)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encode(folderPath, forKey: .folderPath)
+        try container.encode(tags, forKey: .tags)
+        try container.encodeIfPresent(deletedAt, forKey: .deletedAt)
+        try container.encodeIfPresent(originalLocation, forKey: .originalLocation)
+        try container.encode(linkedMaterialIDs, forKey: .linkedMaterialIDs)
+        try container.encodeIfPresent(originalSourceURL, forKey: .originalSourceURL)
+        try container.encodeIfPresent(sourceFileName, forKey: .sourceFileName)
+        try container.encodeIfPresent(contentVersionID, forKey: .contentVersionID)
+        try container.encodeIfPresent(sourceFingerprint, forKey: .sourceFingerprint)
+        if let contentFingerprint {
+            try container.encode(contentFingerprint, forKey: .contentFingerprint)
+        } else {
+            try container.encodeNil(forKey: .contentFingerprint)
+        }
+        if let currentGenerationID {
+            try container.encode(currentGenerationID, forKey: .currentGenerationID)
+        } else {
+            try container.encodeNil(forKey: .currentGenerationID)
+        }
+        try container.encode(isLocked, forKey: .isLocked)
+        try container.encode(derivedRebuildPending, forKey: .derivedRebuildPending)
+        try container.encodeIfPresent(publishMapping, forKey: .publishMapping)
     }
 
     func summary(
@@ -3725,6 +4339,11 @@ private struct ScannedPackage {
     let packageURL: URL
     let folderPath: String
     let manifest: MaterialManifest?
+}
+
+private struct EditorDocumentCommitResult {
+    let state: EditorDocumentState
+    let revision: TextRevision?
 }
 
 private struct InboxDraftPackage {

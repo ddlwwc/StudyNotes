@@ -25,6 +25,10 @@ struct StudyNotesMacSnapshotMain {
             mode = .settings
         } else if arguments.contains("--settings-compact") {
             mode = .compactSettings
+        } else if arguments.contains("--reader-annotations") {
+            mode = .readerAnnotations
+        } else if arguments.contains("--reader-outline-overlay") {
+            mode = .readerOutlineOverlay
         } else if arguments.contains("--reader-outline") {
             mode = .readerOutline
         } else if arguments.contains("--search-results") {

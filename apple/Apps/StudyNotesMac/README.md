@@ -35,3 +35,15 @@ swift run --disable-sandbox --scratch-path /private/tmp/StudyNotesMac-build \
   StudyNotesMacSnapshot dist/StudyNotesMac-outline-dark.png \
   --reader-outline --dark
 ```
+
+元素级标注和窄布局目录浮层的视觉基线：
+
+```bash
+swift run --disable-sandbox --scratch-path /private/tmp/StudyNotesMac-build \
+  StudyNotesMacSnapshot dist/StudyNotesMac-annotations.png \
+  --reader-annotations
+
+swift run --disable-sandbox --scratch-path /private/tmp/StudyNotesMac-build \
+  StudyNotesMacSnapshot dist/StudyNotesMac-outline-overlay.png \
+  --reader-outline-overlay
+```

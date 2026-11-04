@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://studynotes.local/contracts/editor-bypass-block.schema.json",
+  "title": "StudyNotes versioned editor bypass block",
+  "type": "object",
+  "required": ["id", "type", "version", "fallback"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "paragraph",
+        "heading",
+        "callout",
+        "status",
+        "divider",
+        "columns",
+        "toggle",
+        "table-of-contents",
+        "code",
+        "formula",
+        "mermaid",
+        "table",
+        "data-table",
+        "whiteboard",
+        "mind-map",
+        "flowchart",
+        "image",
+        "attachment",
+        "audio",
+        "video",
+        "link",
+        "document-card"
+      ]
+    },
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "fallback": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "data": {
+      "description": "Opaque block data interpreted by the versioned block model."
+    }
+  },
+  "additionalProperties": false
+}

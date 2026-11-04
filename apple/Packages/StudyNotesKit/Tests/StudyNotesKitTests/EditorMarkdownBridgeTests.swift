@@ -6,6 +6,31 @@ import Testing
 struct MarkdownEditorBridgeTests {
     @Test("bridge messages round-trip through Codable")
     func messageCodable() throws {
+        let annotationID = UUID()
+        let selection = MarkdownEditorSelection(
+            quote: "正文",
+            prefix: "标题\n\n",
+            suffix: "\n\n结尾",
+            offset: 4,
+            blockPath: [1],
+            elementType: .paragraph,
+            contentFingerprint: "正文",
+            viewportY: 120
+        )
+        let annotation = MaterialAnnotation(
+            id: annotationID,
+            materialID: UUID(),
+            anchor: AnnotationAnchor(
+                kind: .text,
+                excerpt: "正文",
+                prefix: "标题\n\n",
+                suffix: "\n\n结尾",
+                offset: 4,
+                blockPath: [1]
+            ),
+            quote: "正文",
+            note: "批注"
+        )
         let messages: [MarkdownEditorBridgeMessage] = [
             .ready,
             .loadDocument(
@@ -27,6 +52,22 @@ struct MarkdownEditorBridgeTests {
             .command(.save),
             .saveRequested,
             .attachRequested(.image),
+            .documentRuntimeChanged(
+                isLocked: false,
+                mode: .annotate
+            ),
+            .annotationsChanged([
+                MarkdownEditorAnnotationPayload(annotation: annotation)
+            ]),
+            .activeAnnotationChanged(annotationID),
+            .selectionChanged(selection),
+            .selectionChanged(nil),
+            .annotationRequested(selection),
+            .annotationClicked(annotationID),
+            .unresolvedAnnotationIDsChanged([annotationID]),
+            .annotationLayoutChanged([
+                annotationID.uuidString: 144
+            ]),
             .failed(reason: "序列化失败")
         ]
 

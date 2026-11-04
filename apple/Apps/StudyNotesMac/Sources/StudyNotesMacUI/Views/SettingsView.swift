@@ -79,6 +79,7 @@ public struct SettingsView: View {
             }
             .padding(12)
         }
+        .scrollIndicators(.hidden)
         .background(SNColor.nav)
     }
 

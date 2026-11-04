@@ -4,6 +4,8 @@ public enum SnapshotWorkspaceMode: Equatable {
     case tree
     case searchResults
     case readerOutline
+    case readerOutlineOverlay
+    case readerAnnotations
     case settings
     case compactSettings
 
@@ -18,7 +20,12 @@ public enum SnapshotWorkspaceMode: Equatable {
                 width: SNMetric.minimumWindowWidth,
                 height: SNMetric.minimumWindowHeight
             )
-        case .tree, .searchResults, .readerOutline, .settings:
+        case .readerOutlineOverlay:
+            CGSize(
+                width: SNMetric.minimumWindowWidth,
+                height: SNMetric.minimumWindowHeight
+            )
+        case .tree, .searchResults, .readerOutline, .readerAnnotations, .settings:
             CGSize(width: 1_440, height: 1_024)
         }
     }
@@ -50,6 +57,12 @@ public struct SnapshotWorkspaceView: View {
                 if mode.isShowingSettings {
                     SettingsView(model: model)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if mode == .readerOutlineOverlay {
+                    SnapshotMaterialList(mode: .tree)
+                        .frame(width: SNMetric.materialListWidth)
+
+                    SnapshotReaderOutlineOverlay()
+                        .frame(minWidth: 460, maxWidth: .infinity)
                 } else {
                     if mode == .readerOutline {
                         SnapshotOutline()
@@ -59,10 +72,14 @@ public struct SnapshotWorkspaceView: View {
                             .frame(width: SNMetric.materialListWidth)
                     }
 
-                    SnapshotReader()
+                    SnapshotReader(
+                        showsStructuralAnnotations: mode == .readerAnnotations
+                    )
                         .frame(minWidth: 460, maxWidth: .infinity)
 
-                    SnapshotStudyPanel()
+                    SnapshotStudyPanel(
+                        showsStructuralAnnotations: mode == .readerAnnotations
+                    )
                         .frame(width: SNMetric.studyPanelWidth)
                 }
             }
@@ -525,6 +542,8 @@ private struct SnapshotTreeMaterialRow: View {
 }
 
 private struct SnapshotOutline: View {
+    var showsCloseButton = false
+
     private let headings = [
         ("认知负荷理论与学习设计", 1),
         ("三种认知负荷", 2),
@@ -535,11 +554,20 @@ private struct SnapshotOutline: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("目录")
-                .font(.sn(12, weight: .semibold))
-                .foregroundStyle(SNColor.ink)
-                .padding(.horizontal, 14)
-                .frame(height: 44)
+            HStack {
+                Text("目录")
+                    .font(.sn(12, weight: .semibold))
+                    .foregroundStyle(SNColor.ink)
+                Spacer()
+                if showsCloseButton {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(SNColor.muted)
+                        .frame(width: 24, height: 24)
+                }
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 44)
 
             Rectangle()
                 .fill(SNColor.border)
@@ -576,6 +604,8 @@ private struct SnapshotOutline: View {
 }
 
 private struct SnapshotReader: View {
+    var showsStructuralAnnotations = false
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
@@ -605,35 +635,44 @@ private struct SnapshotReader: View {
                     .frame(height: 1)
             }
 
-            VStack(alignment: .leading, spacing: 0) {
-                Text("认知负荷理论与学习设计")
-                    .font(.sn(30, weight: .semibold))
-                    .foregroundStyle(SNColor.ink)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("认知负荷理论与学习设计")
+                        .font(.sn(30, weight: .semibold))
+                        .foregroundStyle(SNColor.ink)
 
-                HStack(spacing: 6) {
-                    Text("Markdown 笔记")
-                    Text("·")
-                    Text("更新于 今天 10:42")
-                    Text("·")
-                    Text("学习科学")
+                    HStack(spacing: 6) {
+                        Text("Markdown 笔记")
+                        Text("·")
+                        Text("更新于 今天 10:42")
+                        Text("·")
+                        Text("学习科学")
+                    }
+                    .font(.sn(11))
+                    .foregroundStyle(SNColor.muted)
+                    .padding(.top, 8)
+
+                    Rectangle()
+                        .fill(SNColor.border)
+                        .frame(height: 1)
+                        .padding(.vertical, 22)
+
+                    if showsStructuralAnnotations {
+                        SnapshotStructuralAnnotationArticle()
+                    } else {
+                        MarkdownRenderer(
+                            markdown: SampleSnapshotContent.markdown,
+                            blockSpacing: 14
+                        )
+                    }
                 }
-                .font(.sn(11))
-                .foregroundStyle(SNColor.muted)
-                .padding(.top, 8)
-
-                Rectangle()
-                    .fill(SNColor.border)
-                    .frame(height: 1)
-                    .padding(.vertical, 22)
-
-                MarkdownRenderer(markdown: SampleSnapshotContent.markdown, blockSpacing: 14)
+                .frame(maxWidth: 648, alignment: .leading)
+                .padding(.horizontal, 36)
+                .padding(.top, 30)
+                .padding(.bottom, 32)
+                .frame(maxWidth: .infinity, alignment: .center)
             }
-            .frame(maxWidth: 648, alignment: .leading)
-            .padding(.horizontal, 36)
-            .padding(.top, 30)
-            .frame(maxWidth: .infinity, alignment: .center)
-
-            Spacer(minLength: 0)
+            .scrollIndicators(.hidden)
         }
         .background(SNColor.white)
     }
@@ -657,6 +696,8 @@ private struct SnapshotReaderTool: View {
 }
 
 private struct SnapshotStudyPanel: View {
+    var showsStructuralAnnotations = false
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -672,6 +713,17 @@ private struct SnapshotStudyPanel: View {
                 .fill(SNColor.border)
                 .frame(height: 1)
 
+            if showsStructuralAnnotations {
+                SnapshotStructuralAnnotationCards()
+            } else {
+                regularContent
+            }
+        }
+        .background(SNColor.white)
+    }
+
+    private var regularContent: some View {
+        VStack(spacing: 0) {
             HStack(spacing: 18) {
                 VStack(spacing: 7) {
                     Text("标注")
@@ -805,7 +857,174 @@ private struct SnapshotStudyPanel: View {
 
             Spacer(minLength: 0)
         }
-        .background(SNColor.white)
+    }
+}
+
+private struct SnapshotReaderOutlineOverlay: View {
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            SnapshotReader()
+
+            Color.black.opacity(0.1)
+
+            SnapshotOutline(showsCloseButton: true)
+                .frame(width: 260)
+                .padding(.top, 52)
+                .shadow(color: Color.black.opacity(0.16), radius: 16, x: 8, y: 0)
+        }
+        .clipped()
+    }
+}
+
+private struct SnapshotStructuralAnnotationArticle: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("元素级标注预览")
+                .font(.sn(18, weight: .semibold))
+                .foregroundStyle(SNColor.ink)
+
+            Text("阅读态可以直接标注图片、代码块和表格，标注卡保持在同一水平线上。")
+                .font(.snReading(13))
+                .foregroundStyle(SNColor.text)
+                .lineSpacing(4)
+
+            ZStack {
+                RoundedRectangle(cornerRadius: SNRadius.control)
+                    .fill(SNColor.nav)
+                VStack(spacing: 8) {
+                    Image(systemName: "photo.on.rectangle.angled")
+                        .font(.system(size: 34, weight: .light))
+                    Text("学习材料插图")
+                        .font(.sn(11, weight: .medium))
+                }
+                .foregroundStyle(SNColor.muted)
+            }
+            .frame(height: 132)
+            .overlay {
+                RoundedRectangle(cornerRadius: SNRadius.control)
+                    .stroke(SNColor.yellowLine, lineWidth: 2)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("代码块")
+                    .font(.sn(9, weight: .medium))
+                    .foregroundStyle(SNColor.muted)
+                Text("let value = 42\nprint(value)")
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(SNColor.ink)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(SNColor.yellow.opacity(0.7))
+            .clipShape(RoundedRectangle(cornerRadius: SNRadius.control))
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(SNColor.yellowLine)
+                    .frame(height: 2)
+            }
+
+            VStack(spacing: 0) {
+                SnapshotAnnotationTableRow(
+                    cells: ["负荷类型", "来源", "设计动作"],
+                    isHeader: true
+                )
+                SnapshotAnnotationTableRow(
+                    cells: ["内在负荷", "材料复杂度", "分段"]
+                )
+                SnapshotAnnotationTableRow(
+                    cells: ["外在负荷", "呈现方式", "降噪"]
+                )
+            }
+            .background(SNColor.yellow.opacity(0.45))
+            .clipShape(RoundedRectangle(cornerRadius: SNRadius.control))
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(SNColor.yellowLine)
+                    .frame(height: 2)
+            }
+        }
+    }
+}
+
+private struct SnapshotAnnotationTableRow: View {
+    let cells: [String]
+    var isHeader = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
+                Text(cell)
+                    .font(.sn(10, weight: isHeader ? .semibold : .regular))
+                    .foregroundStyle(SNColor.text)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 8)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(SNColor.border)
+                .frame(height: 1)
+        }
+    }
+}
+
+private struct SnapshotStructuralAnnotationCards: View {
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            SnapshotAnnotationCard(
+                type: "图片",
+                summary: "学习材料插图",
+                note: "需要补充图片与正文概念的对应关系。"
+            )
+            .offset(y: 120)
+
+            SnapshotAnnotationCard(
+                type: "代码块",
+                summary: "let value = 42 / print(value)",
+                note: "示例代码用于说明可标注代码块。"
+            )
+            .offset(y: 286)
+
+            SnapshotAnnotationCard(
+                type: "表格",
+                summary: "负荷类型 | 来源 / 设计动作",
+                note: "整张表格共享一条研读备注。"
+            )
+            .offset(y: 452)
+        }
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+private struct SnapshotAnnotationCard: View {
+    let type: String
+    let summary: String
+    let note: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label(type, systemImage: "highlighter")
+                .font(.sn(9, weight: .medium))
+                .foregroundStyle(SNColor.blue)
+            Text(summary)
+                .font(.snReading(12))
+                .foregroundStyle(SNColor.text)
+                .lineLimit(2)
+            Text(note)
+                .font(.sn(10))
+                .foregroundStyle(SNColor.text)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(SNColor.yellow)
+        .clipShape(RoundedRectangle(cornerRadius: SNRadius.control))
+        .overlay {
+            RoundedRectangle(cornerRadius: SNRadius.control)
+                .stroke(SNColor.yellowLine, lineWidth: 1)
+        }
     }
 }
 

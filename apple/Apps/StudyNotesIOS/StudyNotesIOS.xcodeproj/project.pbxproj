@@ -6,6 +6,14 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		A10000000000000000000040 /* StudyNotesIOSCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* StudyNotesIOSCore.framework */; };
+		A10000000000000000000041 /* StudyNotesIOSCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* StudyNotesIOSCore.framework */; };
+		A10000000000000000000042 /* StudyNotesShareExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* StudyNotesShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		A10000000000000000000043 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* ShareViewController.swift */; };
+		A10000000000000000000044 /* StudyNotesKit in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000090 /* StudyNotesKit */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		A10000000000000000000051 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -29,14 +37,6 @@
 			remoteInfo = StudyNotesIOSCore;
 		};
 /* End PBXContainerItemProxy section */
-
-/* Begin PBXBuildFile section */
-		A10000000000000000000040 /* StudyNotesIOSCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* StudyNotesIOSCore.framework */; };
-		A10000000000000000000041 /* StudyNotesIOSCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* StudyNotesIOSCore.framework */; };
-		A10000000000000000000042 /* StudyNotesShareExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* StudyNotesShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		A10000000000000000000043 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* ShareViewController.swift */; };
-		A10000000000000000000044 /* StudyNotesKit in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000090 /* StudyNotesKit */; };
-/* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
 		A10000000000000000000036 /* Embed App Extensions */ = {
@@ -64,12 +64,12 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		A10000000000000000000004 /* StudyNotesIOS */ = {
+		A10000000000000000000004 /* Sources/StudyNotesIOS */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = Sources/StudyNotesIOS;
 			sourceTree = "<group>";
 		};
-		A10000000000000000000005 /* StudyNotesIOSCore */ = {
+		A10000000000000000000005 /* Sources/StudyNotesIOSCore */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = Sources/StudyNotesIOSCore;
 			sourceTree = "<group>";
@@ -107,8 +107,8 @@
 		A10000000000000000000002 = {
 			isa = PBXGroup;
 			children = (
-				A10000000000000000000004 /* StudyNotesIOS */,
-				A10000000000000000000005 /* StudyNotesIOSCore */,
+				A10000000000000000000004 /* Sources/StudyNotesIOS */,
+				A10000000000000000000005 /* Sources/StudyNotesIOSCore */,
 				A10000000000000000000006 /* ShareExtension */,
 				A10000000000000000000007 /* Support */,
 				A10000000000000000000003 /* Products */,
@@ -163,7 +163,7 @@
 				A10000000000000000000052 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				A10000000000000000000004 /* StudyNotesIOS */,
+				A10000000000000000000004 /* Sources/StudyNotesIOS */,
 			);
 			name = StudyNotesIOS;
 			productName = StudyNotesIOS;
@@ -183,7 +183,7 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				A10000000000000000000005 /* StudyNotesIOSCore */,
+				A10000000000000000000005 /* Sources/StudyNotesIOSCore */,
 			);
 			name = StudyNotesIOSCore;
 			packageProductDependencies = (
@@ -243,7 +243,7 @@
 			mainGroup = A10000000000000000000002;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				A10000000000000000000091 /* XCLocalSwiftPackageReference "StudyNotesKit" */,
+				A10000000000000000000091 /* XCLocalSwiftPackageReference "../../Packages/StudyNotesKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A10000000000000000000003 /* Products */;
@@ -416,9 +416,9 @@
 		A10000000000000000000063 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = Support/StudyNotesIOS.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 8KH4Y62R54;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Support/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -426,7 +426,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.studynotes.app;
+				PRODUCT_BUNDLE_IDENTIFIER = com.wangwancheng.studynotes;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -439,6 +439,7 @@
 				CODE_SIGN_ENTITLEMENTS = Support/StudyNotesIOS.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 8KH4Y62R54;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Support/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -446,7 +447,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.studynotes.app;
+				PRODUCT_BUNDLE_IDENTIFIER = com.wangwancheng.studynotes;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -456,8 +457,10 @@
 		A10000000000000000000066 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CURRENT_PROJECT_VERSION = 1;
 				DEFINES_MODULE = YES;
+				DEVELOPMENT_TEAM = 8KH4Y62R54;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACH_O_TYPE = staticlib;
 				MARKETING_VERSION = 1.0;
@@ -472,8 +475,10 @@
 		A10000000000000000000067 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CURRENT_PROJECT_VERSION = 1;
 				DEFINES_MODULE = YES;
+				DEVELOPMENT_TEAM = 8KH4Y62R54;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACH_O_TYPE = staticlib;
 				MARKETING_VERSION = 1.0;
@@ -489,9 +494,9 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
-				CODE_SIGN_ENTITLEMENTS = Support/StudyNotesShare.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 8KH4Y62R54;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ShareExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -500,7 +505,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.studynotes.app.share;
+				PRODUCT_BUNDLE_IDENTIFIER = com.wangwancheng.studynotes.share;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -515,6 +520,7 @@
 				CODE_SIGN_ENTITLEMENTS = Support/StudyNotesShare.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 8KH4Y62R54;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ShareExtension/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -532,21 +538,6 @@
 			name = Release;
 		};
 /* End XCBuildConfiguration section */
-
-/* Begin XCLocalSwiftPackageReference section */
-		A10000000000000000000091 /* XCLocalSwiftPackageReference "StudyNotesKit" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = ../../Packages/StudyNotesKit;
-		};
-/* End XCLocalSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		A10000000000000000000090 /* StudyNotesKit */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = A10000000000000000000091 /* XCLocalSwiftPackageReference "StudyNotesKit" */;
-			productName = StudyNotesKit;
-		};
-/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCConfigurationList section */
 		A10000000000000000000062 /* Build configuration list for PBXProject "StudyNotesIOS" */ = {
@@ -586,6 +577,21 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		A10000000000000000000091 /* XCLocalSwiftPackageReference "../../Packages/StudyNotesKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../Packages/StudyNotesKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A10000000000000000000090 /* StudyNotesKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000091 /* XCLocalSwiftPackageReference "../../Packages/StudyNotesKit" */;
+			productName = StudyNotesKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A10000000000000000000001 /* Project object */;
 }
