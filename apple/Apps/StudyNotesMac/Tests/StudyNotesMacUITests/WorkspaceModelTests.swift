@@ -213,6 +213,14 @@ struct WorkspaceModelTests {
             AppSettingsStore(userDefaults: defaults).load().defaultAIProviderID
                 == gamma.id
         )
+
+        model.deleteProviderProfile(gamma)
+        #expect(model.providerProfiles.isEmpty)
+        #expect(model.defaultProviderID == nil)
+        #expect(
+            AppSettingsStore(userDefaults: defaults).load().defaultAIProviderID
+                == nil
+        )
     }
 
     @Test("clearing a provider API key keeps the profile")
@@ -273,6 +281,17 @@ struct WorkspaceModelTests {
             baseURLText: "https://missing.example/v1",
             model: "missing-model",
             apiKey: "   "
+        ))
+        #expect(model.providerProfiles.map(\.id) == [original.id])
+        #expect(model.errorMessage != nil)
+
+        model.dismissError()
+        #expect(!model.saveProviderProfile(
+            id: nil,
+            name: "Invalid URL",
+            baseURLText: "https:///v1",
+            model: "invalid-url",
+            apiKey: "invalid-key"
         ))
         #expect(model.providerProfiles.map(\.id) == [original.id])
         #expect(model.errorMessage != nil)
@@ -872,6 +891,39 @@ struct WorkspaceModelTests {
         ])
     }
 
+    @Test("collection navigation honors unsaved AI provider changes")
+    func collectionNavigationHonorsAIProviderGuard() async throws {
+        let workspace = try await makeWorkspace { store in
+            try await store.createKnowledgeBase(named: "学习科学").id
+        }
+        defer { workspace.remove() }
+
+        await workspace.model.selectKnowledgeBase(workspace.knowledgeBaseID)
+        #expect(await workspace.model.openSettings(page: .ai))
+        #expect(workspace.model.saveProviderProfile(
+            id: nil,
+            name: "Alpha",
+            baseURLText: "https://alpha.example/v1",
+            model: "alpha-model",
+            apiKey: "alpha-key"
+        ))
+        let originalCollection = workspace.model.selectedCollection
+        workspace.model.providerDraftName = "Unsaved Alpha"
+
+        await workspace.model.selectCollection(.inbox)
+
+        #expect(workspace.model.isShowingSettings)
+        #expect(
+            workspace.model.pendingAIProviderTransition
+                == .workspaceCollection(.inbox)
+        )
+        #expect(workspace.model.selectedCollection == originalCollection)
+
+        workspace.model.discardAIProviderDraftAndContinue()
+        #expect(!workspace.model.isShowingSettings)
+        #expect(workspace.model.selectedCollection == .inbox)
+    }
+
     @Test("reader outline uses wide space and falls back to an overlay")
     func readerOutlineAdaptsToViewport() {
         let (defaults, suite) = isolatedDefaults()
@@ -1105,6 +1157,7 @@ struct WorkspaceModelTests {
             mediaSecretStore: MemorySecretStore(),
             devicePreferences: DevicePreferencesStore(userDefaults: defaults),
             appSettingsStore: AppSettingsStore(userDefaults: defaults),
+            providerUserDefaults: defaults,
             treeExpansionStore: WorkspaceTreeExpansionStore(
                 userDefaults: defaults
             )

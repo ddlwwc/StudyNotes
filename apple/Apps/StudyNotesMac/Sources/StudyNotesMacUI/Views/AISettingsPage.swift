@@ -8,37 +8,49 @@ struct AIConfigurationSettingsPage: View {
     @State private var isConfirmingDeletion = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("AI 配置")
-                        .font(.sn(22, weight: .semibold))
-                        .foregroundStyle(SNColor.ink)
-                    Text("AI 请求由本机直连所选供应商；API Key 只保存在 macOS 钥匙串。")
-                        .font(.sn(10))
-                        .foregroundStyle(SNColor.muted)
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("AI 配置")
+                            .font(.sn(22, weight: .semibold))
+                            .foregroundStyle(SNColor.ink)
+                        Text("AI 请求由本机直连所选供应商；API Key 只保存在 macOS 钥匙串。")
+                            .font(.sn(10))
+                            .foregroundStyle(SNColor.muted)
+                    }
+
+                    HStack(alignment: .top, spacing: 14) {
+                        providerList
+                            .frame(
+                                minWidth: 220,
+                                idealWidth: 250,
+                                maxWidth: 280,
+                                alignment: .top
+                            )
+                            .frame(maxHeight: .infinity, alignment: .top)
+
+                        providerEditor
+                            .frame(
+                                minWidth: 340,
+                                maxWidth: .infinity,
+                                alignment: .top
+                            )
+                            .frame(maxHeight: .infinity, alignment: .top)
+                    }
+                    .frame(
+                        minHeight: max(430, geometry.size.height - 112),
+                        alignment: .top
+                    )
+
+                    Spacer(minLength: 0)
                 }
-
-                HStack(alignment: .top, spacing: 14) {
-                    providerList
-                        .frame(
-                            minWidth: 220,
-                            idealWidth: 250,
-                            maxWidth: 280,
-                            alignment: .top
-                        )
-
-                    providerEditor
-                        .frame(minWidth: 340, maxWidth: .infinity, alignment: .top)
-                }
-
-                Spacer(minLength: 0)
+                .padding(22)
+                .frame(maxWidth: 1_100, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .center)
             }
-            .padding(22)
-            .frame(maxWidth: 1_100, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .center)
+            .scrollIndicators(.hidden)
         }
-        .scrollIndicators(.hidden)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(SNColor.panel)
         .confirmationDialog(
@@ -342,9 +354,15 @@ private struct AIProviderPanel<Content: View>: View {
                 content
             }
             .font(.sn(10))
-            .frame(maxWidth: .infinity, minHeight: 430, alignment: .topLeading)
+            .frame(
+                maxWidth: .infinity,
+                minHeight: 430,
+                maxHeight: .infinity,
+                alignment: .topLeading
+            )
             .padding(.top, 4)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }
 

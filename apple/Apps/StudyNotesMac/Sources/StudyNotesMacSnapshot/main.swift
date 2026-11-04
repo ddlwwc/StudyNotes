@@ -21,7 +21,9 @@ struct StudyNotesMacSnapshotMain {
         }
 
         let mode: SnapshotWorkspaceMode
-        if arguments.contains("--ai-settings-compact") {
+        if arguments.contains("--ai-settings-empty-compact") {
+            mode = .compactEmptyAISettings
+        } else if arguments.contains("--ai-settings-compact") {
             mode = .compactAISettings
         } else if arguments.contains("--ai-settings-empty") {
             mode = .emptyAISettings

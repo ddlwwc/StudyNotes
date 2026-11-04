@@ -3,11 +3,12 @@ import Network
 import Observation
 import StudyNotesKit
 
-public enum AIProviderTransition: Equatable, Sendable {
+public enum AIProviderSettingsTransition: Equatable, Sendable {
     case editProvider(UUID)
     case newProvider
     case settingsPage(WorkspaceSettingsPage)
     case returnToWorkspace
+    case workspaceCollection(WorkspaceCollection)
 }
 
 private struct AIProviderDraft: Equatable {
@@ -90,7 +91,8 @@ public final class WorkspaceModel {
     public var providerDraftBaseURLText = "https://api.openai.com/v1"
     public var providerDraftModel = ""
     public var providerDraftAPIKey = ""
-    public private(set) var pendingAIProviderTransition: AIProviderTransition?
+    public private(set) var pendingAIProviderTransition:
+        AIProviderSettingsTransition?
     public var aiPromptText = ""
     public var readerSelection: ReaderSelection?
     public var annotationJumpID: UUID?
@@ -197,21 +199,10 @@ public final class WorkspaceModel {
         providerProfiles = providerSettingsStore.load().sorted {
             $0.name.localizedStandardCompare($1.name) == .orderedAscending
         }
-        let storedSettings = appSettingsStore.load()
-        let storedDefaultID = storedSettings.defaultAIProviderID
-        if let storedDefaultID,
-           providerProfiles.contains(where: { $0.id == storedDefaultID }) {
-            defaultProviderID = storedDefaultID
-        } else {
-            defaultProviderID = providerProfiles.first?.id
-        }
+        defaultProviderID = appSettingsStore.load().defaultAIProviderID
+        repairDefaultAIProviderIfNeeded()
         providerEditingID = defaultProviderID
         revealAIProviderDraft(for: defaultProviderID)
-        if storedSettings.defaultAIProviderID != defaultProviderID {
-            try? appSettingsStore.update {
-                $0.defaultAIProviderID = defaultProviderID
-            }
-        }
         mediaNetworkMonitor.pathUpdateHandler = { [weak self] path in
             guard path.status == .satisfied else {
                 return
@@ -808,6 +799,17 @@ public final class WorkspaceModel {
         guard await flushMarkdownEditorBeforeNavigation() else {
             return
         }
+        if isShowingSettings,
+           settingsPage == .ai,
+           hasUnsavedAIProviderChanges {
+            pendingAIProviderTransition = .workspaceCollection(collection)
+            return
+        }
+        resetWorkspace(for: collection)
+        await selectFirstMaterialIfAvailable()
+    }
+
+    private func resetWorkspace(for collection: WorkspaceCollection) {
         returnToWorkspace()
         invalidateNoteLoad()
         selectedCollection = collection
@@ -821,7 +823,6 @@ public final class WorkspaceModel {
         readerSelection = nil
         searchHits = []
         searchHitsQuery = ""
-        await selectFirstMaterialIfAvailable()
     }
 
     public func selectKnowledgeBase(_ id: UUID?) async {
@@ -2807,7 +2808,8 @@ public final class WorkspaceModel {
               let baseURL = URL(
                   string: baseURLText.trimmingCharacters(in: .whitespacesAndNewlines)
               ),
-              ["http", "https"].contains(baseURL.scheme?.lowercased() ?? "") else {
+              ["http", "https"].contains(baseURL.scheme?.lowercased() ?? ""),
+              baseURL.host?.isEmpty == false else {
             errorMessage = "请填写供应商名称、有效的 HTTP(S) 基础地址和模型标识。"
             return false
         }
@@ -2835,13 +2837,7 @@ public final class WorkspaceModel {
             }
             providerProfiles = updated
             providerEditingID = profile.id
-            if defaultProviderID == nil
-                || !updated.contains(where: { $0.id == defaultProviderID }) {
-                defaultProviderID = updated.first?.id
-                try appSettingsStore.update {
-                    $0.defaultAIProviderID = defaultProviderID
-                }
-            }
+            repairDefaultAIProviderIfNeeded()
             aiProviderSettingsStore.save(updated)
             revealAIProviderDraft(for: profile.id)
             actionNotice = "已保存 AI 供应商“\(profile.name)”"
@@ -2861,12 +2857,7 @@ public final class WorkspaceModel {
         }
         providerProfiles.removeAll { $0.id == profile.id }
         aiProviderSettingsStore.save(providerProfiles)
-        if defaultProviderID == profile.id {
-            defaultProviderID = providerProfiles.first?.id
-            try? appSettingsStore.update {
-                $0.defaultAIProviderID = defaultProviderID
-            }
-        }
+        repairDefaultAIProviderIfNeeded()
         if providerEditingID == profile.id {
             revealAIProviderDraft(for: defaultProviderID)
         }
@@ -2971,9 +2962,22 @@ public final class WorkspaceModel {
         providerDraftBaseline = currentAIProviderDraft
     }
 
+    private func repairDefaultAIProviderIfNeeded() {
+        let candidate = defaultProviderID.flatMap { id in
+            providerProfiles.contains(where: { $0.id == id }) ? id : nil
+        } ?? providerProfiles.first?.id
+        defaultProviderID = candidate
+        guard appSettingsStore.load().defaultAIProviderID != candidate else {
+            return
+        }
+        try? appSettingsStore.update {
+            $0.defaultAIProviderID = candidate
+        }
+    }
+
     @discardableResult
     private func requestAIProviderTransition(
-        _ transition: AIProviderTransition
+        _ transition: AIProviderSettingsTransition
     ) -> Bool {
         guard isShowingSettings,
               settingsPage == .ai,
@@ -2986,7 +2990,7 @@ public final class WorkspaceModel {
     }
 
     private func performAIProviderTransition(
-        _ transition: AIProviderTransition
+        _ transition: AIProviderSettingsTransition
     ) {
         switch transition {
         case let .editProvider(id):
@@ -2997,6 +3001,11 @@ public final class WorkspaceModel {
             settingsPage = page
         case .returnToWorkspace:
             isShowingSettings = false
+        case let .workspaceCollection(collection):
+            resetWorkspace(for: collection)
+            Task { @MainActor [weak self] in
+                await self?.selectFirstMaterialIfAvailable()
+            }
         }
     }
 

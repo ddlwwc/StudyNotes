@@ -10,6 +10,7 @@ public enum SnapshotWorkspaceMode: Equatable {
     case aiSettings
     case compactAISettings
     case emptyAISettings
+    case compactEmptyAISettings
 
     var isShowingSettings: Bool {
         self == .settings
@@ -21,11 +22,16 @@ public enum SnapshotWorkspaceMode: Equatable {
         self == .aiSettings
             || self == .compactAISettings
             || self == .emptyAISettings
+            || self == .compactEmptyAISettings
+    }
+
+    var isShowingEmptyAISettings: Bool {
+        self == .emptyAISettings || self == .compactEmptyAISettings
     }
 
     public var canvasSize: CGSize {
         switch self {
-        case .compactSettings, .compactAISettings:
+        case .compactSettings, .compactAISettings, .compactEmptyAISettings:
             CGSize(
                 width: SNMetric.minimumWindowWidth,
                 height: SNMetric.minimumWindowHeight
@@ -115,7 +121,7 @@ private enum SnapshotWorkspaceFixture {
                 defaults: defaults,
                 appSettingsStore: appSettingsStore,
                 secretStore: secretStore,
-                includesProfiles: mode != .emptyAISettings
+                includesProfiles: !mode.isShowingEmptyAISettings
             )
         }
 
