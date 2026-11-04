@@ -21,7 +21,10 @@ let package = Package(
         ),
         .testTarget(
             name: "StudyNotesKitTests",
-            dependencies: ["StudyNotesKit"]
+            dependencies: ["StudyNotesKit"],
+            resources: [
+                .copy("Fixtures")
+            ]
         )
     ]
 )

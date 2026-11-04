@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "scenarios": [
+    {
+      "id": "new-document-edit",
+      "steps": ["create-note", "load-document"],
+      "expect": ["unlocked", "edit-mode", "editor-focused"]
+    },
+    {
+      "id": "switch-edit-annotate",
+      "steps": ["select-text", "switch-annotate", "switch-edit"],
+      "expect": ["selection-preserved", "scroll-preserved", "no-content-change"]
+    },
+    {
+      "id": "finish-editing",
+      "steps": ["edit-text", "finish-editing"],
+      "expect": ["saved-generation-committed", "locked", "annotations-available"]
+    },
+    {
+      "id": "annotation-reanchor",
+      "steps": ["create-text-annotation", "edit-before-anchor", "save"],
+      "expect": ["annotation-active", "anchor-updated"]
+    },
+    {
+      "id": "annotation-unresolved",
+      "steps": ["create-text-annotation", "delete-anchor-text", "save"],
+      "expect": ["annotation-unresolved", "annotation-not-deleted"]
+    },
+    {
+      "id": "transaction-recovery",
+      "steps": ["write-transaction", "simulate-crash", "reopen"],
+      "expect": ["recoverable-content", "committed-generation-unchanged"]
+    },
+    {
+      "id": "external-conflict",
+      "steps": ["open-editor", "modify-file-externally", "save-editor"],
+      "expect": ["save-blocked", "local-content-preserved"]
+    }
+  ]
+}

@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://studynotes.local/contracts/editor-capability.schema.json",
+  "title": "StudyNotes Mac editor capability matrix",
+  "type": "object",
+  "required": ["version", "frozenAt", "capabilities"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "frozenAt": {
+      "type": "string",
+      "format": "date"
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "area",
+          "label",
+          "entry",
+          "shortcut",
+          "disabledWhen",
+          "input",
+          "output",
+          "markdown",
+          "bypass",
+          "states",
+          "connectivity",
+          "test",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^ED-[A-Z]+-[0-9]{2}$"
+          },
+          "area": {
+            "type": "string",
+            "minLength": 1
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "entry": {
+            "type": "string",
+            "minLength": 1
+          },
+          "shortcut": {
+            "type": "string"
+          },
+          "disabledWhen": {
+            "type": "string",
+            "minLength": 1
+          },
+          "input": {
+            "type": "string",
+            "minLength": 1
+          },
+          "output": {
+            "type": "string",
+            "minLength": 1
+          },
+          "markdown": {
+            "type": "string",
+            "minLength": 1
+          },
+          "bypass": {
+            "type": "boolean"
+          },
+          "states": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "enum": ["edit", "annotate", "locked", "unlocked", "offline", "online"]
+            }
+          },
+          "connectivity": {
+            "enum": ["offline", "local-network", "user-initiated"]
+          },
+          "test": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "enum": ["required", "manual", "deferred"]
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

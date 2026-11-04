@@ -2,15 +2,16 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | 已确认技术基线，工作区与编辑器设计已更新 |
-| 日期 | 2026-11-03 |
-| 范围 | Mac、iOS、Web 发布站与发布 API |
+| 状态 | 已确认技术基线，Mac 编辑器方向已更新 |
+| 日期 | 2026-11-05 |
+| 范围 | Mac、iOS、Web 发布站与发布 API；本轮编辑器只交付 Mac |
 
 相关文档：
 
 - [产品文档](./PRODUCT_SPEC.md)
 - [领域词汇表](../GLOSSARY.md)
 - [架构决策记录](./adr/)
+- [Mac 语雀式编辑器规格](./MAC_YUQUE_EDITOR_SPEC.md)
 
 ## 1. 架构目标
 
@@ -35,7 +36,7 @@ StudyNotes 是按个人单实例、本地优先和低运维成本设计的跨端
 | Mac / iOS UI | SwiftUI，局部嵌入 AppKit / UIKit |
 | PDF | PDFKit |
 | Markdown / HTML 阅读 | 共享 Swift 内容模块 + WKWebView |
-| Markdown 富文本编辑 | 构建期打包、运行于本地 WKWebView 的共享编辑器内核 |
+| Mac Markdown 富文本编辑 | 构建期打包、运行于本地 WKWebView 的可复用编辑器内核；本轮只接入 Mac |
 | Apple 依赖管理 | Swift Package Manager |
 | Apple 本地索引 | GRDB、SQLite、FTS5 |
 | Web | Next.js App Router、React、TypeScript |
@@ -87,7 +88,7 @@ StudyNotes/
 - `Domain`：学习材料、标注、发布映射等领域模型和纯规则。
 - `Persistence`：iCloud 文件协调、材料包读写、GRDB 索引和冲突处理。
 - `Reader`：Markdown/HTML 渲染、WKWebView 桥接、PDFKit 适配和标注覆盖层。
-- `Editor`：共享富文本 WebKit 容器、原生桥接、Markdown 往返和安全保存。
+- `Editor`：可复用的本地 WebKit 编辑器核心、Mac 原生桥接、Markdown 与旁路数据往返及事务保存。本轮不回接 iOS UI。
 - `Services`：AI、网页抓取、发布、导出和周期提醒。
 - `UI`：跨端共享的 SwiftUI 组件、样式与展示模型。
 
@@ -106,22 +107,26 @@ StudyNotes/
                 ├── source/
                 │   └── media/           # 旧版本地媒体；新笔记媒体使用稳定云端引用
                 ├── content/
+                │   ├── transactions/
+                │   └── generations/
+                │       └── <generation-id>/
+                │           ├── document.md
+                │           └── blocks/
                 ├── annotations/
                 │   └── <annotation-id>.json
                 ├── ai/
                 │   └── <conversation-id>.json
-                └── revisions/
-                    └── <version-id>.md
+                └── revisions/          # 旧文档兼容，不再由 Mac 编辑器生成
 ```
 
 规则：
 
 - 一个 `.studyitem` 对应一份学习材料，是主要同步单元。
-- `manifest.json` 保存稳定标识、类型、标题、标签、材料关联和发布映射。
+- `manifest.json` 保存稳定标识、类型、标题、标签、锁定状态、当前内容代、材料关联和发布映射。
 - `source/` 保存不可变原始文件及必要媒体。
-- `content/` 保存用户可编辑的 Markdown 或 HTML 阅读副本。
+- `content/` 保存当前内容代、临时事务日志、Markdown 和复杂块旁路数据。
 - 标注和 AI 会话按对象拆分文件，降低并发编辑时的文件冲突范围。
-- `revisions/` 保存产品要求的最近 10 个文字版本。
+- `revisions/` 只保留旧文档兼容数据；Mac 编辑器不再创建用户可见版本。
 - `rendered.html`、缩略图、全文索引和预览全部只存在设备本地缓存。
 - Markdown 笔记的新图片和附件以 `media://qiniu/<objectKey>` 引用私有七牛云，不复制进材料包。
 - 待上传媒体队列和已查看媒体缓存放在 Application Support，不进入 iCloud。
@@ -147,14 +152,18 @@ iOS 默认只取得目录和 `manifest.json`，正文通过 iCloud 按需下载�
 - PDF 原文永不修改，标注保存在材料包中，由 PDFKit 与自定义覆盖层渲染。
 - 内容变化导致锚点失败时，标注保留为“位置待恢复标注”。
 
-### 4.5 Markdown 编辑
+### 4.5 Mac 语雀式编辑器
 
-- Markdown 笔记和 Markdown 文档可在阅读区切换为所见即所得编辑。
-- 平台无关的 JavaScript 编辑器核心在构建期打包，运行时只加载本地资源。
-- 编辑器内部文档树不持久化；Swift 层接收序列化后的 Markdown，并继续以原子替换写入材料包。
-- 编辑器支持高级 Markdown 源文本模式。未知语法以兼容块保留，无法无损序列化时拒绝保存。
-- 自动保存由 Swift 层统一调度，负责指纹检查、文件协调、版本生成、搜索重建和标注重解析。
-- AI、发布、导出和版本操作前必须等待当前编辑会话完成保存。
+- 本轮只在 Mac 接入完整编辑器；平台无关核心可以留在 `StudyNotesKit`，但 iOS UI、iOS 适配和 iOS 测试延期。
+- 一个本地 WKWebView 运行时同时承载正文、标注、滚动、选区和大纲，使用 `locked` 与编辑/标注模式仲裁操作。
+- 运行时 JavaScript、字体、图标和渲染引擎全部构建期打包，不加载 CDN、遥测或远程模型。
+- Markdown 保存块顺序、稳定块 ID、轻量内容和可读降级内容；复杂块使用 `content/generations/<generation-id>/blocks/` 版本化旁路数据。
+- 下划线、颜色、背景和对齐等使用可读 HTML 或受控内联样式；未知 Markdown 和原始 HTML 保留为兼容块。
+- 编辑事务先写本地恢复日志，约 300 毫秒形成快照；新内容代校验完成后才原子提交 `manifest.json` 指针。
+- 用户只看到一个当前版本，不生成可见历史版本；旧代在事务保护结束后删除。
+- 派生目录、索引、渲染和标注重建失败不回滚已提交正文，而是标记待重建并重试。
+- 图片、附件、音频和视频沿用私有七牛云稳定引用、待上传队列和可清理本地缓存。
+- AI、协作、在线嵌入实时预览和持久版本历史不进入编辑器；AI 研读和发布仍是编辑器之外的独立产品流程。
 
 ## 5. AI 客户端
 
@@ -281,6 +290,7 @@ OpenAPI 需要新增以下能力：
 
 - `contracts/openapi.yaml` 是 Apple 客户端 → StudyNotes Web 服务与发布 API 的唯一 HTTP 契约。
 - `contracts/studyitem.schema.json` 是 `manifest.json` 的唯一结构定义。
+- 复杂块旁路数据需要版本化 JSON Schema，至少覆盖块标识、锁定状态、数据表、图形块和内容代提交。
 - `contracts/reader-runtime/` 是 Apple 与 Web 共用的标注几何和文本锚定实现。
 - Swift 请求模型由 OpenAPI 生成或校验，不手写第二套路径和字段语义。
 - Next.js 在 API 边界执行运行时校验，不只依赖 TypeScript 类型。
@@ -315,8 +325,8 @@ Next.js Standalone ─── MySQL
 | --- | --- |
 | Swift Domain / Persistence | Swift Testing；使用临时目录模拟 iCloud 文件协调与冲突副本 |
 | Apple Reader | Swift Testing + 代表性 HTML/PDF 固定样本，验证锚点恢复与缩放 |
-| Apple Editor | 固定 Markdown 样本库验证往返、未知语法、中文输入、撤销和保存冲突 |
-| Apple UI | XCTest / XCUITest 覆盖栏宽、文件夹拖放、编辑、媒体、导入、阅读、标注、AI 和发布主流程 |
+| Mac Editor | 固定 Markdown 样本库验证往返、旁路块、未知语法、中文输入、撤销、锁定、标注和事务保存 |
+| Mac UI | XCTest / XCUITest 覆盖工具栏、块菜单、数据表、图形块、媒体、阅读、标注、AI 研读和发布主流程 |
 | Web Domain / API | Vitest；签名、幂等、版本冲突、可见性和搜索事务 |
 | Web 媒体 | 使用内存存储和模拟七牛适配器验证 Bearer 鉴权、登记、校验、读取、去重与延迟清理 |
 | Web 数据库 | GitHub Actions MySQL 服务，执行 migration 和集成测试 |
@@ -327,6 +337,8 @@ Next.js Standalone ─── MySQL
 
 - 自建同步服务、CloudKit 记录同步或 iCloud 数据库文件。
 - 读者账号、登录、多租户和权限系统。
+- 账号、多人实时协作、评论、分享、收藏和编辑器可见版本历史。
+- 本轮 iOS 编辑器接入、iOS 编辑适配和 iOS 编辑器测试。
 - Redis、Elasticsearch、消息队列或独立微服务。
 - Web 端 AI 代理或服务器保存 AI Key。
 - MySQL 自动备份、恢复演练或本地发布账本。
