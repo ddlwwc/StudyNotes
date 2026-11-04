@@ -95,6 +95,189 @@ struct WorkspaceModelTests {
         #expect(publicArticle.visibility == .publicArticle)
     }
 
+    @Test("default AI provider persists and editing selection stays independent")
+    func defaultAIProviderPersists() {
+        let (defaults, suite) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = makeProviderModel(defaults: defaults)
+
+        #expect(model.saveProviderProfile(
+            id: nil,
+            name: "Alpha",
+            baseURLText: "https://alpha.example/v1",
+            model: "alpha-model",
+            apiKey: "alpha-key"
+        ))
+        #expect(model.saveProviderProfile(
+            id: nil,
+            name: "Beta",
+            baseURLText: "https://beta.example/v1",
+            model: "beta-model",
+            apiKey: "beta-key"
+        ))
+
+        let alpha = model.providerProfiles.first { $0.name == "Alpha" }!
+        let beta = model.providerProfiles.first { $0.name == "Beta" }!
+        #expect(model.defaultProviderID == alpha.id)
+        #expect(model.setDefaultAIProvider(beta.id))
+
+        let relaunched = makeProviderModel(defaults: defaults)
+        #expect(relaunched.defaultProviderID == beta.id)
+        #expect(relaunched.selectedProvider?.id == beta.id)
+
+        relaunched.selectProviderForEditing(alpha.id)
+        #expect(relaunched.providerEditingID == alpha.id)
+        #expect(relaunched.defaultProviderID == beta.id)
+        #expect(relaunched.selectedProvider?.id == beta.id)
+    }
+
+    @Test("invalid saved default AI provider falls back to the first name and persists")
+    func invalidDefaultAIProviderFallsBack() throws {
+        let (defaults, suite) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let alpha = AIProviderProfile(
+            name: "Alpha",
+            baseURL: URL(string: "https://alpha.example/v1")!,
+            model: "alpha-model",
+            keychainAccount: "provider-alpha"
+        )
+        let zulu = AIProviderProfile(
+            name: "Zulu",
+            baseURL: URL(string: "https://zulu.example/v1")!,
+            model: "zulu-model",
+            keychainAccount: "provider-zulu"
+        )
+        AIProviderSettingsStore(userDefaults: defaults).save([zulu, alpha])
+        try AppSettingsStore(userDefaults: defaults).update {
+            $0.defaultAIProviderID = UUID()
+        }
+
+        let model = makeProviderModel(defaults: defaults)
+
+        #expect(model.providerProfiles.map(\.name) == ["Alpha", "Zulu"])
+        #expect(model.defaultProviderID == alpha.id)
+        #expect(model.selectedProvider?.id == alpha.id)
+        #expect(
+            AppSettingsStore(userDefaults: defaults).load().defaultAIProviderID
+                == alpha.id
+        )
+        #expect(makeProviderModel(defaults: defaults).defaultProviderID == alpha.id)
+    }
+
+    @Test("deleting the default provider falls back while a non-default delete keeps it")
+    func deletingProvidersMaintainsDefault() {
+        let (defaults, suite) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let secrets = MemorySecretStore()
+        let model = makeProviderModel(defaults: defaults, secretStore: secrets)
+
+        #expect(model.saveProviderProfile(
+            id: nil,
+            name: "Alpha",
+            baseURLText: "https://alpha.example/v1",
+            model: "alpha-model",
+            apiKey: "alpha-key"
+        ))
+        #expect(model.saveProviderProfile(
+            id: nil,
+            name: "Beta",
+            baseURLText: "https://beta.example/v1",
+            model: "beta-model",
+            apiKey: "beta-key"
+        ))
+        #expect(model.saveProviderProfile(
+            id: nil,
+            name: "Gamma",
+            baseURLText: "https://gamma.example/v1",
+            model: "gamma-model",
+            apiKey: "gamma-key"
+        ))
+
+        let alpha = model.providerProfiles.first { $0.name == "Alpha" }!
+        let beta = model.providerProfiles.first { $0.name == "Beta" }!
+        let gamma = model.providerProfiles.first { $0.name == "Gamma" }!
+
+        #expect(model.setDefaultAIProvider(beta.id))
+        model.deleteProviderProfile(beta)
+        #expect(model.defaultProviderID == alpha.id)
+        #expect(
+            AppSettingsStore(userDefaults: defaults).load().defaultAIProviderID
+                == alpha.id
+        )
+
+        #expect(model.setDefaultAIProvider(gamma.id))
+        model.deleteProviderProfile(alpha)
+        #expect(model.defaultProviderID == gamma.id)
+        #expect(model.providerProfiles.map(\.id) == [gamma.id])
+        #expect(
+            AppSettingsStore(userDefaults: defaults).load().defaultAIProviderID
+                == gamma.id
+        )
+    }
+
+    @Test("clearing a provider API key keeps the profile")
+    func clearingProviderAPIKeyKeepsProfile() throws {
+        let (defaults, suite) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let secrets = MemorySecretStore()
+        let model = makeProviderModel(defaults: defaults, secretStore: secrets)
+
+        #expect(model.saveProviderProfile(
+            id: nil,
+            name: "Alpha",
+            baseURLText: "https://alpha.example/v1",
+            model: "alpha-model",
+            apiKey: "alpha-key"
+        ))
+        let profile = model.providerProfiles.first!
+        #expect(model.hasAPIKey(for: profile))
+
+        #expect(model.clearProviderAPIKey(profile))
+        #expect(model.providerProfiles == [profile])
+        #expect(!model.hasAPIKey(for: profile))
+        #expect(try secrets.load(account: profile.keychainAccount) == nil)
+    }
+
+    @Test("blank API key keeps an existing key but cannot create a provider")
+    func blankAPIKeyRules() throws {
+        let (defaults, suite) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let secrets = MemorySecretStore()
+        let model = makeProviderModel(defaults: defaults, secretStore: secrets)
+
+        #expect(model.saveProviderProfile(
+            id: nil,
+            name: "Alpha",
+            baseURLText: "https://alpha.example/v1",
+            model: "alpha-model",
+            apiKey: "alpha-key"
+        ))
+        let original = model.providerProfiles.first!
+        #expect(model.saveProviderProfile(
+            id: original.id,
+            name: "Alpha Updated",
+            baseURLText: "https://updated.example/v1",
+            model: "updated-model",
+            apiKey: "   "
+        ))
+
+        let updated = model.providerProfiles.first!
+        #expect(updated.name == "Alpha Updated")
+        #expect(updated.model == "updated-model")
+        #expect(model.hasAPIKey(for: updated))
+        #expect(try secrets.load(account: original.keychainAccount) == "alpha-key")
+
+        #expect(!model.saveProviderProfile(
+            id: nil,
+            name: "Missing Key",
+            baseURLText: "https://missing.example/v1",
+            model: "missing-model",
+            apiKey: "   "
+        ))
+        #expect(model.providerProfiles.map(\.id) == [original.id])
+        #expect(model.errorMessage != nil)
+    }
+
     @Test("connection tester reports success, failure, and HTTP risk")
     func connectionTester() async {
         let success = ServiceConnectionTester { request in
@@ -875,6 +1058,19 @@ struct WorkspaceModelTests {
             mediaSecretStore: mediaSecretStore,
             devicePreferences: DevicePreferencesStore(userDefaults: defaults),
             appSettingsStore: AppSettingsStore(userDefaults: defaults)
+        )
+    }
+
+    private func makeProviderModel(
+        defaults: UserDefaults,
+        secretStore: any SecretStoring = MemorySecretStore()
+    ) -> WorkspaceModel {
+        WorkspaceModel(
+            secretStore: secretStore,
+            mediaSecretStore: MemorySecretStore(),
+            devicePreferences: DevicePreferencesStore(userDefaults: defaults),
+            appSettingsStore: AppSettingsStore(userDefaults: defaults),
+            providerUserDefaults: defaults
         )
     }
 
