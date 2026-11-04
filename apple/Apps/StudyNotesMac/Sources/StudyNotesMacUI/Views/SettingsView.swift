@@ -9,47 +9,133 @@ public struct SettingsView: View {
     }
 
     public var body: some View {
-        TabView(selection: $model.settingsPage) {
-            WorkspaceSettingsPageView(model: model)
-                .tabItem {
-                    Label(WorkspaceSettingsPage.workspace.title, systemImage: "folder")
-                }
-                .tag(WorkspaceSettingsPage.workspace)
+        VStack(spacing: 0) {
+            settingsHeader
 
-            AIConfigurationSheet(model: model)
-                .tabItem {
-                    Label(WorkspaceSettingsPage.ai.title, systemImage: "sparkles")
-                }
-                .tag(WorkspaceSettingsPage.ai)
+            HStack(spacing: 0) {
+                settingsNavigation
+                    .frame(width: 208)
 
-            PublishingSettingsPage(model: model)
-                .tabItem {
-                    Label(WorkspaceSettingsPage.publishing.title, systemImage: "paperplane")
-                }
-                .tag(WorkspaceSettingsPage.publishing)
+                Rectangle()
+                    .fill(SNColor.border)
+                    .frame(width: 1)
 
-            CredentialsSettingsPage(model: model)
-                .tabItem {
-                    Label(WorkspaceSettingsPage.credentials.title, systemImage: "key")
-                }
-                .tag(WorkspaceSettingsPage.credentials)
-
-            ReadingSettingsPage(model: model)
-                .tabItem {
-                    Label(WorkspaceSettingsPage.reading.title, systemImage: "textformat.size")
-                }
-                .tag(WorkspaceSettingsPage.reading)
+                settingsContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+            }
         }
-        .padding(12)
-        .frame(minWidth: 840, minHeight: 620)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(SNColor.panel)
         .preferredColorScheme(preferredColorScheme)
-        .alert("无法完成设置", isPresented: errorIsPresented) {
-            Button("好", role: .cancel) {
-                model.dismissError()
+    }
+
+    private var settingsHeader: some View {
+        ZStack {
+            Text("设置")
+                .font(.sn(13, weight: .semibold))
+                .foregroundStyle(SNColor.ink)
+
+            HStack {
+                Button {
+                    model.returnToWorkspace()
+                } label: {
+                    Label("返回应用", systemImage: "chevron.left")
+                        .font(.sn(11, weight: .medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("返回学习工作台")
+                .accessibilityLabel("返回应用")
+
+                Spacer()
             }
-        } message: {
-            Text(model.errorMessage ?? "未知错误")
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 48)
+        .background(SNColor.nav)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(SNColor.border)
+                .frame(height: 1)
+        }
+    }
+
+    private var settingsNavigation: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                settingsNavigationGroup(
+                    "学习",
+                    pages: [.workspace, .reading]
+                )
+                settingsNavigationGroup(
+                    "服务",
+                    pages: [.ai, .publishing]
+                )
+                settingsNavigationGroup(
+                    "安全",
+                    pages: [.credentials]
+                )
+            }
+            .padding(12)
+        }
+        .background(SNColor.nav)
+    }
+
+    @ViewBuilder
+    private var settingsContent: some View {
+        switch model.settingsPage {
+        case .workspace:
+            WorkspaceSettingsPageView(model: model)
+        case .ai:
+            AIConfigurationSheet(model: model)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .publishing:
+            PublishingSettingsPage(model: model)
+        case .credentials:
+            CredentialsSettingsPage(model: model)
+        case .reading:
+            ReadingSettingsPage(model: model)
+        }
+    }
+
+    private func settingsNavigationGroup(
+        _ title: String,
+        pages: [WorkspaceSettingsPage]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.sn(10, weight: .medium))
+                .foregroundStyle(SNColor.muted)
+                .padding(.horizontal, 8)
+
+            ForEach(pages) { page in
+                let isSelected = page == model.settingsPage
+                Button {
+                    model.settingsPage = page
+                } label: {
+                    Label(page.title, systemImage: page.systemImage)
+                        .font(.sn(11, weight: isSelected ? .medium : .regular))
+                        .foregroundStyle(
+                            isSelected ? SNColor.blue : SNColor.text
+                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 9)
+                        .frame(height: 32)
+                        .background(
+                            isSelected ? SNColor.blueSoft : Color.clear
+                        )
+                        .clipShape(
+                            RoundedRectangle(cornerRadius: SNRadius.small)
+                        )
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(page.title)
+                .accessibilityAddTraits(
+                    isSelected ? .isSelected : []
+                )
+            }
         }
     }
 
@@ -62,17 +148,6 @@ public struct SettingsView: View {
         case .dark:
             .dark
         }
-    }
-
-    private var errorIsPresented: Binding<Bool> {
-        Binding(
-            get: { model.errorMessage != nil },
-            set: { isPresented in
-                if !isPresented {
-                    model.dismissError()
-                }
-            }
-        )
     }
 }
 
@@ -762,6 +837,7 @@ private struct SettingsPageLayout<Content: View>: View {
             }
             .padding(22)
             .frame(maxWidth: 820, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
         .scrollIndicators(.hidden)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

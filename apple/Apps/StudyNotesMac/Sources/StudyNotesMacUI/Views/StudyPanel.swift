@@ -4,7 +4,6 @@ import SwiftUI
 
 struct StudyPanel: View {
     @Bindable var model: WorkspaceModel
-    @Environment(\.openSettings) private var openSettings
     @State private var followUpPrompt = ""
     @State private var inlineNote = ""
     @State private var cardHeights: [UUID: CGFloat] = [:]
@@ -441,8 +440,9 @@ struct StudyPanel: View {
     }
 
     private func openAISettings() {
-        model.settingsPage = .ai
-        openSettings()
+        Task {
+            await model.openSettings(page: .ai)
+        }
     }
 }
 

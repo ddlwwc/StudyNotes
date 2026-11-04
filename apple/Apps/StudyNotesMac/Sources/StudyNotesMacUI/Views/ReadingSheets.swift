@@ -724,7 +724,6 @@ struct AnnotationEditorSheet: View {
 
 struct AIConfigurationSheet: View {
     @Bindable var model: WorkspaceModel
-    @Environment(\.dismiss) private var dismiss
     @State private var editingID: UUID?
     @State private var name = ""
     @State private var baseURL = "https://api.openai.com/v1"
@@ -829,7 +828,7 @@ struct AIConfigurationSheet: View {
 
                 ReadingSheetActions {
                     Button("取消") {
-                        dismiss()
+                        cancelEditing()
                     }
                     .keyboardShortcut(.cancelAction)
 
@@ -877,6 +876,14 @@ struct AIConfigurationSheet: View {
         baseURL = "https://api.openai.com/v1"
         modelID = ""
         apiKey = ""
+    }
+
+    private func cancelEditing() {
+        if let profile = model.selectedProvider {
+            load(profile)
+        } else {
+            resetEditor()
+        }
     }
 }
 
@@ -947,7 +954,6 @@ struct AIContextConfirmationSheet: View {
 struct PublishPreviewSheet: View {
     @Bindable var model: WorkspaceModel
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.openSettings) private var openSettings
     @State private var publishing = PublishingPanelModel()
     @State private var isConfirmingWithdraw = false
     @State private var isConfirmingDelete = false
@@ -1002,8 +1008,10 @@ struct PublishPreviewSheet: View {
                             .foregroundStyle(SNColor.muted)
                             .lineLimit(1)
                             Button("管理发布密钥…") {
-                                model.settingsPage = .credentials
-                                openSettings()
+                                dismiss()
+                                Task {
+                                    await model.openSettings(page: .credentials)
+                                }
                             }
                             .buttonStyle(.bordered)
                             .controlSize(.small)

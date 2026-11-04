@@ -25,11 +25,6 @@ struct MaterialListPane: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(SNColor.white)
-        .overlay(alignment: .trailing) {
-            Rectangle()
-                .fill(SNColor.border)
-                .frame(width: 1)
-        }
         .onAppear(perform: revealSelectedFolder)
         .onChange(of: model.selectedCollection) { revealSelectedFolder() }
         .onChange(of: model.selectedMaterialIDs) {

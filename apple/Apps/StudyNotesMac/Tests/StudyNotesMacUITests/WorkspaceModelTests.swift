@@ -794,6 +794,78 @@ struct WorkspaceModelTests {
         #expect(workspace.model.annotationDraftRequest == nil)
     }
 
+    @Test("settings preserve the reading workspace and support contextual entry")
+    func settingsPresentationPreservesReadingContext() async throws {
+        let workspace = try await makeWorkspace { store in
+            let knowledgeBase = try await store.createKnowledgeBase(named: "学习科学")
+            _ = try await store.createMarkdownNote(
+                title: "工作记忆",
+                in: knowledgeBase.id,
+                markdown: "# 工作记忆\n\n正文"
+            )
+            return knowledgeBase.id
+        }
+        defer { workspace.remove() }
+
+        await workspace.model.selectKnowledgeBase(workspace.knowledgeBaseID)
+        let material = try #require(workspace.model.materials.first)
+        await workspace.model.selectMaterial(material.id)
+        workspace.model.studyPanelTab = .ai
+        let collection = workspace.model.selectedCollection
+
+        #expect(await workspace.model.openSettings(page: .credentials))
+        #expect(workspace.model.isShowingSettings)
+        #expect(workspace.model.settingsPage == .credentials)
+        #expect(workspace.model.selectedCollection == collection)
+        #expect(workspace.model.readingMaterialID == material.id)
+        #expect(workspace.model.studyPanelTab == .ai)
+
+        workspace.model.returnToWorkspace()
+        #expect(!workspace.model.isShowingSettings)
+        #expect(workspace.model.readingMaterialID == material.id)
+        #expect(workspace.model.studyPanelTab == .ai)
+
+        #expect(await workspace.model.openSettings())
+        #expect(workspace.model.settingsPage == .workspace)
+        await workspace.model.selectInbox()
+        #expect(!workspace.model.isShowingSettings)
+        #expect(workspace.model.selectedCollection == .inbox)
+    }
+
+    @Test("an editor conflict prevents opening settings")
+    func settingsHonorMarkdownSaveBarrier() async throws {
+        let workspace = try await makeWorkspace { store in
+            let knowledgeBase = try await store.createKnowledgeBase(named: "学习科学")
+            _ = try await store.createMarkdownNote(
+                title: "冲突材料",
+                in: knowledgeBase.id,
+                markdown: "# 冲突材料\n\n本地正文"
+            )
+            return knowledgeBase.id
+        }
+        defer { workspace.remove() }
+
+        await workspace.model.selectKnowledgeBase(workspace.knowledgeBaseID)
+        let material = try #require(workspace.model.materials.first)
+        await workspace.model.selectMaterial(material.id)
+        workspace.model.beginMarkdownEditing()
+        let session = try #require(workspace.model.markdownEditorSession)
+
+        let externalStore = StudyNotesStore(rootURL: workspace.directory)
+        _ = try await externalStore.saveReaderCopy(
+            id: material.id,
+            text: "# 冲突材料\n\n外部正文",
+            title: material.title,
+            createRecoveryVersion: false
+        )
+        await session.requestExplicitSave()
+
+        #expect(!(await workspace.model.openSettings()))
+        #expect(!workspace.model.isShowingSettings)
+        #expect(workspace.model.markdownEditorSession != nil)
+        #expect(workspace.model.errorMessage != nil)
+    }
+
     private func makeModel(
         defaults: UserDefaults,
         mediaSecretStore: any SecretStoring = MemorySecretStore()

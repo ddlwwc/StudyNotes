@@ -4,12 +4,31 @@ public enum SnapshotWorkspaceMode: Equatable {
     case tree
     case searchResults
     case readerOutline
+    case settings
+    case compactSettings
+
+    var isShowingSettings: Bool {
+        self == .settings || self == .compactSettings
+    }
+
+    public var canvasSize: CGSize {
+        switch self {
+        case .compactSettings:
+            CGSize(
+                width: SNMetric.minimumWindowWidth,
+                height: SNMetric.minimumWindowHeight
+            )
+        case .tree, .searchResults, .readerOutline, .settings:
+            CGSize(width: 1_440, height: 1_024)
+        }
+    }
 }
 
 @MainActor
 public struct SnapshotWorkspaceView: View {
     private let mode: SnapshotWorkspaceMode
     private let isDarkMode: Bool
+    @State private var model = WorkspaceModel()
 
     public init(
         mode: SnapshotWorkspaceMode = .tree,
@@ -21,29 +40,34 @@ public struct SnapshotWorkspaceView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            WorkspaceSnapshotHeader()
+            WorkspaceSnapshotHeader(
+                showsWorkspaceActions: !mode.isShowingSettings
+            )
             HStack(spacing: 0) {
-                SnapshotSidebar()
+                SnapshotSidebar(isShowingSettings: mode.isShowingSettings)
                     .frame(width: SNMetric.sidebarWidth)
 
-                if mode != .readerOutline {
-                    SnapshotMaterialList(mode: mode)
-                        .frame(width: SNMetric.materialListWidth)
+                if mode.isShowingSettings {
+                    SettingsView(model: model)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    if mode == .readerOutline {
+                        SnapshotOutline()
+                            .frame(width: 240)
+                    } else {
+                        SnapshotMaterialList(mode: mode)
+                            .frame(width: SNMetric.materialListWidth)
+                    }
+
+                    SnapshotReader()
+                        .frame(minWidth: 460, maxWidth: .infinity)
+
+                    SnapshotStudyPanel()
+                        .frame(width: SNMetric.studyPanelWidth)
                 }
-
-                if mode == .readerOutline {
-                    SnapshotOutline()
-                        .frame(width: 240)
-                }
-
-                SnapshotReader()
-                    .frame(minWidth: 460, maxWidth: .infinity)
-
-                SnapshotStudyPanel()
-                    .frame(width: SNMetric.studyPanelWidth)
             }
         }
-        .frame(width: 1_440, height: 1_024)
+        .frame(width: mode.canvasSize.width, height: mode.canvasSize.height)
         .background(SNColor.white)
         .environment(\.colorScheme, isDarkMode ? .dark : .light)
         .preferredColorScheme(isDarkMode ? .dark : .light)
@@ -55,6 +79,8 @@ public struct SnapshotWorkspaceView: View {
 }
 
 private struct SnapshotSidebar: View {
+    var isShowingSettings = false
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
@@ -115,7 +141,7 @@ private struct SnapshotSidebar: View {
                     title: "学习科学",
                     systemImage: "books.vertical",
                     count: "6",
-                    isSelected: true
+                    isSelected: !isShowingSettings
                 )
 
                 Rectangle()
@@ -152,42 +178,43 @@ private struct SnapshotSidebar: View {
             Spacer()
 
             VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 7) {
-                    Circle()
-                        .fill(SNColor.green)
-                        .frame(width: 6, height: 6)
-                    Text("iCloud 目录 · 已连接")
-                        .font(.sn(10, weight: .medium))
-                        .foregroundStyle(SNColor.text)
-                    Spacer()
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 11))
-                        .foregroundStyle(SNColor.muted)
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 11))
+                SnapshotSidebarRow(
+                    title: "设置",
+                    systemImage: "gearshape",
+                    isSelected: isShowingSettings
+                )
+                .padding(.horizontal, -9)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 7) {
+                        Circle()
+                            .fill(SNColor.green)
+                            .frame(width: 6, height: 6)
+                        Text("iCloud 目录 · 已连接")
+                            .font(.sn(10, weight: .medium))
+                            .foregroundStyle(SNColor.text)
+                        Spacer()
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.system(size: 11))
+                            .foregroundStyle(SNColor.muted)
+                    }
+                    Text("StudyNotes")
+                        .font(.sn(9))
                         .foregroundStyle(SNColor.muted)
                 }
-                Text("StudyNotes")
-                    .font(.sn(9))
-                    .foregroundStyle(SNColor.muted)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
-            .background(SNColor.white)
-            .clipShape(RoundedRectangle(cornerRadius: SNRadius.control))
-            .overlay {
-                RoundedRectangle(cornerRadius: SNRadius.control)
-                    .stroke(SNColor.border, lineWidth: 1)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 9)
+                .background(SNColor.white)
+                .clipShape(RoundedRectangle(cornerRadius: SNRadius.control))
+                .overlay {
+                    RoundedRectangle(cornerRadius: SNRadius.control)
+                        .stroke(SNColor.border, lineWidth: 1)
+                }
             }
             .padding(10)
         }
         .frame(maxHeight: .infinity)
         .background(SNColor.nav)
-        .overlay(alignment: .trailing) {
-            Rectangle()
-                .fill(SNColor.border)
-                .frame(width: 1)
-        }
     }
 }
 
@@ -284,11 +311,6 @@ private struct SnapshotMaterialList: View {
             Spacer()
         }
         .background(SNColor.white)
-        .overlay(alignment: .trailing) {
-            Rectangle()
-                .fill(SNColor.border)
-                .frame(width: 1)
-        }
     }
 
     private var treeContent: some View {
