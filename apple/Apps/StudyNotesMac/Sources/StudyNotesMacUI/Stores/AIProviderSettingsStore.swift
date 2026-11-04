@@ -1,21 +1,26 @@
 import Foundation
 import StudyNotesKit
 
-enum AIProviderSettingsStore {
-    private static let defaultsKey = "studynotes.ai.providerProfiles.v1"
+struct AIProviderSettingsStore {
+    private let defaultsKey = "studynotes.ai.providerProfiles.v1"
+    private let userDefaults: UserDefaults
 
-    static func load() -> [AIProviderProfile] {
-        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
+    init(userDefaults: UserDefaults = .standard) {
+        self.userDefaults = userDefaults
+    }
+
+    func load() -> [AIProviderProfile] {
+        guard let data = userDefaults.data(forKey: defaultsKey),
               let profiles = try? JSONDecoder().decode([AIProviderProfile].self, from: data) else {
             return []
         }
         return profiles
     }
 
-    static func save(_ profiles: [AIProviderProfile]) {
+    func save(_ profiles: [AIProviderProfile]) {
         guard let data = try? JSONEncoder().encode(profiles) else {
             return
         }
-        UserDefaults.standard.set(data, forKey: defaultsKey)
+        userDefaults.set(data, forKey: defaultsKey)
     }
 }

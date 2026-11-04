@@ -28,6 +28,23 @@ public struct SettingsView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(SNColor.panel)
         .preferredColorScheme(preferredColorScheme)
+        .confirmationDialog(
+            "保存 AI 配置修改？",
+            isPresented: pendingAIProviderTransitionIsPresented,
+            titleVisibility: .visible
+        ) {
+            Button("保存并继续") {
+                model.saveAIProviderDraftAndContinue()
+            }
+            Button("放弃修改", role: .destructive) {
+                model.discardAIProviderDraftAndContinue()
+            }
+            Button("取消", role: .cancel) {
+                model.cancelPendingAIProviderTransition()
+            }
+        } message: {
+            Text("当前供应商有未保存的修改。保存失败时会保留输入并停留在当前编辑对象。")
+        }
     }
 
     private var settingsHeader: some View {
@@ -38,7 +55,7 @@ public struct SettingsView: View {
 
             HStack {
                 Button {
-                    model.returnToWorkspace()
+                    model.requestReturnToWorkspace()
                 } label: {
                     Label("返回应用", systemImage: "chevron.left")
                         .font(.sn(11, weight: .medium))
@@ -88,7 +105,7 @@ public struct SettingsView: View {
         case .workspace:
             WorkspaceSettingsPageView(model: model)
         case .ai:
-            AIConfigurationSheet(model: model)
+            AIConfigurationSettingsPage(model: model)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         case .publishing:
             PublishingSettingsPage(model: model)
@@ -112,7 +129,7 @@ public struct SettingsView: View {
             ForEach(pages) { page in
                 let isSelected = page == model.settingsPage
                 Button {
-                    model.settingsPage = page
+                    model.requestSettingsPage(page)
                 } label: {
                     Label(page.title, systemImage: page.systemImage)
                         .font(.sn(11, weight: isSelected ? .medium : .regular))
@@ -148,6 +165,17 @@ public struct SettingsView: View {
         case .dark:
             .dark
         }
+    }
+
+    private var pendingAIProviderTransitionIsPresented: Binding<Bool> {
+        Binding(
+            get: { model.pendingAIProviderTransition != nil },
+            set: { isPresented in
+                if !isPresented {
+                    model.cancelPendingAIProviderTransition()
+                }
+            }
+        )
     }
 }
 

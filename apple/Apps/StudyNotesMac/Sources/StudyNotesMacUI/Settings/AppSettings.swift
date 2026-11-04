@@ -48,17 +48,20 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var defaultPublishVisibility: PublishVisibility
     public var publishAnnotationsByDefault: Bool
     public var publishAIByDefault: Bool
+    public var defaultAIProviderID: UUID?
 
     public init(
         publishingServerURL: String = "http://127.0.0.1:8090",
         defaultPublishVisibility: PublishVisibility = .unlisted,
         publishAnnotationsByDefault: Bool = false,
-        publishAIByDefault: Bool = false
+        publishAIByDefault: Bool = false,
+        defaultAIProviderID: UUID? = nil
     ) {
         self.publishingServerURL = publishingServerURL
         self.defaultPublishVisibility = defaultPublishVisibility
         self.publishAnnotationsByDefault = publishAnnotationsByDefault
         self.publishAIByDefault = publishAIByDefault
+        self.defaultAIProviderID = defaultAIProviderID
     }
 }
 
