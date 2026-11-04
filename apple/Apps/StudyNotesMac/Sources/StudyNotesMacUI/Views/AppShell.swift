@@ -46,6 +46,7 @@ public struct AppShell: View {
                         .frame(minWidth: 420, maxWidth: .infinity)
                 }
                 .allowsHitTesting(!model.isShowingSettings)
+                .disabled(model.isShowingSettings)
                 .accessibilityHidden(model.isShowingSettings)
 
                 if model.isShowingSettings {

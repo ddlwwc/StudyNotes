@@ -152,6 +152,23 @@ struct WorkspaceSidebar: View {
 
     @ViewBuilder
     private func knowledgeBaseGroup(_ knowledgeBase: KnowledgeBase) -> some View {
+        if model.isShowingSettings {
+            knowledgeBaseRow(knowledgeBase)
+        } else {
+            knowledgeBaseRow(knowledgeBase)
+                .contextMenu {
+                    Button("重命名知识库…") {
+                        model.renameRequest = .knowledgeBase(knowledgeBase)
+                    }
+                    Divider()
+                    Button("删除知识库…", role: .destructive) {
+                        deletionRequest = .knowledgeBase(knowledgeBase)
+                    }
+                }
+        }
+    }
+
+    private func knowledgeBaseRow(_ knowledgeBase: KnowledgeBase) -> some View {
         SidebarNavigationRow(
             title: knowledgeBase.name,
             systemImage: "books.vertical",
@@ -162,15 +179,6 @@ struct WorkspaceSidebar: View {
         ) {
             Task {
                 await model.selectKnowledgeBase(knowledgeBase.id)
-            }
-        }
-        .contextMenu {
-            Button("重命名知识库…") {
-                model.renameRequest = .knowledgeBase(knowledgeBase)
-            }
-            Divider()
-            Button("删除知识库…", role: .destructive) {
-                deletionRequest = .knowledgeBase(knowledgeBase)
             }
         }
     }
