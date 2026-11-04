@@ -722,7 +722,6 @@ struct AnnotationEditorSheet: View {
 
 struct AIConfigurationSheet: View {
     @Bindable var model: WorkspaceModel
-    @Environment(\.dismiss) private var dismiss
     @State private var editingID: UUID?
     @State private var name = ""
     @State private var baseURL = "https://api.openai.com/v1"
@@ -826,7 +825,7 @@ struct AIConfigurationSheet: View {
 
                 ReadingSheetActions {
                     Button("取消") {
-                        dismiss()
+                        cancelEditing()
                     }
                     .keyboardShortcut(.cancelAction)
 
@@ -874,6 +873,14 @@ struct AIConfigurationSheet: View {
         baseURL = "https://api.openai.com/v1"
         modelID = ""
         apiKey = ""
+    }
+
+    private func cancelEditing() {
+        if let profile = model.selectedProvider {
+            load(profile)
+        } else {
+            resetEditor()
+        }
     }
 }
 

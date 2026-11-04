@@ -30,18 +30,25 @@ struct StudyNotesMacSnapshotMain {
         } else {
             mode = .tree
         }
-        let renderer = ImageRenderer(content: SnapshotWorkspaceView(mode: mode))
-        renderer.proposedSize = ProposedViewSize(
-            width: mode.canvasSize.width,
-            height: mode.canvasSize.height
+        let size = mode.canvasSize
+        let hostingView = NSHostingView(
+            rootView: SnapshotWorkspaceView(mode: mode)
+                .frame(width: size.width, height: size.height)
         )
-        renderer.scale = 1
+        hostingView.frame = NSRect(origin: .zero, size: size)
+        hostingView.appearance = NSAppearance(named: .aqua)
+        hostingView.layoutSubtreeIfNeeded()
+        hostingView.displayIfNeeded()
 
-        guard let image = renderer.cgImage else {
+        guard
+            let representation = hostingView.bitmapImageRepForCachingDisplay(
+                in: hostingView.bounds
+            )
+        else {
             throw SnapshotError.renderFailed
         }
+        hostingView.cacheDisplay(in: hostingView.bounds, to: representation)
 
-        let representation = NSBitmapImageRep(cgImage: image)
         guard let pngData = representation.representation(using: .png, properties: [:]) else {
             throw SnapshotError.pngEncodingFailed
         }
@@ -62,7 +69,7 @@ private enum SnapshotError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .renderFailed:
-            "ImageRenderer 未能生成图像。"
+            "AppKit 未能生成快照图像。"
         case .pngEncodingFailed:
             "PNG 编码失败。"
         }

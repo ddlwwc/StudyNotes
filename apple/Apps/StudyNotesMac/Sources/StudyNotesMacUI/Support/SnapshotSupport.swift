@@ -26,6 +26,7 @@ public enum SnapshotWorkspaceMode: Equatable {
 @MainActor
 public struct SnapshotWorkspaceView: View {
     private let mode: SnapshotWorkspaceMode
+    @State private var model = WorkspaceModel()
 
     public init(mode: SnapshotWorkspaceMode = .tree) {
         self.mode = mode
@@ -41,7 +42,7 @@ public struct SnapshotWorkspaceView: View {
                     .frame(width: SNMetric.sidebarWidth)
 
                 if mode.isShowingSettings {
-                    SnapshotSettingsWorkspace()
+                    SettingsView(model: model)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     SnapshotMaterialList(mode: mode)
@@ -58,221 +59,6 @@ public struct SnapshotWorkspaceView: View {
         .frame(width: mode.canvasSize.width, height: mode.canvasSize.height)
         .background(SNColor.white)
         .preferredColorScheme(.light)
-    }
-}
-
-private struct SnapshotSettingsWorkspace: View {
-    private let groups = [
-        ("学习", [("学习目录", "folder", true), ("阅读偏好", "textformat.size", false)]),
-        ("服务", [("AI 配置", "sparkles", false), ("发布配置", "paperplane", false)]),
-        ("安全", [("密钥与凭据", "key", false)])
-    ]
-
-    var body: some View {
-        VStack(spacing: 0) {
-            ZStack {
-                Text("设置")
-                    .font(.sn(13, weight: .semibold))
-                    .foregroundStyle(SNColor.ink)
-
-                HStack {
-                    HStack(spacing: 4) {
-                        Image(systemName: "chevron.left")
-                        Text("返回应用")
-                    }
-                    .font(.sn(11, weight: .medium))
-                    .foregroundStyle(SNColor.text)
-                    .padding(.horizontal, 9)
-                    .frame(height: 26)
-                    .background(SNColor.white)
-                    .clipShape(RoundedRectangle(cornerRadius: SNRadius.control))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: SNRadius.control)
-                            .stroke(SNColor.border, lineWidth: 1)
-                    }
-                    Spacer()
-                }
-            }
-            .padding(.horizontal, 14)
-            .frame(height: 48)
-            .background(SNColor.nav)
-            .overlay(alignment: .bottom) {
-                Rectangle()
-                    .fill(SNColor.border)
-                    .frame(height: 1)
-            }
-
-            HStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 16) {
-                    ForEach(Array(groups.enumerated()), id: \.offset) { _, group in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(group.0)
-                                .font(.sn(10, weight: .medium))
-                                .foregroundStyle(SNColor.muted)
-                                .padding(.horizontal, 8)
-
-                            ForEach(Array(group.1.enumerated()), id: \.offset) { _, row in
-                                HStack(spacing: 9) {
-                                    Image(systemName: row.1)
-                                        .font(.system(size: 13, weight: .medium))
-                                        .frame(width: 16)
-                                    Text(row.0)
-                                        .font(
-                                            .sn(
-                                                11,
-                                                weight: row.2 ? .medium : .regular
-                                            )
-                                        )
-                                    Spacer()
-                                }
-                                .foregroundStyle(
-                                    row.2 ? SNColor.blue : SNColor.text
-                                )
-                                .padding(.horizontal, 9)
-                                .frame(height: 32)
-                                .background(
-                                    row.2 ? SNColor.blueSoft : Color.clear
-                                )
-                                .clipShape(
-                                    RoundedRectangle(cornerRadius: SNRadius.small)
-                                )
-                            }
-                        }
-                    }
-                    Spacer()
-                }
-                .padding(12)
-                .frame(width: 208)
-                .background(SNColor.nav)
-
-                Rectangle()
-                    .fill(SNColor.border)
-                    .frame(width: 1)
-
-                VStack(alignment: .leading, spacing: 14) {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("学习目录")
-                            .font(.sn(22, weight: .semibold))
-                            .foregroundStyle(SNColor.ink)
-                        Text("学习材料保存在本地或 iCloud 目录；栏宽与阅读偏好只保存在当前设备。")
-                            .font(.sn(10))
-                            .foregroundStyle(SNColor.muted)
-                    }
-
-                    SnapshotSettingsCard("当前目录") {
-                        SnapshotSettingsValueRow(
-                            title: "状态",
-                            value: "iCloud 目录"
-                        )
-                        SnapshotSettingsValueRow(
-                            title: "位置",
-                            value: "iCloud Drive/StudyNotes"
-                        )
-                        HStack(spacing: 8) {
-                            SnapshotSettingsPill(
-                                title: "选择本地目录",
-                                systemImage: "folder"
-                            )
-                            SnapshotSettingsPill(
-                                title: "选择 iCloud 目录",
-                                systemImage: "icloud"
-                            )
-                            SnapshotSettingsPill(
-                                title: "重建索引",
-                                systemImage: "arrow.clockwise"
-                            )
-                        }
-                    }
-
-                    SnapshotSettingsCard("本地布局") {
-                        SnapshotSettingsValueRow(
-                            title: "知识库栏",
-                            value: "184 pt"
-                        )
-                        SnapshotSettingsValueRow(
-                            title: "材料目录栏",
-                            value: "276 pt"
-                        )
-                        SnapshotSettingsValueRow(
-                            title: "研读层",
-                            value: "260 pt"
-                        )
-                        Text("拖动分隔线连续调宽，双击恢复默认宽度。折叠状态和宽度不会写入 iCloud。")
-                            .font(.sn(9))
-                            .foregroundStyle(SNColor.muted)
-                    }
-                }
-                .padding(22)
-                .frame(maxWidth: 820, alignment: .leading)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .background(SNColor.panel)
-            }
-        }
-    }
-}
-
-private struct SnapshotSettingsCard<Content: View>: View {
-    let title: String
-    @ViewBuilder let content: Content
-
-    init(_ title: String, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title)
-                .font(.sn(11, weight: .semibold))
-                .foregroundStyle(SNColor.ink)
-            content
-                .font(.sn(10))
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(SNColor.white)
-        .clipShape(RoundedRectangle(cornerRadius: SNRadius.control))
-        .overlay {
-            RoundedRectangle(cornerRadius: SNRadius.control)
-                .stroke(SNColor.border, lineWidth: 1)
-        }
-    }
-}
-
-private struct SnapshotSettingsValueRow: View {
-    let title: String
-    let value: String
-
-    var body: some View {
-        HStack {
-            Text(title)
-                .foregroundStyle(SNColor.muted)
-            Spacer()
-            Text(value)
-                .foregroundStyle(SNColor.text)
-        }
-    }
-}
-
-private struct SnapshotSettingsPill: View {
-    let title: String
-    let systemImage: String
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Image(systemName: systemImage)
-            Text(title)
-        }
-        .font(.sn(10, weight: .medium))
-        .foregroundStyle(SNColor.text)
-        .padding(.horizontal, 9)
-        .frame(height: 28)
-        .background(SNColor.white)
-        .clipShape(RoundedRectangle(cornerRadius: SNRadius.control))
-        .overlay {
-            RoundedRectangle(cornerRadius: SNRadius.control)
-                .stroke(SNColor.border, lineWidth: 1)
-        }
     }
 }
 
@@ -343,7 +129,7 @@ private struct SnapshotSidebar: View {
                     title: "学习科学",
                     systemImage: "books.vertical",
                     count: "6",
-                    isSelected: true
+                    isSelected: !isShowingSettings
                 )
 
                 Rectangle()
