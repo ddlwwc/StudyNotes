@@ -1,4 +1,5 @@
 #if os(iOS)
+import Foundation
 import SwiftUI
 import StudyNotesIOSCore
 import UniformTypeIdentifiers
@@ -257,6 +258,7 @@ private struct UnifiedDirectoryBrowser: View {
     @State private var showingFileImporter = false
     @State private var isSelectingMaterials = false
     @State private var dropTargetPath: String?
+    @State private var activeDragToken: String?
 
     private var targetFolderPath: String {
         model.workspace.folderPath
@@ -272,7 +274,11 @@ private struct UnifiedDirectoryBrowser: View {
             guard seen.insert(hit.materialID).inserted else {
                 return nil
             }
-            return model.material(id: hit.materialID)
+            guard let material = model.material(id: hit.materialID),
+                  material.manifest.knowledgeBaseID == knowledgeBase.id else {
+                return nil
+            }
+            return material
         }.sorted {
             $0.title.localizedStandardCompare($1.title)
                 == .orderedAscending
@@ -498,7 +504,12 @@ private struct UnifiedDirectoryBrowser: View {
         }
         .padding(.leading, 4)
         .padding(.trailing, 8)
-        .background(rowBackground(isTarget: dropTargetPath == ""))
+        .background(
+            rowBackground(
+                isTarget: dropTargetPath == "",
+                isSelected: model.workspace.folderPath.isEmpty
+            )
+        )
         .clipShape(RoundedRectangle(cornerRadius: 6))
         .dropDestination(for: String.self) { items, _ in
             drop(items, into: "")
@@ -568,12 +579,14 @@ private struct UnifiedDirectoryBrowser: View {
             )
         )
         .clipShape(RoundedRectangle(cornerRadius: 6))
-        .draggable(
-            model.folderDragToken(
+        .onDrag {
+            let token = model.folderDragToken(
                 for: folder,
                 knowledgeBaseID: knowledgeBase.id
             )
-        )
+            activeDragToken = token
+            return NSItemProvider(object: token as NSString)
+        }
         .dropDestination(for: String.self) { items, _ in
             drop(items, into: folder.path)
         } isTargeted: { targeted in
@@ -612,12 +625,14 @@ private struct UnifiedDirectoryBrowser: View {
             .padding(.leading, CGFloat(depth) * 15 + 24)
         }
         .buttonStyle(.plain)
-        .draggable(
-            model.materialDragToken(
+        .onDrag {
+            let token = model.materialDragToken(
                 for: material,
                 knowledgeBaseID: knowledgeBase.id
             )
-        )
+            activeDragToken = token
+            return NSItemProvider(object: token as NSString)
+        }
         .contextMenu {
             materialMenu(material)
         }
@@ -645,8 +660,18 @@ private struct UnifiedDirectoryBrowser: View {
         targeted: Bool,
         expandsOnHover: Bool = false
     ) {
-        dropTargetPath = targeted ? path : nil
-        guard targeted, expandsOnHover else {
+        guard targeted,
+              let token = activeDragToken,
+              model.canDrop(
+                  token,
+                  into: path,
+                  knowledgeBaseID: knowledgeBase.id
+              ) else {
+            dropTargetPath = nil
+            return
+        }
+        dropTargetPath = path
+        guard expandsOnHover else {
             return
         }
         Task {
@@ -665,8 +690,11 @@ private struct UnifiedDirectoryBrowser: View {
                 into: path,
                 knowledgeBaseID: knowledgeBase.id
               ) else {
+            activeDragToken = nil
             return false
         }
+        activeDragToken = nil
+        dropTargetPath = nil
         Task {
             _ = await model.handleDrop(
                 token,
@@ -691,6 +719,7 @@ private struct UnifiedDirectoryBrowser: View {
             }
         }
         Button("导入学习材料", systemImage: "square.and.arrow.down") {
+            model.selectTreeFolder("")
             showingFileImporter = true
         }
     }
@@ -1163,12 +1192,18 @@ private struct UnifiedTreeMaterialRow: View {
                     .foregroundStyle(SNColor.amberInk)
                     .accessibilityLabel("存在文件冲突")
             }
-            if material.publishMapping != nil {
-                Image(systemName: "globe")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(SNColor.primary)
-                    .accessibilityLabel("已发布到 Web")
-            }
+            Image(systemName: "globe")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(
+                    material.publishMapping == nil
+                        ? SNColor.muted.opacity(0.6)
+                        : SNColor.primary
+                )
+                .accessibilityLabel(
+                    material.publishMapping == nil
+                        ? "未发布到 Web"
+                        : "已发布到 Web"
+                )
         }
         .padding(.horizontal, 6)
         .frame(height: 36)

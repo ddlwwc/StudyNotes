@@ -11,9 +11,7 @@ struct ReaderPane: View {
             }
 
             Group {
-                if model.selectedMaterialIDs.count > 1 {
-                    MultiSelectionReaderView(model: model)
-                } else if let document = model.selectedDocument {
+                if let document = model.selectedDocument {
                     MaterialReaderView(model: model, document: document)
                 } else {
                     emptyContent
@@ -190,9 +188,6 @@ private struct ReaderTopBar: View {
                 return "回收站 / \(document.summary.title)"
             }
             return "\(knowledgeBase?.name ?? "收件箱") / \(document.summary.title)"
-        }
-        if model.selectedMaterialIDs.count > 1 {
-            return "\(model.selectedMaterialIDs.count) 篇材料"
         }
         return model.scopeTitle
     }
@@ -396,78 +391,6 @@ private struct ReaderDocumentView: View {
             return lines.dropFirst(firstContentIndex + 1).joined(separator: "\n")
         }
         return note.markdown
-    }
-}
-
-private struct MultiSelectionReaderView: View {
-    @Bindable var model: WorkspaceModel
-
-    var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "square.stack.3d.up")
-                .font(.system(size: 30, weight: .light))
-                .foregroundStyle(SNColor.blue)
-
-            Text("已选择 \(model.selectedMaterialIDs.count) 篇材料")
-                .font(.sn(17, weight: .medium))
-                .foregroundStyle(SNColor.ink)
-
-            Text(multiSelectionDescription)
-                .font(.sn(11))
-                .foregroundStyle(SNColor.muted)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 380)
-
-            HStack(spacing: 8) {
-                if model.isRecycleScope {
-                    Button {
-                        Task {
-                            await model.restoreSelectedMaterials()
-                        }
-                    } label: {
-                        Label("恢复", systemImage: "arrow.uturn.backward")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(SNColor.blue)
-                    .disabled(model.isPerformingAction)
-                } else {
-                    Button {
-                        model.isShowingMoveMaterials = true
-                    } label: {
-                        Label("移动", systemImage: "folder")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(SNColor.blue)
-                    .disabled(model.isPerformingAction)
-
-                    Button {
-                        model.isShowingEditTags = true
-                    } label: {
-                        Label("编辑标签", systemImage: "tag")
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(model.isPerformingAction)
-
-                    Button {
-                        model.isConfirmingRecycle = true
-                    } label: {
-                        Label("移入回收站", systemImage: "trash")
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(model.isPerformingAction)
-                }
-            }
-            .controlSize(.large)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(30)
-    }
-
-    private var multiSelectionDescription: String {
-        if model.isRecycleScope {
-            return "阅读区只显示单篇笔记。可以恢复所选材料，或继续在工具栏中执行批量动作。"
-        }
-        return "阅读区只显示单篇笔记。可以移动所选材料、编辑共同标签，或移入回收站。"
     }
 }
 

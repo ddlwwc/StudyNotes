@@ -1,8 +1,17 @@
 import SwiftUI
 
+public enum SnapshotWorkspaceMode: Equatable {
+    case tree
+    case searchResults
+}
+
 @MainActor
 public struct SnapshotWorkspaceView: View {
-    public init() {}
+    private let mode: SnapshotWorkspaceMode
+
+    public init(mode: SnapshotWorkspaceMode = .tree) {
+        self.mode = mode
+    }
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -11,7 +20,7 @@ public struct SnapshotWorkspaceView: View {
                 SnapshotSidebar()
                     .frame(width: SNMetric.sidebarWidth)
 
-                SnapshotMaterialList()
+                SnapshotMaterialList(mode: mode)
                     .frame(width: SNMetric.materialListWidth)
 
                 SnapshotReader()
@@ -208,6 +217,8 @@ private struct SnapshotSidebarRow: View {
 }
 
 private struct SnapshotMaterialList: View {
+    let mode: SnapshotWorkspaceMode
+
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 3) {
@@ -229,9 +240,15 @@ private struct SnapshotMaterialList: View {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 12))
                     .foregroundStyle(SNColor.muted)
-                Text("搜索当前材料")
+                Text(
+                    mode == .tree
+                        ? "搜索当前材料"
+                        : "工作记忆"
+                )
                     .font(.sn(11))
-                    .foregroundStyle(SNColor.muted)
+                    .foregroundStyle(
+                        mode == .tree ? SNColor.muted : SNColor.text
+                    )
                 Spacer()
             }
             .padding(.horizontal, 10)
@@ -244,22 +261,31 @@ private struct SnapshotMaterialList: View {
             }
             .padding(.horizontal, 12)
 
-            HStack {
-                Text("全部 5")
-                    .font(.sn(11, weight: .medium))
-                    .foregroundStyle(SNColor.blue)
-                Spacer()
-                Text("文件夹优先 · 按名称")
-                    .font(.sn(10))
-                    .foregroundStyle(SNColor.muted)
+            if mode == .tree {
+                treeContent
+            } else {
+                searchContent
             }
-            .padding(.horizontal, 16)
-            .frame(height: 38)
 
+            Spacer()
+        }
+        .background(SNColor.white)
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(SNColor.border)
+                .frame(width: 1)
+        }
+    }
+
+    private var treeContent: some View {
+        VStack(spacing: 0) {
+            SnapshotTreeSummary(
+                count: "全部 5",
+                detail: "文件夹优先 · 按名称"
+            )
             Rectangle()
                 .fill(SNColor.border)
                 .frame(height: 1)
-
             SnapshotRootRow(count: "5")
             SnapshotFolderRow(
                 title: "基础",
@@ -290,14 +316,83 @@ private struct SnapshotMaterialList: View {
                 title: "工作记忆模型",
                 depth: 0
             )
-
-            Spacer()
         }
-        .background(SNColor.white)
-        .overlay(alignment: .trailing) {
+    }
+
+    private var searchContent: some View {
+        VStack(spacing: 0) {
+            SnapshotTreeSummary(
+                count: "2 个结果",
+                detail: "扁平搜索结果"
+            )
             Rectangle()
                 .fill(SNColor.border)
-                .frame(width: 1)
+                .frame(height: 1)
+            SnapshotSearchResultRow(
+                title: "工作记忆模型",
+                path: "学习科学 / 基础",
+                isSelected: true
+            )
+            SnapshotSearchResultRow(
+                title: "认知负荷理论与学习设计",
+                path: "学习科学 / 基础 / 图论"
+            )
+        }
+    }
+}
+
+private struct SnapshotTreeSummary: View {
+    let count: String
+    let detail: String
+
+    var body: some View {
+        HStack {
+            Text(count)
+                .font(.sn(11, weight: .medium))
+                .foregroundStyle(SNColor.blue)
+            Spacer()
+            Text(detail)
+                .font(.sn(10))
+                .foregroundStyle(SNColor.muted)
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 38)
+    }
+}
+
+private struct SnapshotSearchResultRow: View {
+    let title: String
+    let path: String
+    var isSelected = false
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 11))
+                .foregroundStyle(SNColor.blue)
+                .frame(width: 22, height: 22)
+                .background(SNColor.blueSoft)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.sn(11, weight: .medium))
+                    .foregroundStyle(SNColor.ink)
+                    .lineLimit(1)
+                Text(path)
+                    .font(.sn(9))
+                    .foregroundStyle(SNColor.muted)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 4)
+        }
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
+        .background(isSelected ? SNColor.blueSoft : Color.clear)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(SNColor.border)
+                .frame(height: 1)
+                .padding(.leading, 42)
         }
     }
 }

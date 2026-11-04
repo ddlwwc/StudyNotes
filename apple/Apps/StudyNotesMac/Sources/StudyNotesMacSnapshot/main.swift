@@ -9,15 +9,21 @@ struct StudyNotesMacSnapshotMain {
     static func main() throws {
         _ = NSApplication.shared
 
+        let arguments = Array(CommandLine.arguments.dropFirst())
         let outputURL: URL
-        if let argument = CommandLine.arguments.dropFirst().first {
+        if let argument = arguments.first(where: {
+            !$0.hasPrefix("--")
+        }) {
             outputURL = URL(fileURLWithPath: argument)
         } else {
             outputURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
                 .appending(path: "dist/StudyNotesMac-1440x1024.png")
         }
 
-        let renderer = ImageRenderer(content: SnapshotWorkspaceView())
+        let mode: SnapshotWorkspaceMode = arguments.contains("--search-results")
+            ? .searchResults
+            : .tree
+        let renderer = ImageRenderer(content: SnapshotWorkspaceView(mode: mode))
         renderer.proposedSize = ProposedViewSize(width: 1_440, height: 1_024)
         renderer.scale = 1
 

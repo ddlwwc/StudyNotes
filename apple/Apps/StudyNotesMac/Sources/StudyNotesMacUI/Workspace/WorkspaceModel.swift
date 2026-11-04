@@ -679,7 +679,6 @@ public final class WorkspaceModel {
         treeSelectionAnchorID = nil
         searchHits = []
         searchHitsQuery = ""
-        expandDirectoryAncestors(of: "", in: knowledgeBaseID)
     }
 
     public func selectTreeFolder(
@@ -697,7 +696,6 @@ public final class WorkspaceModel {
         treeSelectionAnchorID = nil
         searchHits = []
         searchHitsQuery = ""
-        expandDirectoryAncestors(of: path, in: knowledgeBaseID)
     }
 
     public func selectInbox() async {
@@ -715,10 +713,6 @@ public final class WorkspaceModel {
     public func selectionDidChange() async {
         guard !isLoadingIndex else {
             return
-        }
-        if selectedMaterialIDs.count == 1 {
-            readingMaterialID = selectedMaterialIDs.first
-            treeSelectionAnchorID = readingMaterialID
         }
         if selectedMaterialIDs.count == 1,
            let id = selectedMaterialIDs.first,
@@ -880,15 +874,7 @@ public final class WorkspaceModel {
         in knowledgeBaseID: UUID
     ) {
         var paths = expandedDirectoryPaths(in: knowledgeBaseID)
-        paths.insert("")
-        guard !path.isEmpty else {
-            persistDirectoryExpansion(paths, in: knowledgeBaseID)
-            return
-        }
-        let components = path.split(separator: "/").map(String.init)
-        for index in 1...components.count {
-            paths.insert(components.prefix(index).joined(separator: "/"))
-        }
+        paths.formUnion(DirectoryPath.expandedAncestors(of: path))
         persistDirectoryExpansion(paths, in: knowledgeBaseID)
     }
 
@@ -1612,6 +1598,11 @@ public final class WorkspaceModel {
                 in: folder.knowledgeBaseID,
                 to: trimmedName
             )
+            rebaseDirectoryExpansion(
+                from: folder.path,
+                to: renamed.path,
+                in: folder.knowledgeBaseID
+            )
             let collection = mappedCollection(
                 selectedCollection,
                 knowledgeBaseID: folder.knowledgeBaseID,
@@ -1650,6 +1641,11 @@ public final class WorkspaceModel {
                 at: folder.path,
                 in: folder.knowledgeBaseID,
                 toParentPath: parentPath
+            )
+            rebaseDirectoryExpansion(
+                from: folder.path,
+                to: moved.path,
+                in: folder.knowledgeBaseID
             )
             let collection = mappedCollection(
                 selectedCollection,
@@ -3449,7 +3445,7 @@ public final class WorkspaceModel {
             let document = await resolvedMediaDocument(loadedDocument)
             let loadedAnnotations = try await store.loadAnnotations(materialID: id)
             let loadedConversations = try await store.loadConversations(materialID: id)
-            guard selectedMaterialIDs == [id], noteLoadGeneration == generation else {
+            guard readingMaterialID == id, noteLoadGeneration == generation else {
                 return
             }
             selectedDocument = document
@@ -3629,6 +3625,19 @@ public final class WorkspaceModel {
     ) {
         expandedDirectoryPathsByKnowledgeBase[knowledgeBaseID] = paths
         treeExpansionStore.save(paths, knowledgeBaseID: knowledgeBaseID)
+    }
+
+    private func rebaseDirectoryExpansion(
+        from oldPath: String,
+        to newPath: String,
+        in knowledgeBaseID: UUID
+    ) {
+        let paths = DirectoryPath.rebase(
+            expandedDirectoryPaths(in: knowledgeBaseID),
+            from: oldPath,
+            to: newPath
+        )
+        persistDirectoryExpansion(paths, in: knowledgeBaseID)
     }
 
     private func persistWorkspacePreferences() {

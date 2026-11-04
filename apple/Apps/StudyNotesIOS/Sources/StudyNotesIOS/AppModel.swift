@@ -223,7 +223,7 @@ final class IOSAppModel {
             }
             persistExpandedFolders(for: knowledgeBaseID)
         }
-        workspace.selectMaterialForTree(id, editing: editing)
+        workspace.openMaterial(id, editing: editing)
     }
 
     func selectTreeFolder(_ path: String) {
@@ -605,10 +605,7 @@ final class IOSAppModel {
             if workspace.layout == .compact {
                 workspace.openFolder(folderPath)
             }
-            workspace.selectMaterialForTree(
-                materialID,
-                editing: wasEditing
-            )
+            workspace.openMaterial(materialID, editing: wasEditing)
             persistExpandedFolders(for: knowledgeBaseID)
         }
     }
@@ -637,10 +634,7 @@ final class IOSAppModel {
             if workspace.layout == .compact {
                 workspace.openFolder(folderPath)
             }
-            workspace.selectMaterialForTree(
-                materialID,
-                editing: wasEditing
-            )
+            workspace.openMaterial(materialID, editing: wasEditing)
         }
         persistExpandedFolders(for: knowledgeBaseID)
     }

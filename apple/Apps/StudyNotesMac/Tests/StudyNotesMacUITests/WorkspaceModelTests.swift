@@ -439,12 +439,30 @@ struct WorkspaceModelTests {
         )
         #expect(workspace.model.selectedDocument?.summary.id == rootMaterial.id)
 
+        await workspace.model.selectTreeMaterial(
+            rootMaterial.id,
+            mode: .toggle
+        )
+        await workspace.model.selectionDidChange()
+        #expect(workspace.model.selectedMaterialIDs == [childMaterial.id])
+        #expect(workspace.model.selectedDocument?.summary.id == rootMaterial.id)
+
+        workspace.model.toggleDirectoryExpansion(
+            path: "Alpha",
+            in: workspace.knowledgeBaseID
+        )
         await workspace.model.selectTreeFolder(
             knowledgeBaseID: workspace.knowledgeBaseID,
             path: "Alpha"
         )
         #expect(workspace.model.selectedMaterialIDs.isEmpty)
         #expect(workspace.model.selectedDocument?.summary.id == rootMaterial.id)
+        #expect(
+            !workspace.model.isDirectoryExpanded(
+                path: "Alpha",
+                in: workspace.knowledgeBaseID
+            )
+        )
         #expect(
             workspace.model.selectedCollection
                 == .folder(

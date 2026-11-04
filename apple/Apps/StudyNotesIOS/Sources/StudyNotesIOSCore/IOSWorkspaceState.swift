@@ -1,4 +1,5 @@
 import Foundation
+import StudyNotesKit
 
 public enum IOSWorkspaceLayout: String, Equatable, Sendable {
     case compact
@@ -66,13 +67,6 @@ public struct IOSWorkspaceState: Equatable, Sendable {
         materialSelectionAnchorID = id
     }
 
-    public mutating func selectMaterialForTree(
-        _ id: UUID,
-        editing: Bool = false
-    ) {
-        openMaterial(id, editing: editing)
-    }
-
     public mutating func toggleMaterialSelection(_ id: UUID) {
         if selectedMaterialIDs.contains(id) {
             selectedMaterialIDs.remove(id)
@@ -118,16 +112,9 @@ public struct IOSWorkspaceState: Equatable, Sendable {
     }
 
     public mutating func expandAncestors(of path: String) {
-        expandedFolderPaths.insert("")
-        guard !path.isEmpty else {
-            return
-        }
-        let components = path.split(separator: "/").map(String.init)
-        for index in 1...components.count {
-            expandedFolderPaths.insert(
-                components.prefix(index).joined(separator: "/")
-            )
-        }
+        expandedFolderPaths.formUnion(
+            DirectoryPath.expandedAncestors(of: path)
+        )
     }
 
     public mutating func reconcileExpandedFolders(
@@ -166,16 +153,10 @@ public struct IOSWorkspaceState: Equatable, Sendable {
         from oldPath: String,
         to newPath: String
     ) {
-        expandedFolderPaths = Set(
-            expandedFolderPaths.map { path in
-                if path == oldPath {
-                    return newPath
-                }
-                if path.hasPrefix(oldPath + "/") {
-                    return newPath + String(path.dropFirst(oldPath.count))
-                }
-                return path
-            }
+        expandedFolderPaths = DirectoryPath.rebase(
+            expandedFolderPaths,
+            from: oldPath,
+            to: newPath
         )
     }
 
@@ -269,7 +250,6 @@ public enum LibraryTreeDragPayload: Equatable, Sendable {
 public enum LibraryTreeDropTarget: Equatable, Sendable {
     case root(knowledgeBaseID: UUID)
     case folder(knowledgeBaseID: UUID, path: String)
-    case material(UUID)
 }
 
 public enum LibraryTreeDropRules {
@@ -299,8 +279,6 @@ public enum LibraryTreeDropRules {
         case (.materials(_, let materialIDs), .root),
              (.materials(_, let materialIDs), .folder):
             return !materialIDs.isEmpty
-        case (.folder, .material), (.materials, .material):
-            return false
         }
     }
 

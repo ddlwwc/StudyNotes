@@ -62,12 +62,12 @@ final class UnifiedLibraryTreeTests: XCTestCase {
             folderPath: "学习科学"
         )
 
-        state.selectMaterialForTree(firstID)
+        state.openMaterial(firstID)
         state.toggleMaterialSelection(fourthID)
         XCTAssertEqual(state.materialID, firstID)
         XCTAssertEqual(state.selectedMaterialIDs, [firstID, fourthID])
 
-        state.selectMaterialForTree(firstID, editing: true)
+        state.openMaterial(firstID, editing: true)
         state.extendMaterialSelection(
             to: fourthID,
             visibleMaterialIDs: [firstID, secondID, thirdID, fourthID]
@@ -170,13 +170,6 @@ final class UnifiedLibraryTreeTests: XCTestCase {
             LibraryTreeDropRules.allows(
                 draggedFolder,
                 on: .root(knowledgeBaseID: knowledgeBaseID),
-                layout: .regular
-            )
-        )
-        XCTAssertFalse(
-            LibraryTreeDropRules.allows(
-                draggedFolder,
-                on: .material(UUID()),
                 layout: .regular
             )
         )

@@ -19,3 +19,10 @@ swift run --disable-sandbox --scratch-path /private/tmp/StudyNotesMac-build \
 ```
 
 默认输出到 `dist/StudyNotesMac-1440x1024.png`。截图使用显式标记为“示例预览”的 fixture，不代表持久化数据。
+
+可额外传入 `--search-results` 渲染扁平搜索结果：
+
+```bash
+swift run --disable-sandbox --scratch-path /private/tmp/StudyNotesMac-build \
+  StudyNotesMacSnapshot dist/StudyNotesMac-search-results.png --search-results
+```

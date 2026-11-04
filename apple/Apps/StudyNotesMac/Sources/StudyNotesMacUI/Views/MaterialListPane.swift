@@ -893,6 +893,13 @@ private struct MaterialRow: View {
         .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
         .background(isSelected ? SNColor.blueSoft : Color.clear)
         .contentShape(Rectangle())
+        .onTapGesture {
+            let flags = NSApp.currentEvent?.modifierFlags ?? []
+            guard !flags.contains(.command), !flags.contains(.shift) else {
+                return
+            }
+            Task { await model.selectMaterial(material.id) }
+        }
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(SNColor.border)
