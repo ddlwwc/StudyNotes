@@ -689,6 +689,111 @@ struct WorkspaceModelTests {
         ])
     }
 
+    @Test("reader outline uses wide space and falls back to an overlay")
+    func readerOutlineAdaptsToViewport() {
+        let (defaults, suite) = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = makeModel(defaults: defaults)
+
+        model.updateReaderViewport(width: 900, height: 800)
+        #expect(!model.canShowReaderOutline)
+        #expect(!model.isReaderOutlineVisible)
+        model.toggleReaderOutline()
+        #expect(model.isReaderOutlineOverlayPresented)
+
+        model.updateReaderViewport(width: 1_200, height: 800)
+        #expect(model.canShowReaderOutline)
+        #expect(model.isReaderOutlineVisible)
+        #expect(!model.isReaderOutlineOverlayPresented)
+        model.toggleReaderOutline()
+        #expect(!model.isReaderOutlineVisible)
+        model.toggleReaderOutline()
+        #expect(model.isReaderOutlineVisible)
+    }
+
+    @Test("annotation cards align, stack, and move unresolved items to the end")
+    func annotationCardsStackAndShift() {
+        let now = Date()
+        let first = MaterialAnnotation(
+            materialID: UUID(),
+            anchor: AnnotationAnchor(kind: .text, excerpt: "A"),
+            quote: "A",
+            note: "",
+            createdAt: now
+        )
+        let second = MaterialAnnotation(
+            materialID: first.materialID,
+            anchor: AnnotationAnchor(kind: .text, excerpt: "B"),
+            quote: "B",
+            note: "",
+            createdAt: now.addingTimeInterval(1)
+        )
+        let unresolved = MaterialAnnotation(
+            materialID: first.materialID,
+            anchor: AnnotationAnchor(kind: .text, excerpt: "C"),
+            quote: "C",
+            note: "",
+            status: .unresolved,
+            createdAt: now.addingTimeInterval(2)
+        )
+        let positions = StudyAnnotationLayout.positions(
+            annotations: [unresolved, second, first],
+            targetY: [first.id: 100, second.id: 105, unresolved.id: 0],
+            cardHeights: [first.id: 80, second.id: 80, unresolved.id: 80],
+            availableHeight: 300
+        )
+
+        #expect(positions[first.id] == 44)
+        #expect(positions[second.id] == 132)
+        #expect(positions[unresolved.id] == 220)
+    }
+
+    @Test("inline annotation draft saves without opening the modal editor")
+    func inlineAnnotationDraftSaves() async throws {
+        let workspace = try await makeWorkspace { store in
+            let knowledgeBase = try await store.createKnowledgeBase(named: "标注")
+            _ = try await store.createMarkdownNote(
+                title: "目标材料",
+                in: knowledgeBase.id,
+                markdown: "# 目标材料\n\n需要标注的正文。"
+            )
+            return knowledgeBase.id
+        }
+        defer { workspace.remove() }
+
+        await workspace.model.selectKnowledgeBase(workspace.knowledgeBaseID)
+        let material = try #require(workspace.model.materials.first)
+        await workspace.model.selectTreeMaterial(material.id, mode: .replace)
+        let selection = ReaderSelection(
+            quote: "需要标注的正文",
+            prefix: "# 目标材料",
+            suffix: "。",
+            offset: 8,
+            blockPath: [1],
+            elementType: .paragraph,
+            contentFingerprint: ContentFingerprint.sha256("需要标注的正文。"),
+            contentSummary: "需要标注的正文。",
+            viewportY: 120
+        )
+        workspace.model.updateReaderSelection(selection)
+        workspace.model.presentAnnotationForCurrentSelection()
+
+        #expect(workspace.model.inlineAnnotationDraft != nil)
+        #expect(workspace.model.inlineAnnotationDraft?.viewportY == 120)
+        #expect(workspace.model.annotationDraftRequest == nil)
+        #expect(
+            await workspace.model.saveInlineAnnotation(note: "内联备注")
+        )
+        let saved = try #require(workspace.model.annotations.first)
+        #expect(saved.note == "内联备注")
+        #expect(saved.anchor.elementType == .paragraph)
+        #expect(workspace.model.inlineAnnotationDraft == nil)
+
+        workspace.model.presentAnnotationEditor(for: saved)
+        #expect(workspace.model.inlineAnnotationDraft?.annotationID == saved.id)
+        #expect(workspace.model.annotationDraftRequest == nil)
+    }
+
     private func makeModel(
         defaults: UserDefaults,
         mediaSecretStore: any SecretStoring = MemorySecretStore()

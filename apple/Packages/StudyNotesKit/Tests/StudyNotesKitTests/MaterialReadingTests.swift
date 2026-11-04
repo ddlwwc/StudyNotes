@@ -128,8 +128,73 @@ struct MaterialReadingTests {
         #expect(document.markdown.contains("正文第一段"))
         #expect(!document.markdown.contains("导航内容"))
         #expect(!document.markdown.contains("页脚内容"))
-        #expect(document.renderedHTML.contains("<h2 id=\"heading-1\">小节</h2>"))
+        #expect(
+            document.renderedHTML.contains(
+                "<h2 id=\"heading-1\" data-element-type=\"heading\" data-block-path=\"2\">小节</h2>"
+            )
+        )
         #expect(document.headings.map(\.title) == ["清洗后的标题", "小节"])
+    }
+
+    @Test("GFM tables render header cells and column alignment")
+    func gfmTableRendering() {
+        let content = ReaderContentBuilder.build(
+            markdown: """
+            | 名称 | 数量 | 说明 |
+            | :--- | ---: | :---: |
+            | Alpha | 42 | **重点** |
+            | Beta | 7 | `inline` |
+            """,
+            title: "表格阅读"
+        )
+
+        #expect(content.html.contains("<table"))
+        #expect(content.html.contains("<thead>"))
+        #expect(content.html.contains("<th align=\"left\">名称</th>"))
+        #expect(content.html.contains("<th align=\"right\">数量</th>"))
+        #expect(content.html.contains("<th align=\"center\">说明</th>"))
+        #expect(content.html.contains("<td align=\"right\">42</td>"))
+        #expect(content.html.contains("<strong>重点</strong>"))
+        #expect(content.html.contains("<code>inline</code>"))
+        #expect(
+            !content.html.contains(
+                "border: 1px solid #d1d5db; text-align: left;"
+            )
+        )
+    }
+
+    @Test("reader HTML exposes stable paths for annotatable elements")
+    func readerElementAnchorMetadata() {
+        let content = ReaderContentBuilder.build(
+            markdown: """
+            # 标题
+
+            开头段落。
+
+            ---
+
+            - 列表 A
+            - 列表 B
+
+            ![架构图](media://diagram.png)
+
+            | 名称 | 数量 |
+            | --- | --- |
+            | Alpha | 42 |
+
+            ```swift
+            let value = 42
+            ```
+            """,
+            title: "元素"
+        )
+
+        #expect(content.html.contains("data-element-type=\"heading\" data-block-path=\"0\""))
+        #expect(content.html.contains("data-element-type=\"paragraph\" data-block-path=\"1\""))
+        #expect(content.html.contains("data-element-type=\"listItem\" data-block-path=\"3/1\""))
+        #expect(content.html.contains("data-element-type=\"image\" data-block-path=\"4/0\""))
+        #expect(content.html.contains("data-element-type=\"table\" data-block-path=\"5\""))
+        #expect(content.html.contains("data-element-type=\"codeBlock\" data-block-path=\"6\""))
     }
 
     @Test("PDF and image imports reopen with native metadata and unchanged source bytes")
@@ -265,6 +330,344 @@ struct MaterialReadingTests {
         )
         #expect(unresolved.status == .unresolved)
         #expect(unresolved.note == "更新后的备注")
+    }
+
+    @Test("element annotations recover after block shifts and become unresolved after edits")
+    func elementAnnotationResolution() async throws {
+        let directory = try TestDirectory()
+        defer { directory.remove() }
+        let store = try await makeStore(in: directory.url)
+        let knowledgeBase = try await store.createKnowledgeBase(named: "元素标注")
+        let target = "这是目标段落，包含关键结论。"
+        let note = try await store.createMarkdownNote(
+            title: "恢复",
+            in: knowledgeBase.id,
+            markdown: """
+            # 概览
+
+            前置段落。
+
+            \(target)
+
+            中间段落。
+
+            \(target)
+
+            - 列表项
+            """
+        )
+        let anchor = AnnotationAnchor(
+            kind: .text,
+            prefix: "前置段落。",
+            suffix: "中间段落。",
+            blockPath: [2],
+            elementType: .paragraph,
+            contentFingerprint: ContentFingerprint.sha256(target),
+            contentSummary: target
+        )
+        _ = try await store.upsertAnnotation(
+            MaterialAnnotation(
+                materialID: note.summary.id,
+                anchor: anchor,
+                quote: target,
+                note: "整段备注"
+            )
+        )
+        #expect(
+            try await store.loadAnnotations(materialID: note.summary.id).first?.status
+                == .active
+        )
+
+        _ = try await store.saveReaderCopy(
+            id: note.summary.id,
+            text: """
+            # 概览
+
+            新增一段。
+
+            前置段落。
+
+            \(target)
+
+            中间段落。
+
+            \(target)
+
+            - 列表项
+            """
+        )
+        #expect(
+            try await store.loadAnnotations(materialID: note.summary.id).first?.status
+                == .active
+        )
+
+        _ = try await store.saveReaderCopy(
+            id: note.summary.id,
+            text: """
+            # 概览
+
+            新增一段。
+
+            前置段落。
+
+            这是已经改写的目标段落。
+
+            中间段落。
+
+            \(target)
+
+            - 列表项
+            """
+        )
+        let unresolved = try #require(
+            try await store.loadAnnotations(materialID: note.summary.id).first
+        )
+        #expect(unresolved.status == .unresolved)
+        #expect(unresolved.note == "整段备注")
+    }
+
+    @Test("all element annotation types recover through summaries after block shifts")
+    func allElementAnnotationTypesResolve() async throws {
+        let directory = try TestDirectory()
+        defer { directory.remove() }
+        let store = try await makeStore(in: directory.url)
+        let knowledgeBase = try await store.createKnowledgeBase(named: "全部元素")
+        let note = try await store.createMarkdownNote(
+            title: "元素",
+            in: knowledgeBase.id,
+            markdown: """
+            # 标题
+
+            开头段落。
+
+            > 引用内容。
+
+            - 列表 A
+            - 列表 B
+
+            ![架构图](media://diagram.png)
+
+            | 名称 | 数量 |
+            | --- | --- |
+            | Alpha | 42 |
+
+            ```swift
+            let value = 42
+            ```
+            """
+        )
+        let anchors: [(AnnotationElementType, [Int], String)] = [
+            (.heading, [0], "标题"),
+            (.paragraph, [1], "开头段落。"),
+            (.blockquote, [2], "引用内容。"),
+            (.listItem, [3, 1], "列表 B"),
+            (.image, [4, 0], "架构图"),
+            (.table, [5], "名称 | 数量 / Alpha | 42"),
+            (.codeBlock, [6], "let value = 42")
+        ]
+        for (type, path, summary) in anchors {
+            _ = try await store.upsertAnnotation(
+                MaterialAnnotation(
+                    materialID: note.summary.id,
+                    anchor: AnnotationAnchor(
+                        kind: .text,
+                        blockPath: path,
+                        elementType: type,
+                        contentSummary: summary
+                    ),
+                    quote: summary,
+                    note: type.rawValue
+                )
+            )
+        }
+        #expect(try await store.loadAnnotations(materialID: note.summary.id).count == anchors.count)
+
+        _ = try await store.saveReaderCopy(
+            id: note.summary.id,
+            text: """
+            # 标题
+
+            插入段落。
+
+            开头段落。
+
+            > 引用内容。
+
+            - 列表 A
+            - 列表 B
+
+            ![架构图](media://diagram.png)
+
+            | 名称 | 数量 |
+            | --- | --- |
+            | Alpha | 42 |
+
+            ```swift
+            let value = 42
+            ```
+            """
+        )
+        let annotations = try await store.loadAnnotations(materialID: note.summary.id)
+        #expect(annotations.count == anchors.count)
+        #expect(annotations.allSatisfy { $0.status == .active })
+    }
+
+    @Test("images in every block family keep canonical anchors")
+    func nestedImageAnchors() async throws {
+        let directory = try TestDirectory()
+        defer { directory.remove() }
+        let store = try await makeStore(in: directory.url)
+        let knowledgeBase = try await store.createKnowledgeBase(named: "图片")
+        let markdown = """
+        # ![标题图](media://heading.png)
+
+        > ![引用图](media://quote.png)
+
+        - ![列表图](media://list.png)
+
+        | ![](media://table.png) | 值 |
+        | --- | --- |
+        | A | 1 |
+        """
+        let note = try await store.createMarkdownNote(
+            title: "图片",
+            in: knowledgeBase.id,
+            markdown: markdown
+        )
+        let anchors: [([Int], String)] = [
+            ([0, 0], "标题图"),
+            ([1, 0], "引用图"),
+            ([2, 0, 0], "列表图"),
+            ([3, 0], "media://table.png")
+        ]
+        for (path, summary) in anchors {
+            _ = try await store.upsertAnnotation(
+                MaterialAnnotation(
+                    materialID: note.summary.id,
+                    anchor: AnnotationAnchor(
+                        kind: .text,
+                        blockPath: path,
+                        elementType: .image,
+                        contentSummary: summary
+                    ),
+                    quote: summary,
+                    note: "图片备注"
+                )
+            )
+        }
+        let initialAnnotations = try await store.loadAnnotations(
+            materialID: note.summary.id
+        )
+        #expect(initialAnnotations.allSatisfy { $0.status == .active })
+
+        let content = ReaderContentBuilder.build(
+            markdown: markdown,
+            title: "图片"
+        )
+        #expect(content.html.contains("data-block-path=\"0/0\""))
+        #expect(content.html.contains("data-block-path=\"1/0\""))
+        #expect(content.html.contains("data-block-path=\"2/0/0\""))
+        #expect(content.html.contains("data-block-path=\"3/0\""))
+
+        _ = try await store.saveReaderCopy(
+            id: note.summary.id,
+            text: "插入段落。\n\n\(markdown)"
+        )
+        #expect(
+            try await store.loadAnnotations(materialID: note.summary.id)
+                .allSatisfy { $0.status == .active }
+        )
+    }
+
+    @Test("element anchors persist as compatible text anchors")
+    func elementAnchorPersistence() throws {
+        let anchor = AnnotationAnchor(
+            kind: .text,
+            prefix: "前一段",
+            suffix: "后一段",
+            blockPath: [2, 1],
+            elementType: .table,
+            contentFingerprint: "sha256:table-content",
+            contentSummary: "名称、数量与说明"
+        )
+        let annotation = MaterialAnnotation(
+            materialID: UUID(),
+            anchor: anchor,
+            quote: anchor.contentSummary ?? "",
+            note: "表格备注"
+        )
+
+        let data = try CrossPlatformJSON.encoder().encode(annotation)
+        let json = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let anchorJSON = try #require(json["anchor"] as? [String: Any])
+        #expect(anchorJSON["kind"] as? String == "text")
+        #expect(anchorJSON["elementType"] as? String == "table")
+        #expect(anchorJSON["contentFingerprint"] as? String == "sha256:table-content")
+        #expect(anchorJSON["contentSummary"] as? String == "名称、数量与说明")
+
+        let decoded = try CrossPlatformJSON.decoder().decode(
+            MaterialAnnotation.self,
+            from: data
+        )
+        #expect(decoded.anchor == anchor)
+    }
+
+    @Test("legacy text image and PDF anchors remain readable")
+    func legacyAnchorCompatibility() throws {
+        let decoder = CrossPlatformJSON.decoder()
+        let text = try decoder.decode(
+            CrossPlatformAnnotationAnchor.self,
+            from: Data(
+                """
+                {
+                  "type": "text",
+                  "text": {
+                    "quote": "旧文字",
+                    "prefix": "前",
+                    "suffix": "后",
+                    "startOffset": 3,
+                    "endOffset": 6,
+                    "blockPath": "1/2"
+                  }
+                }
+                """.utf8
+            )
+        )
+        let image = try decoder.decode(
+            CrossPlatformAnnotationAnchor.self,
+            from: Data(
+                """
+                {
+                  "type": "imageRectangle",
+                  "rectangle": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4}
+                }
+                """.utf8
+            )
+        )
+        let pdf = try decoder.decode(
+            CrossPlatformAnnotationAnchor.self,
+            from: Data(
+                """
+                {
+                  "type": "pageRectangle",
+                  "page": 2,
+                  "rectangle": {"x": 0.2, "y": 0.1, "width": 0.5, "height": 0.6}
+                }
+                """.utf8
+            )
+        )
+
+        #expect(text.kind == .text)
+        #expect(text.blockPath == [1, 2])
+        #expect(text.offset == 3)
+        #expect(text.elementType == nil)
+        #expect(text.contentFingerprint == nil)
+        #expect(text.contentSummary == nil)
+        #expect(image.kind == .imageRect)
+        #expect(pdf.kind == .pdfPageRect)
+        #expect(pdf.pageIndex == 2)
     }
 
     @Test("image and PDF page annotations round-trip normalized coordinates")

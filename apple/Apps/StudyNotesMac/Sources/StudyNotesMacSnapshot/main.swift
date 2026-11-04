@@ -20,10 +20,19 @@ struct StudyNotesMacSnapshotMain {
                 .appending(path: "dist/StudyNotesMac-1440x1024.png")
         }
 
-        let mode: SnapshotWorkspaceMode = arguments.contains("--search-results")
-            ? .searchResults
-            : .tree
-        let renderer = ImageRenderer(content: SnapshotWorkspaceView(mode: mode))
+        let mode: SnapshotWorkspaceMode = if arguments.contains("--search-results") {
+            .searchResults
+        } else if arguments.contains("--reader-outline") {
+            .readerOutline
+        } else {
+            .tree
+        }
+        let renderer = ImageRenderer(
+            content: SnapshotWorkspaceView(
+                mode: mode,
+                isDarkMode: arguments.contains("--dark")
+            )
+        )
         renderer.proposedSize = ProposedViewSize(width: 1_440, height: 1_024)
         renderer.scale = 1
 

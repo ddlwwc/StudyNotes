@@ -193,6 +193,9 @@ public enum ReaderContentBuilder {
                   background: #f7f8fa; color: #111827; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
             code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
             img { display: block; max-width: 100%; height: auto; margin: 24px auto; border-radius: 6px; }
+            table { width: 100%; margin: 24px 0; border-collapse: collapse; }
+            th, td { padding: 8px 10px; border: 1px solid #d1d5db; }
+            th { background: #f3f4f6; color: #111827; font-weight: 600; }
             mark.study-annotation { background: #fff1a8; color: inherit; border-radius: 2px; cursor: pointer; }
             mark.study-annotation.unresolved { background: #fee2b3; outline: 1px dashed #b45309; }
             ::selection { background: #bcd2ff; }
@@ -236,7 +239,8 @@ public enum ReaderContentBuilder {
                 prefix: full.slice(Math.max(0, offset - 48), offset),
                 suffix: full.slice(offset + quote.length, offset + quote.length + 48),
                 offset: offset,
-                blockPath: blockPath
+                blockPath: blockPath,
+                viewportY: range.getBoundingClientRect().top
               };
             };
             window.studyNotesScrollToHeading = function(id) {
@@ -410,7 +414,314 @@ public enum TextAnchorResolver {
     }
 }
 
-private enum MarkdownHTMLRenderer {
+private struct MarkdownElementBlock {
+    let type: AnnotationElementType
+    let path: [Int]
+    let content: String
+    let before: String
+    let after: String
+}
+
+enum ElementAnchorResolver {
+    static func resolves(_ anchor: AnnotationAnchor, in markdown: String) -> Bool {
+        guard let elementType = anchor.elementType else {
+            return false
+        }
+        let blocks = MarkdownElementScanner.blocks(in: markdown)
+        let recoveryText = normalized(
+            anchor.excerpt.isEmpty ? (anchor.contentSummary ?? "") : anchor.excerpt
+        )
+        let matches = blocks.filter { block in
+            block.type == elementType
+                && matches(block, anchor: anchor, recoveryText: recoveryText)
+        }
+        guard !matches.isEmpty else {
+            return false
+        }
+        let prefix = normalized(anchor.prefix)
+        let suffix = normalized(anchor.suffix)
+        let hasContext = !prefix.isEmpty || !suffix.isEmpty
+        let scored = matches.map { block in
+            var score = 0
+            if !prefix.isEmpty,
+               block.before.hasSuffix(prefix) || prefix.hasSuffix(block.before) {
+                score += 2
+            }
+            if !suffix.isEmpty,
+               block.after.hasPrefix(suffix) || suffix.hasPrefix(block.after) {
+                score += 2
+            }
+            return (block, score)
+        }
+        if scored.contains(where: { $0.0.path == anchor.blockPath }) {
+            return true
+        }
+        if scored.count == 1, !hasContext {
+            return true
+        }
+        guard let bestScore = scored.map(\.1).max(), bestScore > 0 else {
+            return false
+        }
+        return scored.count { $0.1 == bestScore } == 1
+    }
+
+    private static func matches(
+        _ block: MarkdownElementBlock,
+        anchor: AnnotationAnchor,
+        recoveryText: String
+    ) -> Bool {
+        let content = normalized(block.content)
+        if let fingerprint = anchor.contentFingerprint,
+           !fingerprint.isEmpty,
+           ContentFingerprint.sha256(content) == fingerprint {
+            return true
+        }
+        return !recoveryText.isEmpty && content.contains(recoveryText)
+    }
+
+    private static func normalized(_ text: String) -> String {
+        text
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+    }
+}
+
+private enum MarkdownElementScanner {
+    static func blocks(in markdown: String) -> [MarkdownElementBlock] {
+        let lines = markdown
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        var raw: [(AnnotationElementType, [Int], String)] = []
+        var index = 0
+        var blockIndex = 0
+
+        while index < lines.count {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty {
+                index += 1
+                continue
+            }
+
+            if trimmed.hasPrefix("```") {
+                index += 1
+                var codeLines: [String] = []
+                while index < lines.count,
+                      !lines[index].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                    codeLines.append(lines[index])
+                    index += 1
+                }
+                if index < lines.count {
+                    index += 1
+                }
+                raw.append((.codeBlock, [blockIndex], codeLines.joined(separator: "\n")))
+                blockIndex += 1
+                continue
+            }
+
+            if index + 1 < lines.count,
+               let header = MarkdownHTMLRenderer.tableCells(from: trimmed),
+               let alignments = MarkdownHTMLRenderer.tableAlignments(from: lines[index + 1]),
+               header.count == alignments.count {
+                var rows = [header]
+                index += 2
+                while index < lines.count,
+                      let cells = MarkdownHTMLRenderer.tableCells(from: lines[index]),
+                      !cells.isEmpty {
+                    rows.append(cells)
+                    index += 1
+                }
+                raw.append((
+                    .table,
+                    [blockIndex],
+                    rows.map { row in
+                        row.map(Self.visibleText).joined(separator: " | ")
+                    }.joined(separator: " / ")
+                ))
+                appendImages(
+                    in: rows.flatMap { $0 }.joined(separator: " "),
+                    basePath: [blockIndex],
+                    to: &raw
+                )
+                blockIndex += 1
+                continue
+            }
+
+            if let heading = MarkdownHTMLRenderer.heading(from: trimmed) {
+                raw.append((.heading, [blockIndex], visibleText(heading.text)))
+                appendImages(
+                    in: heading.text,
+                    basePath: [blockIndex],
+                    to: &raw
+                )
+                blockIndex += 1
+                index += 1
+                continue
+            }
+
+            if trimmed == "---" || trimmed == "***" {
+                index += 1
+                blockIndex += 1
+                continue
+            }
+
+            if trimmed.hasPrefix("> ") {
+                var quoteLines: [String] = []
+                while index < lines.count {
+                    let quote = lines[index].trimmingCharacters(in: .whitespaces)
+                    guard quote.hasPrefix("> ") else {
+                        break
+                    }
+                    quoteLines.append(String(quote.dropFirst(2)))
+                    index += 1
+                }
+                raw.append((
+                    .blockquote,
+                    [blockIndex],
+                    visibleText(quoteLines.joined(separator: " "))
+                ))
+                appendImages(
+                    in: quoteLines.joined(separator: " "),
+                    basePath: [blockIndex],
+                    to: &raw
+                )
+                blockIndex += 1
+                continue
+            }
+
+            if MarkdownHTMLRenderer.unorderedItem(from: trimmed) != nil
+                || MarkdownHTMLRenderer.orderedItem(from: trimmed) != nil {
+                var itemIndex = 0
+                while index < lines.count {
+                    let itemLine = lines[index].trimmingCharacters(in: .whitespaces)
+                    let item = MarkdownHTMLRenderer.unorderedItem(from: itemLine)
+                        ?? MarkdownHTMLRenderer.orderedItem(from: itemLine)
+                    guard let item else {
+                        break
+                    }
+                    raw.append((
+                        .listItem,
+                        [blockIndex, itemIndex],
+                        visibleText(item)
+                    ))
+                    appendImages(
+                        in: item,
+                        basePath: [blockIndex, itemIndex],
+                        to: &raw
+                    )
+                    itemIndex += 1
+                    index += 1
+                }
+                blockIndex += 1
+                continue
+            }
+
+            var paragraphLines = [trimmed]
+            index += 1
+            while index < lines.count {
+                let next = lines[index].trimmingCharacters(in: .whitespaces)
+                if next.isEmpty
+                    || MarkdownHTMLRenderer.startsBlock(next)
+                    || isTableStart(lines: lines, index: index) {
+                    break
+                }
+                paragraphLines.append(next)
+                index += 1
+            }
+            let paragraph = visibleText(paragraphLines.joined(separator: " "))
+            if !paragraph.isEmpty {
+                raw.append((.paragraph, [blockIndex], paragraph))
+            }
+            appendImages(
+                in: paragraphLines.joined(separator: " "),
+                basePath: [blockIndex],
+                to: &raw
+            )
+            blockIndex += 1
+        }
+
+        return raw.enumerated().map { offset, item in
+            let before = offset > 0 ? visibleText(raw[offset - 1].2) : ""
+            let after = offset + 1 < raw.count ? visibleText(raw[offset + 1].2) : ""
+            return MarkdownElementBlock(
+                type: item.0,
+                path: item.1,
+                content: item.2,
+                before: before,
+                after: after
+            )
+        }
+    }
+
+    private static func isTableStart(lines: [String], index: Int) -> Bool {
+        guard index + 1 < lines.count,
+              let header = MarkdownHTMLRenderer.tableCells(
+                  from: lines[index].trimmingCharacters(in: .whitespaces)
+              ),
+              let alignments = MarkdownHTMLRenderer.tableAlignments(
+                  from: lines[index + 1]
+              ) else {
+            return false
+        }
+        return header.count == alignments.count
+    }
+
+    private static func imageTexts(in text: String) -> [String] {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"!\[([^\]]*)\]\(([^)]+)\)"#
+        ) else {
+            return []
+        }
+        let source = text as NSString
+        return regex.matches(
+            in: text,
+            range: NSRange(location: 0, length: source.length)
+        ).map { match in
+            let alt = source.substring(with: match.range(at: 1))
+            return alt.isEmpty ? source.substring(with: match.range(at: 2)) : alt
+        }
+    }
+
+    private static func appendImages(
+        in text: String,
+        basePath: [Int],
+        to raw: inout [(AnnotationElementType, [Int], String)]
+    ) {
+        for (imageIndex, image) in imageTexts(in: text).enumerated() {
+            raw.append((.image, basePath + [imageIndex], image))
+        }
+    }
+
+    private static func visibleText(_ text: String) -> String {
+        var value = text
+        value = replacing(value, pattern: #"!\[([^\]]*)\]\(([^)]+)\)"#, with: "$1")
+        value = replacing(value, pattern: #"\[([^\]]+)\]\(([^)]+)\)"#, with: "$1")
+        value = replacing(value, pattern: #"<[^>]+>"#, with: "")
+        value = value
+            .replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: "__", with: "")
+            .replacingOccurrences(of: "`", with: "")
+        return value
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func replacing(_ text: String, pattern: String, with template: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return text
+        }
+        return regex.stringByReplacingMatches(
+            in: text,
+            range: NSRange(location: 0, length: (text as NSString).length),
+            withTemplate: template
+        )
+    }
+}
+
+enum MarkdownHTMLRenderer {
     struct Result {
         let html: String
         let headings: [ReaderHeading]
@@ -422,13 +733,18 @@ private enum MarkdownHTMLRenderer {
         var headings: [ReaderHeading] = []
         var index = 0
         var headingIndex = 0
+        var blockIndex = 0
         var listKind: String?
+        var listBlockIndex: Int?
+        var listItemIndex = 0
 
         func closeList() {
             if let listKind {
                 html.append("</\(listKind)>")
             }
             listKind = nil
+            listBlockIndex = nil
+            listItemIndex = 0
         }
 
         while index < lines.count {
@@ -454,7 +770,37 @@ private enum MarkdownHTMLRenderer {
                     index += 1
                 }
                 let languageAttribute = language.isEmpty ? "" : " class=\"language-\(ReaderContentBuilder.escape(language))\""
-                html.append("<pre><code\(languageAttribute)>\(ReaderContentBuilder.escape(codeLines.joined(separator: "\n")))</code></pre>")
+                html.append("<pre\(elementAttributes(.codeBlock, path: "\(blockIndex)"))><code\(languageAttribute)>\(ReaderContentBuilder.escape(codeLines.joined(separator: "\n")))</code></pre>")
+                blockIndex += 1
+                continue
+            }
+
+            if index + 1 < lines.count,
+               let header = tableCells(from: trimmed),
+               let alignments = tableAlignments(from: lines[index + 1]),
+               header.count == alignments.count {
+                closeList()
+                index += 2
+                var rows: [[String]] = []
+                while index < lines.count,
+                      let cells = tableCells(from: lines[index]),
+                      !cells.isEmpty {
+                    rows.append(normalizedTableCells(cells, count: header.count))
+                    index += 1
+                }
+                let tableHTML = renderTable(
+                    header: header,
+                    alignments: alignments,
+                    rows: rows,
+                    blockPath: blockIndex
+                )
+                html.append(
+                    imageAnnotatedHTML(
+                        tableHTML,
+                        blockPath: "\(blockIndex)"
+                    )
+                )
+                blockIndex += 1
                 continue
             }
 
@@ -463,14 +809,20 @@ private enum MarkdownHTMLRenderer {
                 let id = "heading-\(headingIndex)"
                 headingIndex += 1
                 headings.append(ReaderHeading(id: id, level: heading.level, title: heading.text))
-                html.append("<h\(heading.level) id=\"\(id)\">\(inline(heading.text))</h\(heading.level)>")
+                let headingHTML = imageAnnotatedHTML(
+                    inline(heading.text),
+                    blockPath: "\(blockIndex)"
+                )
+                html.append("<h\(heading.level) id=\"\(id)\"\(elementAttributes(.heading, path: "\(blockIndex)"))>\(headingHTML)</h\(heading.level)>")
+                blockIndex += 1
                 index += 1
                 continue
             }
 
             if trimmed == "---" || trimmed == "***" {
                 closeList()
-                html.append("<hr>")
+                html.append("<hr data-block-path=\"\(blockIndex)\">")
+                blockIndex += 1
                 index += 1
                 continue
             }
@@ -483,17 +835,24 @@ private enum MarkdownHTMLRenderer {
                     quoteLines.append(String(lines[index].trimmingCharacters(in: .whitespaces).dropFirst(2)))
                     index += 1
                 }
-                html.append("<blockquote><p>\(inline(quoteLines.joined(separator: " ")))</p></blockquote>")
+                let quoteHTML = inline(quoteLines.joined(separator: " "))
+                html.append("<blockquote\(elementAttributes(.blockquote, path: "\(blockIndex)"))><p>\(imageAnnotatedHTML(quoteHTML, blockPath: "\(blockIndex)"))</p></blockquote>")
+                blockIndex += 1
                 continue
             }
 
             if let item = unorderedItem(from: trimmed) {
                 if listKind != "ul" {
                     closeList()
-                    html.append("<ul>")
+                    html.append("<ul data-block-path=\"\(blockIndex)\">")
                     listKind = "ul"
+                    listBlockIndex = blockIndex
+                    blockIndex += 1
                 }
-                html.append("<li>\(inline(item))</li>")
+                let path = "\(listBlockIndex ?? blockIndex)/\(listItemIndex)"
+                let itemHTML = inline(item)
+                html.append("<li\(elementAttributes(.listItem, path: path))>\(imageAnnotatedHTML(itemHTML, blockPath: path))</li>")
+                listItemIndex += 1
                 index += 1
                 continue
             }
@@ -501,10 +860,15 @@ private enum MarkdownHTMLRenderer {
             if let item = orderedItem(from: trimmed) {
                 if listKind != "ol" {
                     closeList()
-                    html.append("<ol>")
+                    html.append("<ol data-block-path=\"\(blockIndex)\">")
                     listKind = "ol"
+                    listBlockIndex = blockIndex
+                    blockIndex += 1
                 }
-                html.append("<li>\(inline(item))</li>")
+                let path = "\(listBlockIndex ?? blockIndex)/\(listItemIndex)"
+                let itemHTML = inline(item)
+                html.append("<li\(elementAttributes(.listItem, path: path))>\(imageAnnotatedHTML(itemHTML, blockPath: path))</li>")
+                listItemIndex += 1
                 index += 1
                 continue
             }
@@ -514,20 +878,113 @@ private enum MarkdownHTMLRenderer {
             index += 1
             while index < lines.count {
                 let next = lines[index].trimmingCharacters(in: .whitespaces)
-                if next.isEmpty || startsBlock(next) {
+                if next.isEmpty || startsBlock(next) || isTableStart(lines, at: index) {
                     break
                 }
                 paragraphLines.append(next)
                 index += 1
             }
-            html.append("<p>\(inline(paragraphLines.joined(separator: " ")))</p>")
+            let paragraphHTML = inline(paragraphLines.joined(separator: " "))
+            html.append("<p\(elementAttributes(.paragraph, path: "\(blockIndex)"))>\(imageAnnotatedHTML(paragraphHTML, blockPath: "\(blockIndex)"))</p>")
+            blockIndex += 1
         }
 
         closeList()
         return Result(html: html.joined(separator: "\n"), headings: headings)
     }
 
-    private static func heading(from line: String) -> (level: Int, text: String)? {
+    enum TableAlignment: String {
+        case left
+        case center
+        case right
+    }
+
+    static func tableCells(from line: String) -> [String]? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.contains("|") else {
+            return nil
+        }
+        var cells = trimmed.split(
+            separator: "|",
+            omittingEmptySubsequences: false
+        ).map {
+            String($0).trimmingCharacters(in: .whitespaces)
+        }
+        if cells.first == "" {
+            cells.removeFirst()
+        }
+        if cells.last == "" {
+            cells.removeLast()
+        }
+        return cells.isEmpty ? nil : cells
+    }
+
+    static func tableAlignments(from line: String) -> [TableAlignment]? {
+        guard let cells = tableCells(from: line) else {
+            return nil
+        }
+        var alignments: [TableAlignment] = []
+        for cell in cells {
+            let left = cell.hasPrefix(":")
+            let right = cell.hasSuffix(":")
+            let dashes = cell.trimmingCharacters(in: CharacterSet(charactersIn: ":"))
+            guard dashes.count >= 3,
+                  dashes.allSatisfy({ $0 == "-" }) else {
+                return nil
+            }
+            alignments.append(
+                left && right ? .center : right ? .right : left ? .left : .left
+            )
+        }
+        return alignments
+    }
+
+    private static func normalizedTableCells(_ cells: [String], count: Int) -> [String] {
+        if cells.count >= count {
+            return Array(cells.prefix(count))
+        }
+        return cells + Array(repeating: "", count: count - cells.count)
+    }
+
+    private static func renderTable(
+        header: [String],
+        alignments: [TableAlignment],
+        rows: [[String]],
+        blockPath: Int
+    ) -> String {
+        let headerHTML = zip(header, alignments).map { cell, alignment in
+            "<th align=\"\(alignment.rawValue)\">\(inline(cell))</th>"
+        }.joined()
+        let rowsHTML = rows.map { row in
+            let cells = zip(row, alignments).map { cell, alignment in
+                "<td align=\"\(alignment.rawValue)\">\(inline(cell))</td>"
+            }.joined()
+            return "<tr>\(cells)</tr>"
+        }.joined()
+        return """
+        <table\(elementAttributes(.table, path: "\(blockPath)"))>
+        <thead><tr>\(headerHTML)</tr></thead>
+        <tbody>\(rowsHTML)</tbody>
+        </table>
+        """
+    }
+
+    private static func elementAttributes(_ type: AnnotationElementType, path: String) -> String {
+        " data-element-type=\"\(type.rawValue)\" data-block-path=\"\(path)\""
+    }
+
+    private static func isTableStart(_ lines: [String], at index: Int) -> Bool {
+        guard index + 1 < lines.count,
+              let header = tableCells(
+                  from: lines[index].trimmingCharacters(in: .whitespaces)
+              ),
+              let alignments = tableAlignments(from: lines[index + 1]) else {
+            return false
+        }
+        return header.count == alignments.count
+    }
+
+    static func heading(from line: String) -> (level: Int, text: String)? {
         let hashes = line.prefix { $0 == "#" }
         guard (1...6).contains(hashes.count),
               line.dropFirst(hashes.count).first == " " else {
@@ -536,14 +993,14 @@ private enum MarkdownHTMLRenderer {
         return (hashes.count, String(line.dropFirst(hashes.count + 1)))
     }
 
-    private static func unorderedItem(from line: String) -> String? {
+    static func unorderedItem(from line: String) -> String? {
         for prefix in ["- ", "* ", "+ "] where line.hasPrefix(prefix) {
             return String(line.dropFirst(prefix.count))
         }
         return nil
     }
 
-    private static func orderedItem(from line: String) -> String? {
+    static func orderedItem(from line: String) -> String? {
         guard let dot = line.firstIndex(of: "."),
               Int(line[..<dot]) != nil,
               line.index(after: dot) < line.endIndex,
@@ -554,7 +1011,7 @@ private enum MarkdownHTMLRenderer {
         return String(line[textStart...])
     }
 
-    private static func startsBlock(_ line: String) -> Bool {
+    static func startsBlock(_ line: String) -> Bool {
         line.hasPrefix("#")
             || line.hasPrefix("> ")
             || line.hasPrefix("```")
@@ -570,12 +1027,12 @@ private enum MarkdownHTMLRenderer {
         var escaped = ReaderContentBuilder.escape(text)
         escaped = escaped.replacingOccurrences(
             of: #"!\[([^\]]*)\]\(([^)]+)\)"#,
-            with: #"<img alt="$1" src="$2">"#,
+            with: #"<img alt="$1" src="$2" data-element-type="image">"#,
             options: .regularExpression
         )
         escaped = escaped.replacingOccurrences(
-            of: #"<img alt="([^"]*)" src="media://([^"]+)">"#,
-            with: #"<img alt="$1" data-media-key="$2" src="">"#,
+            of: #"<img alt="([^"]*)" src="media://([^"]+)" data-element-type="image">"#,
+            with: #"<img alt="$1" data-media-key="$2" src="" data-element-type="image">"#,
             options: .regularExpression
         )
         escaped = escaped.replacingOccurrences(
@@ -599,6 +1056,52 @@ private enum MarkdownHTMLRenderer {
             options: .regularExpression
         )
         return escaped
+    }
+
+    private static func imageAnnotatedHTML(
+        _ html: String,
+        blockPath: String
+    ) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: #"<img\b[^>]*>"#
+        ) else {
+            return html
+        }
+        let source = html as NSString
+        let matches = regex.matches(
+            in: html,
+            range: NSRange(location: 0, length: source.length)
+        )
+        guard !matches.isEmpty else {
+            return html
+        }
+        var output = ""
+        var cursor = 0
+        for (imageIndex, match) in matches.enumerated() {
+            output += source.substring(
+                with: NSRange(
+                    location: cursor,
+                    length: match.range.location - cursor
+                )
+            )
+            var tag = source.substring(with: match.range)
+            let attributes = #" data-element-type="image" data-block-path="\#(blockPath)/\#(imageIndex)""#
+            if tag.contains(#"data-element-type="image""#) {
+                tag = tag.replacingOccurrences(
+                    of: #"data-element-type="image""#,
+                    with: String(attributes.dropFirst())
+                )
+            } else {
+                tag = tag.replacingOccurrences(
+                    of: ">",
+                    with: "\(attributes)>"
+                )
+            }
+            output += tag
+            cursor = match.range.location + match.range.length
+        }
+        output += source.substring(from: cursor)
+        return output
     }
 }
 

@@ -104,6 +104,7 @@ struct WorkspaceSidebar: View {
                 .padding(.horizontal, 8)
                 .padding(.bottom, 12)
             }
+            .scrollIndicators(.hidden)
             .disabled(model.isLoadingIndex)
 
             WorkspaceSidebarFooter(model: model)

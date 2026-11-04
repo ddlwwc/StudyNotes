@@ -891,6 +891,7 @@ struct EditTagsSheet: View {
                     TagPreview(tags: parsedTags)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .scrollIndicators(.hidden)
                 .frame(maxHeight: 120)
             }
             .padding(.top, 16)

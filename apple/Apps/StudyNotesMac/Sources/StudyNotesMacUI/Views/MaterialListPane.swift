@@ -219,6 +219,7 @@ struct MaterialListPane: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
         }
+        .scrollIndicators(.hidden)
         .contextMenu {
             Button("新建文件夹", systemImage: "folder.badge.plus") {
                 model.presentCreateFolderSheet(

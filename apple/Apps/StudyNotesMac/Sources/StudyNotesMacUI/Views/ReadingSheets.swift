@@ -89,6 +89,7 @@ struct ImportMaterialSheet: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(6)
                         }
+                        .scrollIndicators(.hidden)
                         .frame(height: 150)
                     }
                 }
@@ -567,6 +568,7 @@ struct LinkMaterialsSheet: View {
                 }
             }
             .listStyle(.plain)
+            .scrollIndicators(.hidden)
             .padding(.top, 16)
 
             ReadingSheetActions {
@@ -783,6 +785,7 @@ struct AIConfigurationSheet: View {
                     }
                 }
                 .listStyle(.sidebar)
+                .scrollIndicators(.hidden)
             }
             .frame(width: 220)
             .background(SNColor.nav)
@@ -1185,6 +1188,7 @@ struct PublishPreviewSheet: View {
                 .padding(22)
                 .frame(width: 430, alignment: .leading)
             }
+            .scrollIndicators(.hidden)
             .frame(width: 430)
             .background(SNColor.panel)
 

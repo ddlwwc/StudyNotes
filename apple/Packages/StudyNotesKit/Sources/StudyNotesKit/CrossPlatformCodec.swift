@@ -63,6 +63,9 @@ public struct CrossPlatformAnnotationAnchor: Codable, Equatable, Sendable {
     public let blockPath: [Int]
     public let pageIndex: Int?
     public let rect: CrossPlatformRect?
+    public let elementType: AnnotationElementType?
+    public let contentFingerprint: String?
+    public let contentSummary: String?
 
     public init(
         kind: CrossPlatformAnnotationKind,
@@ -72,7 +75,10 @@ public struct CrossPlatformAnnotationAnchor: Codable, Equatable, Sendable {
         offset: Int? = nil,
         blockPath: [Int] = [],
         pageIndex: Int? = nil,
-        rect: CrossPlatformRect? = nil
+        rect: CrossPlatformRect? = nil,
+        elementType: AnnotationElementType? = nil,
+        contentFingerprint: String? = nil,
+        contentSummary: String? = nil
     ) {
         self.kind = kind
         self.excerpt = excerpt
@@ -82,6 +88,9 @@ public struct CrossPlatformAnnotationAnchor: Codable, Equatable, Sendable {
         self.blockPath = blockPath
         self.pageIndex = pageIndex
         self.rect = rect
+        self.elementType = elementType
+        self.contentFingerprint = contentFingerprint
+        self.contentSummary = contentSummary
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -99,6 +108,9 @@ public struct CrossPlatformAnnotationAnchor: Codable, Equatable, Sendable {
         case page
         case rect
         case rectangle
+        case elementType
+        case contentFingerprint
+        case contentSummary
     }
 
     private struct LegacyTextAnchor: Codable {
@@ -159,7 +171,19 @@ public struct CrossPlatformAnnotationAnchor: Codable, Equatable, Sendable {
             blockPath: blockPath,
             pageIndex: try container.decodeIfPresent(Int.self, forKey: .pageIndex)
                 ?? (try container.decodeIfPresent(Int.self, forKey: .page)),
-            rect: try container.decodeIfPresent(CrossPlatformRect.self, forKey: .rect)
+            rect: try container.decodeIfPresent(CrossPlatformRect.self, forKey: .rect),
+            elementType: try container.decodeIfPresent(
+                AnnotationElementType.self,
+                forKey: .elementType
+            ),
+            contentFingerprint: try container.decodeIfPresent(
+                String.self,
+                forKey: .contentFingerprint
+            ),
+            contentSummary: try container.decodeIfPresent(
+                String.self,
+                forKey: .contentSummary
+            )
         )
     }
 
@@ -173,6 +197,9 @@ public struct CrossPlatformAnnotationAnchor: Codable, Equatable, Sendable {
         try container.encode(blockPath, forKey: .blockPath)
         try container.encodeIfPresent(pageIndex, forKey: .pageIndex)
         try container.encodeIfPresent(rect, forKey: .rect)
+        try container.encodeIfPresent(elementType, forKey: .elementType)
+        try container.encodeIfPresent(contentFingerprint, forKey: .contentFingerprint)
+        try container.encodeIfPresent(contentSummary, forKey: .contentSummary)
     }
 
     private static func blockPath(from value: String?) -> [Int] {

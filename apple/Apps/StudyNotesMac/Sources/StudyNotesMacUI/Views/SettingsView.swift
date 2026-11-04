@@ -763,6 +763,7 @@ private struct SettingsPageLayout<Content: View>: View {
             .padding(22)
             .frame(maxWidth: 820, alignment: .leading)
         }
+        .scrollIndicators(.hidden)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(SNColor.panel)
     }

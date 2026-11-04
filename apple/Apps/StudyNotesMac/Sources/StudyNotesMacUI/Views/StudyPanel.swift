@@ -1,11 +1,13 @@
-import SwiftUI
+import AppKit
 import StudyNotesKit
+import SwiftUI
 
 struct StudyPanel: View {
     @Bindable var model: WorkspaceModel
     @Environment(\.openSettings) private var openSettings
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var followUpPrompt = ""
+    @State private var inlineNote = ""
+    @State private var cardHeights: [UUID: CGFloat] = [:]
     @State private var conversationToRename: AIConversation?
     @State private var conversationName = ""
     @State private var isRenamingConversation = false
@@ -16,23 +18,7 @@ struct StudyPanel: View {
                 Text("研读层")
                     .font(.sn(15, weight: .semibold))
                     .foregroundStyle(SNColor.ink)
-
                 Spacer()
-
-                Button {
-                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
-                        model.isStudyPanelVisible = false
-                    }
-                } label: {
-                    Image(systemName: "sidebar.right")
-                        .font(.system(size: 13))
-                        .frame(width: 26, height: 26)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(SNColor.muted)
-                .help("收起研读层")
-                .accessibilityLabel("收起研读层")
             }
             .padding(.horizontal, 14)
             .frame(height: 52)
@@ -64,6 +50,22 @@ struct StudyPanel: View {
                 }
 
                 Spacer()
+
+                if model.studyPanelTab == .annotations {
+                    Button {
+                        model.presentAnnotationForCurrentSelection()
+                    } label: {
+                        Image(systemName: "plus")
+                            .frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.readerSelection == nil)
+                    .help(
+                        model.readerSelection == nil
+                            ? "先在正文中选择文字或元素"
+                            : "新建标注"
+                    )
+                }
             }
             .padding(.horizontal, 14)
             .padding(.top, 8)
@@ -72,23 +74,23 @@ struct StudyPanel: View {
                 .fill(SNColor.border)
                 .frame(height: 1)
 
-            ScrollView {
-                Group {
-                    if model.studyPanelTab == .annotations {
-                        annotationContent
-                    } else {
+            if model.studyPanelTab == .annotations {
+                annotationContent
+            } else {
+                ScrollView {
+                    Group {
                         aiContent
                     }
+                    .padding(14)
                 }
-                .padding(14)
+                .scrollIndicators(.hidden)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(SNColor.panel)
-        .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(SNColor.border)
-                .frame(width: 1)
+        .background(SNColor.white)
+        .background(StudyPanelScrollForwarder())
+        .onChange(of: model.inlineAnnotationDraft?.id) { _, _ in
+            inlineNote = model.inlineAnnotationDraft?.initialNote ?? ""
         }
         .alert("重命名 AI 研读会话", isPresented: $isRenamingConversation) {
             TextField("会话名称", text: $conversationName)
@@ -115,61 +117,89 @@ struct StudyPanel: View {
                 title: "未打开材料",
                 description: "选择学习材料后查看对应标注。"
             )
+            .frame(maxHeight: .infinity)
         } else {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 6) {
-                    Text("\(model.annotations.count) 条标注")
-                        .font(.sn(10, weight: .medium))
-                        .foregroundStyle(SNColor.text)
-
-                    Spacer()
-
-                    Button {
-                        model.presentAnnotationForCurrentSelection()
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(model.readerSelection == nil)
-                    .help(model.readerSelection == nil ? "先在正文中选择文字或区域" : "新建标注")
-
-                    Button {
-                        model.isShowingLinkMaterials = true
-                    } label: {
-                        Image(systemName: "link")
-                    }
-                    .buttonStyle(.plain)
-                    .help("关联学习材料")
-                }
-
-                if let document = model.selectedDocument,
-                   !document.summary.linkedMaterialIDs.isEmpty {
-                    LinkedMaterialsSummary(document: document, model: model)
-                }
-
-                if model.annotations.isEmpty {
-                    StudyPanelEmptyState(
-                        systemImage: "tag",
-                        title: "暂无标注",
-                        description: "在正文中选择文字，或在 PDF、图片中选择区域。"
-                    )
-                } else {
-                    ForEach(model.annotations) { annotation in
-                        AnnotationStudyCard(
-                            annotation: annotation,
-                            onOpen: {
-                                model.annotationJumpID = annotation.id
-                            },
-                            onEdit: {
-                                model.presentAnnotationEditor(for: annotation)
-                            },
-                            onDelete: {
-                                Task {
-                                    await model.deleteAnnotation(annotation)
-                                }
-                            }
+            GeometryReader { proxy in
+                let placements = StudyAnnotationLayout.positions(
+                    annotations: model.annotations,
+                    targetY: model.annotationLayoutPositions,
+                    cardHeights: cardHeights,
+                    availableHeight: proxy.size.height - 8
+                )
+                ZStack(alignment: .topLeading) {
+                    if model.annotations.isEmpty,
+                       model.inlineAnnotationDraft == nil {
+                        StudyPanelEmptyState(
+                            systemImage: "tag",
+                            title: "暂无标注",
+                            description: "在正文中选择文字或元素，或右键正文创建标注。"
+                        )
+                        .frame(
+                            width: proxy.size.width,
+                            height: proxy.size.height
                         )
                     }
+
+                    ForEach(model.annotations) { annotation in
+                        annotationView(
+                            annotation,
+                            isEditing: model.inlineAnnotationDraft?.annotationID
+                                == annotation.id
+                        )
+                        .frame(width: max(0, proxy.size.width - 28))
+                        .background {
+                            GeometryReader { geometry in
+                                Color.clear.preference(
+                                    key: AnnotationCardHeightKey.self,
+                                    value: [annotation.id: geometry.size.height]
+                                )
+                            }
+                        }
+                        .offset(
+                            x: 14,
+                            y: displayY(
+                                for: annotation,
+                                placement: placements[annotation.id],
+                                availableHeight: proxy.size.height
+                            )
+                        )
+                        .zIndex(
+                            model.annotationJumpID == annotation.id
+                                || model.inlineAnnotationDraft?.annotationID == annotation.id
+                                ? 2
+                                : 1
+                        )
+                    }
+
+                    if let draft = model.inlineAnnotationDraft,
+                       draft.annotationID == nil {
+                        InlineAnnotationEditorCard(
+                            title: "新建标注",
+                            quote: draft.quote,
+                            note: $inlineNote,
+                            isSaving: model.isPerformingAction,
+                            onSave: {
+                                Task {
+                                    await model.saveInlineAnnotation(note: inlineNote)
+                                }
+                            },
+                            onCancel: {
+                                model.cancelInlineAnnotation()
+                            }
+                        )
+                        .frame(width: max(0, proxy.size.width - 28))
+                        .offset(
+                            x: 14,
+                            y: min(
+                                max(8, (draft.viewportY ?? 0) - 38),
+                                max(8, proxy.size.height - 190)
+                            )
+                        )
+                        .zIndex(3)
+                    }
+                }
+                .onPreferenceChange(AnnotationCardHeightKey.self) {
+                    cardHeights = $0
                 }
             }
         }
@@ -359,6 +389,57 @@ struct StudyPanel: View {
         }
     }
 
+    @ViewBuilder
+    private func annotationView(
+        _ annotation: MaterialAnnotation,
+        isEditing: Bool
+    ) -> some View {
+        if isEditing {
+            InlineAnnotationEditorCard(
+                title: "编辑标注",
+                quote: annotation.quote,
+                note: $inlineNote,
+                isSaving: model.isPerformingAction,
+                onSave: {
+                    Task {
+                        await model.saveInlineAnnotation(note: inlineNote)
+                    }
+                },
+                onCancel: {
+                    model.cancelInlineAnnotation()
+                }
+            )
+        } else {
+            AnnotationStudyCard(
+                annotation: annotation,
+                isCurrent: model.annotationJumpID == annotation.id,
+                onOpen: {
+                    model.annotationJumpID = annotation.id
+                    model.isStudyPanelVisible = true
+                },
+                onEdit: {
+                    model.presentAnnotationEditor(for: annotation)
+                },
+                onDelete: {
+                    Task {
+                        await model.deleteAnnotation(annotation)
+                    }
+                }
+            )
+        }
+    }
+
+    private func displayY(
+        for annotation: MaterialAnnotation,
+        placement: CGFloat?,
+        availableHeight: CGFloat
+    ) -> CGFloat {
+        let height = cardHeights[annotation.id] ?? 88
+        let readerToPanelOffset: CGFloat = 38
+        let proposed = max(8, (placement ?? 0) - readerToPanelOffset)
+        return min(proposed, max(8, availableHeight - height - 8))
+    }
+
     private func openAISettings() {
         model.settingsPage = .ai
         openSettings()
@@ -367,6 +448,7 @@ struct StudyPanel: View {
 
 private struct AnnotationStudyCard: View {
     let annotation: MaterialAnnotation
+    let isCurrent: Bool
     let onOpen: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
@@ -375,7 +457,9 @@ private struct AnnotationStudyCard: View {
         VStack(alignment: .leading, spacing: 7) {
             HStack {
                 Label(
-                    annotation.status == .unresolved ? "位置待恢复" : "标注",
+                    annotation.status == .unresolved
+                        ? "位置待恢复"
+                        : annotation.anchor.elementType?.title ?? "标注",
                     systemImage: annotation.status == .unresolved
                         ? "exclamationmark.triangle"
                         : "highlighter"
@@ -387,7 +471,10 @@ private struct AnnotationStudyCard: View {
                 Spacer()
                 Menu {
                     Button("定位原文", action: onOpen)
-                    Button("编辑…", action: onEdit)
+                    Button(
+                        annotation.status == .unresolved ? "重新绑定…" : "编辑…",
+                        action: onEdit
+                    )
                     Button("删除", role: .destructive, action: onDelete)
                 } label: {
                     Image(systemName: "ellipsis")
@@ -401,7 +488,7 @@ private struct AnnotationStudyCard: View {
                     .font(.snReading(12))
                     .foregroundStyle(SNColor.text)
                     .lineSpacing(3)
-                    .lineLimit(4)
+                    .lineLimit(annotation.anchor.elementType == nil ? 4 : 2)
             }
 
             if !annotation.note.isEmpty {
@@ -418,8 +505,15 @@ private struct AnnotationStudyCard: View {
         .overlay {
             RoundedRectangle(cornerRadius: SNRadius.control)
                 .stroke(
-                    annotation.status == .unresolved ? SNColor.orange : SNColor.yellowLine,
-                    lineWidth: 1
+                    isCurrent
+                        ? SNColor.blue
+                        : annotation.status == .unresolved
+                            ? SNColor.orange
+                            : SNColor.yellowLine,
+                    style: StrokeStyle(
+                        lineWidth: isCurrent ? 2 : 1,
+                        dash: annotation.status == .unresolved ? [4, 3] : []
+                    )
                 )
         }
         .contentShape(Rectangle())
@@ -427,41 +521,163 @@ private struct AnnotationStudyCard: View {
     }
 }
 
-private struct LinkedMaterialsSummary: View {
-    let document: MaterialDocument
-    let model: WorkspaceModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Label("关联材料", systemImage: "link")
-                .font(.sn(9, weight: .medium))
-                .foregroundStyle(SNColor.muted)
-
-            ForEach(linkedMaterials) { material in
-                Button {
-                    Task {
-                        await model.selectMaterial(material.id)
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: material.kind.systemImage)
-                            .font(.system(size: 9))
-                        Text(material.title)
-                            .font(.sn(9))
-                            .lineLimit(1)
-                        Spacer()
-                    }
-                    .foregroundStyle(SNColor.blue)
-                    .padding(.vertical, 2)
-                }
-                .buttonStyle(.plain)
-            }
+private extension AnnotationElementType {
+    var title: String {
+        switch self {
+        case .heading:
+            "标题"
+        case .paragraph:
+            "段落"
+        case .blockquote:
+            "引用"
+        case .listItem:
+            "列表项"
+        case .image:
+            "图片"
+        case .table:
+            "表格"
+        case .codeBlock:
+            "代码块"
         }
     }
+}
 
-    private var linkedMaterials: [StudyMaterialSummary] {
-        let ids = Set(document.summary.linkedMaterialIDs)
-        return model.allActiveMaterials.filter { ids.contains($0.id) }
+private struct InlineAnnotationEditorCard: View {
+    let title: String
+    let quote: String
+    @Binding var note: String
+    let isSaving: Bool
+    let onSave: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.sn(9, weight: .medium))
+                .foregroundStyle(SNColor.blue)
+
+            if !quote.isEmpty {
+                Text("“\(quote)”")
+                    .font(.snReading(11))
+                    .foregroundStyle(SNColor.text)
+                    .lineLimit(2)
+            }
+
+            TextField("写下备注", text: $note, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.sn(10))
+                .lineLimit(3...6)
+                .padding(7)
+                .background(SNColor.white)
+                .clipShape(RoundedRectangle(cornerRadius: SNRadius.small))
+                .overlay {
+                    RoundedRectangle(cornerRadius: SNRadius.small)
+                        .stroke(SNColor.yellowLine, lineWidth: 1)
+                }
+
+            HStack {
+                Button("取消", action: onCancel)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(SNColor.muted)
+                Spacer()
+                Button(action: onSave) {
+                    if isSaving {
+                        ProgressView()
+                            .controlSize(.mini)
+                    } else {
+                        Text("保存")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(SNColor.blue)
+                .controlSize(.small)
+                .disabled(isSaving)
+            }
+        }
+        .padding(10)
+        .background(SNColor.yellow)
+        .clipShape(RoundedRectangle(cornerRadius: SNRadius.control))
+        .overlay {
+            RoundedRectangle(cornerRadius: SNRadius.control)
+                .stroke(SNColor.yellowLine, lineWidth: 1)
+        }
+    }
+}
+
+private struct AnnotationCardHeightKey: PreferenceKey {
+    static let defaultValue: [UUID: CGFloat] = [:]
+
+    static func reduce(
+        value: inout [UUID: CGFloat],
+        nextValue: () -> [UUID: CGFloat]
+    ) {
+        value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
+    }
+}
+
+private struct StudyPanelScrollForwarder: NSViewRepresentable {
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        context.coordinator.view = view
+        context.coordinator.install()
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.view = nsView
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.remove()
+    }
+
+    final class Coordinator: @unchecked Sendable {
+        weak var view: NSView?
+        private var monitor: Any?
+
+        func install() {
+            guard monitor == nil else {
+                return
+            }
+            monitor = NSEvent.addLocalMonitorForEvents(
+                matching: .scrollWheel
+            ) { [weak self] event in
+                let delta = event.scrollingDeltaY
+                let location = event.locationInWindow
+                let windowNumber = event.windowNumber
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          let view = self.view,
+                          view.window?.windowNumber == windowNumber,
+                          !(view.window?.firstResponder is NSTextView) else {
+                        return
+                    }
+                    let location = view.convert(
+                        location,
+                        from: nil
+                    )
+                    guard view.bounds.contains(location) else {
+                        return
+                    }
+                    NotificationCenter.default.post(
+                        name: .studyNotesReaderScroll,
+                        object: delta
+                    )
+                }
+                return event
+            }
+        }
+
+        func remove() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
+            monitor = nil
+        }
     }
 }
 

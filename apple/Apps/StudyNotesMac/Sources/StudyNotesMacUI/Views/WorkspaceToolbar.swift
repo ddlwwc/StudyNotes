@@ -68,7 +68,6 @@ struct WorkspaceBrandStatus: View {
 struct WorkspaceToolbarActions: View {
     let model: WorkspaceModel
     @Environment(\.openSettings) private var openSettings
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 6) {
@@ -77,27 +76,7 @@ struct WorkspaceToolbarActions: View {
                 systemImage: "sidebar.left",
                 isVisible: model.isLibraryPaneVisible
             ) {
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
-                    model.togglePane(.library)
-                }
-            }
-            PaneVisibilityButton(
-                title: "材料目录栏",
-                systemImage: "list.bullet.indent",
-                isVisible: model.isMaterialPaneVisible
-            ) {
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
-                    model.togglePane(.materials)
-                }
-            }
-            PaneVisibilityButton(
-                title: "研读层",
-                systemImage: "sidebar.right",
-                isVisible: model.isStudyPanelVisible
-            ) {
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
-                    model.togglePane(.study)
-                }
+                model.togglePane(.library)
             }
 
             Divider()
@@ -263,12 +242,6 @@ struct WorkspaceSnapshotHeader: View {
 
             HStack(spacing: 6) {
                 Image(systemName: "sidebar.left")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(SNColor.blue)
-                Image(systemName: "list.bullet.indent")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(SNColor.blue)
-                Image(systemName: "sidebar.right")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(SNColor.blue)
 

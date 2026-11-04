@@ -26,3 +26,12 @@ swift run --disable-sandbox --scratch-path /private/tmp/StudyNotesMac-build \
 swift run --disable-sandbox --scratch-path /private/tmp/StudyNotesMac-build \
   StudyNotesMacSnapshot dist/StudyNotesMac-search-results.png --search-results
 ```
+
+可用 `--reader-outline` 展示宽布局常驻目录，并与任意模式组合 `--dark`
+验证暗色阅读表面：
+
+```bash
+swift run --disable-sandbox --scratch-path /private/tmp/StudyNotesMac-build \
+  StudyNotesMacSnapshot dist/StudyNotesMac-outline-dark.png \
+  --reader-outline --dark
+```

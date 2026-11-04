@@ -177,6 +177,10 @@ public struct ReaderSelection: Equatable, Sendable {
     public let pageIndex: Int?
     public let rect: NormalizedRect?
     public let anchorKind: AnnotationAnchorKind?
+    public let elementType: AnnotationElementType?
+    public let contentFingerprint: String
+    public let contentSummary: String
+    public let viewportY: CGFloat?
 
     public init(
         quote: String,
@@ -186,7 +190,11 @@ public struct ReaderSelection: Equatable, Sendable {
         blockPath: [Int] = [],
         pageIndex: Int? = nil,
         rect: NormalizedRect? = nil,
-        anchorKind: AnnotationAnchorKind? = .text
+        anchorKind: AnnotationAnchorKind? = .text,
+        elementType: AnnotationElementType? = nil,
+        contentFingerprint: String = "",
+        contentSummary: String = "",
+        viewportY: CGFloat? = nil
     ) {
         self.quote = quote
         self.prefix = prefix
@@ -196,6 +204,10 @@ public struct ReaderSelection: Equatable, Sendable {
         self.pageIndex = pageIndex
         self.rect = rect
         self.anchorKind = anchorKind
+        self.elementType = elementType
+        self.contentFingerprint = contentFingerprint
+        self.contentSummary = contentSummary
+        self.viewportY = viewportY
     }
 
     public var anchor: AnnotationAnchor {
@@ -207,7 +219,10 @@ public struct ReaderSelection: Equatable, Sendable {
             offset: offset,
             blockPath: blockPath,
             pageIndex: pageIndex,
-            rect: rect
+            rect: rect,
+            elementType: elementType,
+            contentFingerprint: contentFingerprint,
+            contentSummary: contentSummary
         )
     }
 }
@@ -234,6 +249,82 @@ public struct AnnotationDraftRequest: Identifiable, Equatable, Sendable {
         self.quote = quote
         self.anchor = anchor
         self.initialNote = initialNote
+    }
+}
+
+public struct InlineAnnotationDraft: Identifiable, Equatable, Sendable {
+    public let id: UUID
+    public let materialID: UUID
+    public let annotationID: UUID?
+    public let quote: String
+    public let anchor: AnnotationAnchor
+    public let initialNote: String
+    public let viewportY: CGFloat?
+
+    public init(
+        id: UUID = UUID(),
+        materialID: UUID,
+        annotationID: UUID? = nil,
+        quote: String,
+        anchor: AnnotationAnchor,
+        initialNote: String = "",
+        viewportY: CGFloat? = nil
+    ) {
+        self.id = id
+        self.materialID = materialID
+        self.annotationID = annotationID
+        self.quote = quote
+        self.anchor = anchor
+        self.initialNote = initialNote
+        self.viewportY = viewportY
+    }
+}
+
+public enum StudyAnnotationLayout {
+    public static func positions(
+        annotations: [MaterialAnnotation],
+        targetY: [UUID: CGFloat],
+        cardHeights: [UUID: CGFloat],
+        availableHeight: CGFloat,
+        gap: CGFloat = 8
+    ) -> [UUID: CGFloat] {
+        let resolved = annotations
+            .filter { $0.status == .active }
+            .sorted {
+                let leftY = targetY[$0.id] ?? .greatestFiniteMagnitude
+                let rightY = targetY[$1.id] ?? .greatestFiniteMagnitude
+                return leftY == rightY
+                    ? $0.createdAt < $1.createdAt
+                    : leftY < rightY
+            }
+        let unresolved = annotations
+            .filter { $0.status == .unresolved }
+            .sorted { $0.updatedAt < $1.updatedAt }
+        var result: [UUID: CGFloat] = [:]
+        var cursor: CGFloat = 0
+
+        for annotation in resolved + unresolved {
+            let height = cardHeights[annotation.id] ?? 88
+            let desired = annotation.status == .active
+                ? max(0, targetY[annotation.id] ?? cursor)
+                : cursor
+            let position = max(cursor, desired)
+            result[annotation.id] = position
+            cursor = position + height + gap
+        }
+
+        guard availableHeight > 0,
+              let lastY = result.values.max() else {
+            return result
+        }
+        let lastHeight = result.keys
+            .compactMap { id in result[id].map { ($0, cardHeights[id] ?? 88) } }
+            .max { $0.0 < $1.0 }?.1 ?? 88
+        let overflow = max(0, lastY + lastHeight - availableHeight)
+        guard overflow > 0 else {
+            return result
+        }
+        return result.mapValues { max(0, $0 - overflow) }
     }
 }
 

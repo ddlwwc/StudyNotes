@@ -72,6 +72,12 @@ public final class WorkspaceModel {
     public var aiPromptText = ""
     public var readerSelection: ReaderSelection?
     public var annotationJumpID: UUID?
+    public private(set) var annotationLayoutPositions: [UUID: CGFloat] = [:]
+    public private(set) var readerViewportWidth: CGFloat = 0
+    public private(set) var readerViewportHeight: CGFloat = 0
+    public private(set) var inlineAnnotationDraft: InlineAnnotationDraft?
+    public private(set) var readerOutlinePreference: Bool?
+    public var isReaderOutlineOverlayPresented = false
     public var documentSearchText = ""
     public var readerHeadingJumpID: String?
     public var webArticleURLText = ""
@@ -213,6 +219,40 @@ public final class WorkspaceModel {
             workspacePreferences.isStudyCollapsed.toggle()
         }
         persistWorkspacePreferences()
+    }
+
+    public var canShowReaderOutline: Bool {
+        max(0, (readerViewportWidth - readingPreferences.lineWidth) / 2) >= 220
+    }
+
+    public var isReaderOutlineVisible: Bool {
+        canShowReaderOutline && readerOutlinePreference != false
+    }
+
+    public func updateReaderViewport(width: CGFloat, height: CGFloat) {
+        readerViewportWidth = max(0, width)
+        readerViewportHeight = max(0, height)
+        if canShowReaderOutline {
+            isReaderOutlineOverlayPresented = false
+        }
+    }
+
+    public func toggleReaderOutline() {
+        guard canShowReaderOutline else {
+            readerOutlinePreference = nil
+            isReaderOutlineOverlayPresented.toggle()
+            return
+        }
+        readerOutlinePreference = !isReaderOutlineVisible
+        isReaderOutlineOverlayPresented = false
+    }
+
+    public func closeReaderOutlineOverlay() {
+        isReaderOutlineOverlayPresented = false
+    }
+
+    public func updateAnnotationLayoutPositions(_ positions: [UUID: CGFloat]) {
+        annotationLayoutPositions = positions
     }
 
     public func setPaneWidth(_ pane: WorkspacePane, width: Double) {
@@ -2229,21 +2269,38 @@ public final class WorkspaceModel {
                 || selection.pageIndex != nil else {
             return
         }
-        annotationDraftRequest = AnnotationDraftRequest(
+        inlineAnnotationDraft = InlineAnnotationDraft(
             materialID: document.summary.id,
             quote: selection.quote,
-            anchor: selection.anchor
+            anchor: selection.anchor,
+            viewportY: selection.viewportY
         )
+        annotationDraftRequest = nil
+        isStudyPanelVisible = true
+        studyPanelTab = .annotations
     }
 
     public func presentAnnotationEditor(for annotation: MaterialAnnotation) {
-        annotationDraftRequest = AnnotationDraftRequest(
-            materialID: annotation.materialID,
-            annotationID: annotation.id,
-            quote: annotation.quote,
-            anchor: annotation.anchor,
-            initialNote: annotation.note
-        )
+        if annotation.status == .unresolved {
+            annotationDraftRequest = AnnotationDraftRequest(
+                materialID: annotation.materialID,
+                annotationID: annotation.id,
+                quote: annotation.quote,
+                anchor: annotation.anchor,
+                initialNote: annotation.note
+            )
+        } else {
+            inlineAnnotationDraft = InlineAnnotationDraft(
+                materialID: annotation.materialID,
+                annotationID: annotation.id,
+                quote: annotation.quote,
+                anchor: annotation.anchor,
+                initialNote: annotation.note,
+                viewportY: annotationLayoutPositions[annotation.id]
+            )
+            isStudyPanelVisible = true
+            studyPanelTab = .annotations
+        }
     }
 
     public func presentAnnotationForCurrentSelection() {
@@ -2251,6 +2308,39 @@ public final class WorkspaceModel {
             return
         }
         presentAnnotationEditor(for: readerSelection)
+    }
+
+    public func saveInlineAnnotation(note: String) async -> Bool {
+        guard let store, let draft = inlineAnnotationDraft else {
+            return false
+        }
+        isPerformingAction = true
+        defer { isPerformingAction = false }
+        do {
+            let saved = try await store.upsertAnnotation(
+                MaterialAnnotation(
+                    id: draft.annotationID ?? UUID(),
+                    materialID: draft.materialID,
+                    anchor: draft.anchor,
+                    quote: draft.quote,
+                    note: note.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            )
+            annotations = try await store.loadAnnotations(
+                materialID: draft.materialID
+            )
+            inlineAnnotationDraft = nil
+            annotationJumpID = saved.id
+            actionNotice = draft.annotationID == nil ? "已创建标注" : "已更新标注"
+            return true
+        } catch {
+            present(error)
+            return false
+        }
+    }
+
+    public func cancelInlineAnnotation() {
+        inlineAnnotationDraft = nil
     }
 
     public func saveAnnotation(note: String) async -> Bool {
@@ -3380,6 +3470,8 @@ public final class WorkspaceModel {
             annotations = []
             conversations = []
             readerSelection = nil
+            inlineAnnotationDraft = nil
+            annotationLayoutPositions = [:]
             return
         }
 
@@ -3455,6 +3547,9 @@ public final class WorkspaceModel {
             annotations = loadedAnnotations
             conversations = loadedConversations
             readerSelection = nil
+            inlineAnnotationDraft = nil
+            annotationLayoutPositions = [:]
+            annotationJumpID = nil
             activeConversationID = loadedConversations.first?.id
         } catch {
             guard noteLoadGeneration == generation else {

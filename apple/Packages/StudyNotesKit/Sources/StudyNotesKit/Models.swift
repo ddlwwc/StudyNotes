@@ -302,6 +302,16 @@ public enum AnnotationAnchorKind: String, Codable, Equatable, Sendable {
     case pdfPageRect
 }
 
+public enum AnnotationElementType: String, Codable, Equatable, Sendable {
+    case heading
+    case paragraph
+    case blockquote
+    case listItem
+    case image
+    case table
+    case codeBlock
+}
+
 public struct AnnotationAnchor: Codable, Equatable, Sendable {
     public let kind: AnnotationAnchorKind
     public let excerpt: String
@@ -311,6 +321,9 @@ public struct AnnotationAnchor: Codable, Equatable, Sendable {
     public let blockPath: [Int]
     public let pageIndex: Int?
     public let rect: NormalizedRect?
+    public let elementType: AnnotationElementType?
+    public let contentFingerprint: String?
+    public let contentSummary: String?
 
     public init(
         kind: AnnotationAnchorKind,
@@ -320,7 +333,10 @@ public struct AnnotationAnchor: Codable, Equatable, Sendable {
         offset: Int? = nil,
         blockPath: [Int] = [],
         pageIndex: Int? = nil,
-        rect: NormalizedRect? = nil
+        rect: NormalizedRect? = nil,
+        elementType: AnnotationElementType? = nil,
+        contentFingerprint: String? = nil,
+        contentSummary: String? = nil
     ) {
         self.kind = kind
         self.excerpt = excerpt
@@ -330,6 +346,9 @@ public struct AnnotationAnchor: Codable, Equatable, Sendable {
         self.blockPath = blockPath
         self.pageIndex = pageIndex
         self.rect = rect
+        self.elementType = elementType
+        self.contentFingerprint = contentFingerprint
+        self.contentSummary = contentSummary
     }
 }
 
@@ -628,7 +647,10 @@ extension CrossPlatformAnnotationAnchor {
                     width: $0.width,
                     height: $0.height
                 )
-            }
+            },
+            elementType: elementType,
+            contentFingerprint: contentFingerprint,
+            contentSummary: contentSummary
         )
     }
 }
@@ -660,7 +682,10 @@ extension AnnotationAnchor {
                     width: $0.width,
                     height: $0.height
                 )
-            }
+            },
+            elementType: elementType,
+            contentFingerprint: contentFingerprint,
+            contentSummary: contentSummary
         )
     }
 }

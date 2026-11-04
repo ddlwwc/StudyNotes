@@ -5,6 +5,12 @@ import SwiftUI
 import UniformTypeIdentifiers
 import WebKit
 
+extension Notification.Name {
+    static let studyNotesReaderScroll = Notification.Name(
+        "StudyNotes.ReaderScroll"
+    )
+}
+
 struct MaterialReaderView: View {
     @Bindable var model: WorkspaceModel
     let document: MaterialDocument
@@ -80,6 +86,7 @@ private struct ArticleMaterialReader: View {
                     document: document,
                     annotations: model.annotations,
                     jumpToAnnotationID: model.annotationJumpID,
+                    activeAnnotationID: model.annotationJumpID,
                     headingID: model.readerHeadingJumpID,
                     searchText: model.documentSearchText,
                     readingPreferences: model.readingPreferences,
@@ -91,6 +98,30 @@ private struct ArticleMaterialReader: View {
                         model.annotationJumpID = id
                         model.studyPanelTab = .annotations
                         model.isStudyPanelVisible = true
+                    },
+                    onElementAnnotation: { target in
+                        let elementType = AnnotationElementType(
+                            rawValue: target.elementType
+                        )
+                        let selection = ReaderSelection(
+                            quote: target.quote,
+                            prefix: target.prefix,
+                            suffix: target.suffix,
+                            offset: target.offset,
+                            blockPath: target.blockPath,
+                            anchorKind: .text,
+                            elementType: elementType,
+                            contentFingerprint: ContentFingerprint.sha256(
+                                target.fingerprintSource
+                            ),
+                            contentSummary: target.quote,
+                            viewportY: target.viewportY
+                        )
+                        model.updateReaderSelection(selection)
+                        model.presentAnnotationForCurrentSelection()
+                    },
+                    onAnnotationLayout: { positions in
+                        model.updateAnnotationLayoutPositions(positions)
                     }
                 )
                 .simultaneousGesture(
@@ -209,16 +240,31 @@ private struct ArticleMaterialReader: View {
     }
 }
 
+private struct ArticleElementSelection: Equatable {
+    let elementType: String
+    let quote: String
+    let prefix: String
+    let suffix: String
+    let offset: Int
+    let blockPath: [Int]
+    let fingerprintSource: String
+    let viewportY: CGFloat?
+}
+
 private struct ArticleWebView: NSViewRepresentable {
     let document: MaterialDocument
     let annotations: [MaterialAnnotation]
     let jumpToAnnotationID: UUID?
+    let activeAnnotationID: UUID?
     let headingID: String?
     let searchText: String
     let readingPreferences: ReadingPreferences
     let isDarkMode: Bool
     let onSelectionChanged: (ReaderSelection?) -> Void
     let onAnnotationClick: (UUID) -> Void
+    var onElementAnnotation: ((ArticleElementSelection) -> Void)?
+    var onAnnotationLayout: (([UUID: CGFloat]) -> Void)?
+    var onReaderScrollChanged: ((CGFloat) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -234,6 +280,18 @@ private struct ArticleWebView: NSViewRepresentable {
         configuration.userContentController.add(
             context.coordinator,
             name: "annotationClick"
+        )
+        configuration.userContentController.add(
+            context.coordinator,
+            name: "annotationLayout"
+        )
+        configuration.userContentController.add(
+            context.coordinator,
+            name: "elementAnnotationRequest"
+        )
+        configuration.userContentController.add(
+            context.coordinator,
+            name: "readerScrollChanged"
         )
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
@@ -255,6 +313,10 @@ private struct ArticleWebView: NSViewRepresentable {
             in: webView
         )
         context.coordinator.applyAnnotations(annotations, in: webView)
+        context.coordinator.setActiveAnnotation(
+            activeAnnotationID,
+            in: webView
+        )
         if let jumpToAnnotationID {
             context.coordinator.jump(to: jumpToAnnotationID, in: webView)
         }
@@ -271,11 +333,21 @@ private struct ArticleWebView: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+        coordinator.stopObserving()
         webView.configuration.userContentController.removeScriptMessageHandler(
             forName: "selectionChanged"
         )
         webView.configuration.userContentController.removeScriptMessageHandler(
             forName: "annotationClick"
+        )
+        webView.configuration.userContentController.removeScriptMessageHandler(
+            forName: "annotationLayout"
+        )
+        webView.configuration.userContentController.removeScriptMessageHandler(
+            forName: "elementAnnotationRequest"
+        )
+        webView.configuration.userContentController.removeScriptMessageHandler(
+            forName: "readerScrollChanged"
         )
     }
 
@@ -285,14 +357,43 @@ private struct ArticleWebView: NSViewRepresentable {
         var documentID: UUID?
         private var loadedDocumentID: UUID?
         private var readingPreferencesSignature = ""
+        private var runtimeInstalled = false
+        private var scrollObserver: NSObjectProtocol?
 
         init(parent: ArticleWebView) {
             self.parent = parent
+            super.init()
+            scrollObserver = NotificationCenter.default.addObserver(
+                forName: .studyNotesReaderScroll,
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                guard let delta = notification.object as? CGFloat else {
+                    return
+                }
+                Task { @MainActor [weak self] in
+                    guard let webView = self?.webView else {
+                        return
+                    }
+                    _ = try? await webView.evaluateJavaScript(
+                        "window.studyNotesScrollBy?.((\(delta)));"
+                    )
+                }
+            }
+        }
+
+        func stopObserving() {
+            if let scrollObserver {
+                NotificationCenter.default.removeObserver(scrollObserver)
+            }
+            scrollObserver = nil
         }
 
         func load(document: MaterialDocument, in webView: WKWebView) {
             documentID = document.id
             loadedDocumentID = document.id
+            runtimeInstalled = false
+            readingPreferencesSignature = ""
             webView.loadHTMLString(
                 document.renderedHTML,
                 baseURL: document.sourceURL
@@ -300,12 +401,21 @@ private struct ArticleWebView: NSViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            installRuntime(in: webView)
             applyReadingPreferences(
                 parent.readingPreferences,
                 isDarkMode: parent.isDarkMode,
                 in: webView
             )
             applyAnnotations(parent.annotations, in: webView)
+        }
+
+        func installRuntime(in webView: WKWebView) {
+            guard !runtimeInstalled else {
+                return
+            }
+            runtimeInstalled = true
+            webView.evaluateJavaScript(Self.runtimeJavaScript)
         }
 
         func applyReadingPreferences(
@@ -336,6 +446,8 @@ private struct ArticleWebView: NSViewRepresentable {
             let css = """
             :root { color-scheme: \(isDarkMode ? "dark" : "light"); }
             html, body { background: \(background) !important; }
+            html, body { scrollbar-width: none !important; }
+            ::-webkit-scrollbar { display: none !important; width: 0 !important; height: 0 !important; }
             body {
               color: \(text) !important;
               font-size: \(preferences.fontSize)px !important;
@@ -352,6 +464,25 @@ private struct ArticleWebView: NSViewRepresentable {
               font-size: \(max(11, preferences.fontSize - 4))px !important;
             }
             code { font-family: "\(codeFont)", SFMono-Regular, Menlo, monospace !important; }
+            .study-annotation-active {
+              outline: 2px solid #3370ff !important;
+              outline-offset: 2px;
+            }
+            .study-element-annotation {
+              border-radius: 3px;
+              background: rgba(255, 225, 94, .34) !important;
+              box-shadow: inset 0 -2px 0 #e3b500;
+            }
+            .study-image-annotation {
+              outline: 2px solid #e3b500;
+              outline-offset: 3px;
+              box-shadow: inset 0 -4px 0 rgba(227, 181, 0, .55);
+            }
+            mark.study-annotation {
+              background: rgba(255, 225, 94, .58) !important;
+              border-radius: 3px;
+              box-shadow: inset 0 -2px 0 #e3b500;
+            }
             """
             webView.evaluateJavaScript(
                 """
@@ -373,12 +504,17 @@ private struct ArticleWebView: NSViewRepresentable {
             in webView: WKWebView
         ) {
             let payload = annotations.map { annotation in
-                [
+                var item = [
                     "id": annotation.id.uuidString,
-                    "quote": annotation.anchor.excerpt,
+                    "quote": annotation.quote,
                     "note": annotation.note,
-                    "unresolved": annotation.status == .unresolved
+                    "unresolved": annotation.status == .unresolved,
+                    "blockPath": annotation.anchor.blockPath
                 ] as [String: Any]
+                if let elementType = annotation.anchor.elementType {
+                    item["elementType"] = elementType.rawValue
+                }
+                return item
             }
             guard let data = try? JSONSerialization.data(withJSONObject: payload),
                   let json = String(data: data, encoding: .utf8) else {
@@ -389,16 +525,16 @@ private struct ArticleWebView: NSViewRepresentable {
             )
         }
 
+        func setActiveAnnotation(_ id: UUID?, in webView: WKWebView) {
+            let value = id.map { javaScriptString($0.uuidString) } ?? "null"
+            webView.evaluateJavaScript(
+                "window.studyNotesSetActiveAnnotation?.(\(value));"
+            )
+        }
+
         func jump(to id: UUID, in webView: WKWebView) {
             webView.evaluateJavaScript(
-                """
-                (() => {
-                  const mark = document.querySelector(
-                    'mark[data-annotation-id="\(id.uuidString)"]'
-                  );
-                  if (mark) mark.scrollIntoView({ block: 'center', behavior: 'smooth' });
-                })();
-                """
+                "window.studyNotesScrollToAnnotation?.(\(javaScriptString(id.uuidString)));"
             )
         }
 
@@ -421,7 +557,9 @@ private struct ArticleWebView: NSViewRepresentable {
                         suffix: payload["suffix"] as? String ?? "",
                         offset: payload["offset"] as? Int ?? 0,
                         blockPath: payload["blockPath"] as? [Int] ?? [],
-                        anchorKind: .text
+                        anchorKind: .text,
+                        viewportY: (payload["viewportY"] as? NSNumber)
+                            .map { CGFloat(truncating: $0) }
                     )
                 )
             case "annotationClick":
@@ -430,10 +568,409 @@ private struct ArticleWebView: NSViewRepresentable {
                     return
                 }
                 parent.onAnnotationClick(id)
+            case "annotationLayout":
+                guard let payload = message.body as? [String: Any] else {
+                    return
+                }
+                let positions = payload.reduce(into: [UUID: CGFloat]()) {
+                    result, entry in
+                    guard let id = UUID(uuidString: entry.key),
+                          let position = entry.value as? NSNumber else {
+                        return
+                    }
+                    result[id] = CGFloat(truncating: position)
+                }
+                parent.onAnnotationLayout?(positions)
+            case "elementAnnotationRequest":
+                guard let payload = message.body as? [String: Any],
+                      let elementType = payload["elementType"] as? String,
+                      let quote = payload["quote"] as? String,
+                      !quote.isEmpty else {
+                    return
+                }
+                parent.onElementAnnotation?(
+                    ArticleElementSelection(
+                        elementType: elementType,
+                        quote: quote,
+                        prefix: payload["prefix"] as? String ?? "",
+                        suffix: payload["suffix"] as? String ?? "",
+                        offset: payload["offset"] as? Int ?? 0,
+                        blockPath: payload["blockPath"] as? [Int] ?? [],
+                        fingerprintSource: payload["fingerprintSource"] as? String
+                            ?? quote,
+                        viewportY: (payload["viewportY"] as? NSNumber)
+                            .map { CGFloat(truncating: $0) }
+                    )
+                )
+            case "readerScrollChanged":
+                guard let offset = message.body as? NSNumber else {
+                    return
+                }
+                parent.onReaderScrollChanged?(CGFloat(truncating: offset))
             default:
                 break
             }
         }
+
+        private static let runtimeJavaScript = #"""
+        (() => {
+          if (window.__studyNotesRuntimeInstalled) return;
+          window.__studyNotesRuntimeInstalled = true;
+
+          const article = document.querySelector('article');
+          if (!article) return;
+
+          const post = (name, payload) => {
+            window.webkit.messageHandlers[name].postMessage(payload);
+          };
+          const truncate = (value, length = 160) => {
+            const text = (value || '').replace(/\s+/g, ' ').trim();
+            return text.length > length ? `${text.slice(0, length - 1)}…` : text;
+          };
+          const elementPath = (element) => {
+            const path = [];
+            let node = element;
+            while (node && node !== article) {
+              const parent = node.parentElement;
+              if (!parent) return [];
+              path.unshift(Array.from(parent.children).indexOf(node));
+              node = parent;
+            }
+            return node === article ? path : [];
+          };
+          const elementAtPath = (path) => {
+            if (!Array.isArray(path)) return null;
+            const key = path.join('/');
+            const tagged = Array.from(
+              article.querySelectorAll('[data-block-path]')
+            ).find((element) => element.dataset.blockPath === key);
+            if (tagged) return tagged;
+            let node = article;
+            for (const index of path) {
+              node = node?.children?.[index];
+              if (!node) return null;
+            }
+            return node === article ? null : node;
+          };
+          const kindFor = (element) => {
+            if (!element || element === article || element.matches('hr')) return null;
+            if (element.closest('table')) return 'table';
+            if (element.closest('pre')) return 'codeBlock';
+            if (element.matches('img')) return 'image';
+            if (element.closest('li')) return 'listItem';
+            if (element.closest('blockquote')) return 'blockquote';
+            if (element.closest('h1, h2, h3, h4, h5, h6')) return 'heading';
+            if (element.closest('p')) return 'paragraph';
+            return null;
+          };
+          const targetFor = (node) => {
+            const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+            if (!element || !article.contains(element)) return null;
+            const kind = kindFor(element);
+            if (!kind) return null;
+            if (kind === 'table') return [element.closest('table'), kind];
+            if (kind === 'codeBlock') return [element.closest('pre'), kind];
+            if (kind === 'image') return [element.closest('img'), kind];
+            if (kind === 'listItem') return [element.closest('li'), kind];
+            if (kind === 'blockquote') return [element.closest('blockquote'), kind];
+            if (kind === 'heading') return [element.closest('h1, h2, h3, h4, h5, h6'), kind];
+            return [element.closest('p'), kind];
+          };
+          const canonicalTarget = (element, kind) => [
+            element,
+            element.dataset.elementType || kind
+          ];
+          const canonicalPath = (element) => {
+            const value = element.dataset.blockPath;
+            if (!value) return elementPath(element);
+            return value
+              .split('/')
+              .map((component) => Number.parseInt(component, 10))
+              .filter(Number.isFinite);
+          };
+          const summaryFor = (element, kind) => {
+            if (kind === 'image') {
+              return truncate(
+                element.alt
+                  || element.title
+                  || element.dataset.mediaKey
+                  || element.getAttribute('src')
+                  || '图片'
+              );
+            }
+            if (kind === 'table') {
+              return truncate(
+                Array.from(element.rows)
+                  .slice(0, 2)
+                  .map((row) => Array.from(row.cells).map((cell) => cell.innerText).join(' | '))
+                  .join(' / ')
+              );
+            }
+            if (kind === 'codeBlock') {
+              return truncate(element.textContent || '代码块');
+            }
+            return truncate(element.innerText || element.textContent);
+          };
+          const menuLabel = (kind) => ({
+            heading: '标注此标题',
+            paragraph: '标注此段落',
+            blockquote: '标注此引用',
+            listItem: '标注此列表项',
+            image: '标注此图片',
+            table: '标注此表格',
+            codeBlock: '标注此代码块'
+          })[kind] || '标注此元素';
+          const closeMenu = () => {
+            document.getElementById('studynotes-element-menu')?.remove();
+          };
+          const showMenu = (x, y, label, action) => {
+            closeMenu();
+            const menu = document.createElement('div');
+            menu.id = 'studynotes-element-menu';
+            menu.style.cssText = [
+              'position:fixed',
+              `left:${Math.min(x, window.innerWidth - 170)}px`,
+              `top:${Math.min(y, window.innerHeight - 52)}px`,
+              'z-index:2147483647',
+              'padding:5px',
+              'border:1px solid rgba(127,127,127,.35)',
+              'border-radius:7px',
+              'background:Canvas',
+              'box-shadow:0 8px 28px rgba(0,0,0,.18)'
+            ].join(';');
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = label;
+            button.style.cssText = [
+              'display:block',
+              'width:100%',
+              'padding:6px 10px',
+              'border:0',
+              'border-radius:4px',
+              'background:transparent',
+              'color:CanvasText',
+              'font:12px -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif',
+              'text-align:left',
+              'white-space:nowrap'
+            ].join(';');
+            button.addEventListener('click', () => {
+              closeMenu();
+              action();
+            });
+            menu.append(button);
+            document.body.append(menu);
+            setTimeout(() => {
+              document.addEventListener('pointerdown', closeMenu, { once: true });
+            }, 0);
+          };
+
+          window.studyNotesSetActiveAnnotation = (id) => {
+            window.__studyNotesActiveAnnotation = id;
+            document.querySelectorAll('.study-annotation-active').forEach((element) => {
+              element.classList.remove('study-annotation-active');
+            });
+            if (!id) return;
+            document.querySelectorAll(
+              `[data-annotation-id="${CSS.escape(id)}"], [data-study-annotation-id="${CSS.escape(id)}"]`
+            ).forEach((element) => element.classList.add('study-annotation-active'));
+          };
+          window.studyNotesScrollToAnnotation = (id) => {
+            const element = document.querySelector(
+              `[data-annotation-id="${CSS.escape(id)}"], [data-study-annotation-id="${CSS.escape(id)}"]`
+            );
+            element?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          };
+          window.studyNotesScrollBy = (delta) => {
+            if (Number.isFinite(delta)) window.scrollBy(0, delta);
+          };
+
+          const unwrap = (element) => {
+            const parent = element.parentNode;
+            if (!parent) return;
+            while (element.firstChild) parent.insertBefore(element.firstChild, element);
+            parent.removeChild(element);
+          };
+          const applyText = (item) => {
+            if (!item.quote) return;
+            const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+            let node;
+            while ((node = walker.nextNode())) {
+              if (node.parentElement?.closest('mark.study-annotation')) continue;
+              const index = node.nodeValue.indexOf(item.quote);
+              if (index < 0) continue;
+              const range = document.createRange();
+              range.setStart(node, index);
+              range.setEnd(node, index + item.quote.length);
+              try {
+                const mark = document.createElement('mark');
+                mark.className = 'study-annotation'
+                  + (item.unresolved ? ' unresolved' : '')
+                  + (item.active ? ' study-annotation-active' : '');
+                mark.dataset.annotationId = item.id;
+                mark.title = item.note || item.quote;
+                range.surroundContents(mark);
+              } catch {}
+              break;
+            }
+          };
+          const applyElement = (item) => {
+            if (!item.elementType || item.unresolved) return;
+            let element = elementAtPath(item.blockPath);
+            const normalized = (value) => (value || '').replace(/\s+/g, ' ').trim();
+            const contentFor = (candidate) => normalized(
+              candidate?.dataset.elementType === 'image'
+                ? candidate.getAttribute('alt')
+                  || candidate.getAttribute('title')
+                  || candidate.dataset.mediaKey
+                  || candidate.getAttribute('src')
+                  || ''
+                : candidate?.innerText || candidate?.textContent || ''
+            );
+            if (!contentFor(element).includes(normalized(item.quote))) {
+              const matches = Array.from(
+                article.querySelectorAll(
+                  `[data-element-type="${CSS.escape(item.elementType)}"]`
+                )
+              ).filter((candidate) => contentFor(candidate)
+                .includes(normalized(item.quote)));
+              if (matches.length > 0) {
+                const full = article.innerText || article.textContent || '';
+                const ranked = matches.map((candidate) => {
+                  const range = document.createRange();
+                  range.selectNodeContents(article);
+                  range.setEndBefore(candidate);
+                  const offset = range.toString().length;
+                  const before = normalized(
+                    full.slice(Math.max(0, offset - 48), offset)
+                  );
+                  const after = normalized(
+                    full.slice(offset, offset + 48)
+                  );
+                  const prefix = normalized(item.prefix);
+                  const suffix = normalized(item.suffix);
+                  let score = 0;
+                  if (prefix && before.endsWith(prefix)) score += 2;
+                  if (suffix && after.startsWith(suffix)) score += 2;
+                  return { candidate, score };
+                });
+                const bestScore = Math.max(...ranked.map((entry) => entry.score));
+                const best = ranked.filter((entry) => entry.score === bestScore);
+                if (best.length === 1) element = best[0].candidate;
+              }
+            }
+            if (!element) return;
+            element.dataset.studyAnnotationId = item.id;
+            element.classList.add('study-element-annotation');
+            if (item.elementType === 'image') {
+              element.classList.add('study-image-annotation');
+            }
+            if (item.active) element.classList.add('study-annotation-active');
+          };
+          window.studyNotesApplyAnnotations = (items) => {
+            document.querySelectorAll('mark.study-annotation').forEach(unwrap);
+            document.querySelectorAll('[data-study-annotation-id]').forEach((element) => {
+              element.classList.remove(
+                'study-element-annotation',
+                'study-image-annotation',
+                'study-annotation-active'
+              );
+              delete element.dataset.studyAnnotationId;
+            });
+            for (const item of Array.isArray(items) ? items : []) {
+              if (item.elementType) applyElement(item);
+              else applyText(item);
+            }
+            window.studyNotesSetActiveAnnotation(window.__studyNotesActiveAnnotation);
+            requestAnimationFrame(reportLayout);
+          };
+
+          article.addEventListener('click', (event) => {
+            const text = event.target.closest?.('mark[data-annotation-id]');
+            if (text) {
+              event.preventDefault();
+              post('annotationClick', text.dataset.annotationId);
+              return;
+            }
+            const element = event.target.closest?.('[data-study-annotation-id]');
+            if (element) {
+              event.preventDefault();
+              post('annotationClick', element.dataset.studyAnnotationId);
+            }
+          });
+
+          article.addEventListener('contextmenu', (event) => {
+            const selection = window.studyNotesCurrentSelection?.();
+            if (selection) {
+              event.preventDefault();
+              showMenu(event.clientX, event.clientY, '标注所选文字', () => {
+                post('elementAnnotationRequest', {
+                  elementType: 'text',
+                  quote: selection.quote,
+                  prefix: selection.prefix,
+                  suffix: selection.suffix,
+                  offset: selection.offset,
+                  blockPath: selection.blockPath,
+                  fingerprintSource: selection.quote,
+                  viewportY: selection.viewportY
+                });
+              });
+              return;
+            }
+
+            const target = targetFor(event.target);
+            if (!target?.[0]) return;
+            const [element, rawKind] = target;
+            const [canonicalElement, kind] = canonicalTarget(
+              element,
+              rawKind
+            );
+            event.preventDefault();
+            showMenu(event.clientX, event.clientY, menuLabel(kind), () => {
+              const summary = summaryFor(canonicalElement, kind);
+              if (!summary) return;
+              const preRange = document.createRange();
+              preRange.selectNodeContents(article);
+              preRange.setEndBefore(canonicalElement);
+              const offset = preRange.toString().length;
+              const full = article.innerText || article.textContent || '';
+              post('elementAnnotationRequest', {
+                elementType: kind,
+                quote: summary,
+                prefix: full.slice(Math.max(0, offset - 48), offset),
+                suffix: full.slice(offset, offset + 48),
+                offset,
+                blockPath: canonicalPath(canonicalElement),
+                fingerprintSource: canonicalElement.innerText
+                  || canonicalElement.textContent
+                  || canonicalElement.getAttribute('alt')
+                  || summary,
+                viewportY: canonicalElement.getBoundingClientRect().top
+              });
+            });
+          });
+
+          let layoutFrame = 0;
+          function reportLayout() {
+            cancelAnimationFrame(layoutFrame);
+            layoutFrame = requestAnimationFrame(() => {
+              const positions = {};
+              article.querySelectorAll(
+                'mark[data-annotation-id], [data-study-annotation-id]'
+              ).forEach((element) => {
+                const id = element.dataset.annotationId || element.dataset.studyAnnotationId;
+                if (!id || element.classList.contains('unresolved')) return;
+                positions[id] = element.getBoundingClientRect().top;
+              });
+              post('annotationLayout', positions);
+              post('readerScrollChanged', window.scrollY);
+            });
+          }
+          window.addEventListener('scroll', reportLayout, { passive: true });
+          window.addEventListener('resize', reportLayout, { passive: true });
+          new ResizeObserver(reportLayout).observe(article);
+          requestAnimationFrame(reportLayout);
+        })();
+        """#
     }
 }
 
@@ -536,6 +1073,7 @@ private struct PDFKitReaderView: NSViewRepresentable {
         context.coordinator.pdfView = pdfView
         context.coordinator.observe(pdfView)
         context.coordinator.load(document: document, in: pdfView)
+        Self.hideScrollbars(in: pdfView)
         return pdfView
     }
 
@@ -552,11 +1090,23 @@ private struct PDFKitReaderView: NSViewRepresentable {
             pdfView.autoScales = false
             pdfView.scaleFactor = zoomScale
         }
+        Self.hideScrollbars(in: pdfView)
     }
 
     static func dismantleNSView(_ pdfView: SelectablePDFView, coordinator: Coordinator) {
         coordinator.stopObserving()
         pdfView.onPageRegion = nil
+    }
+
+    private static func hideScrollbars(in view: NSView) {
+        if let scrollView = view as? NSScrollView {
+            scrollView.hasVerticalScroller = false
+            scrollView.hasHorizontalScroller = false
+            scrollView.autohidesScrollers = true
+        }
+        for subview in view.subviews {
+            hideScrollbars(in: subview)
+        }
     }
 
     @MainActor
@@ -815,6 +1365,7 @@ private struct ImageMaterialReader: View {
                     imageCanvas(image)
                         .padding(28)
                 }
+                .scrollIndicators(.hidden)
                 .background(SNColor.nav)
             } else {
                 ContentUnavailableView(

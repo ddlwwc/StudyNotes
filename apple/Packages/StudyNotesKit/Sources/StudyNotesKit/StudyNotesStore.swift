@@ -805,6 +805,12 @@ public actor StudyNotesStore {
             manifest.updatedAt = Date()
             manifest.contentFingerprint = ContentFingerprint.sha256(text)
             try writeManifest(manifest, to: located.packageURL)
+            try refreshAnnotationStatuses(
+                packageURL: located.packageURL,
+                materialID: id,
+                text: text,
+                kind: manifest.kind
+            )
             return revision
         }
     }
@@ -862,6 +868,12 @@ public actor StudyNotesStore {
             manifest.updatedAt = restoredRevision.createdAt
             manifest.contentFingerprint = ContentFingerprint.sha256(revision.text)
             try writeManifest(manifest, to: located.packageURL)
+            try refreshAnnotationStatuses(
+                packageURL: located.packageURL,
+                materialID: id,
+                text: revision.text,
+                kind: manifest.kind
+            )
             return restoredRevision
         }
     }
@@ -2246,7 +2258,16 @@ public actor StudyNotesStore {
         kind: StudyMaterialKind
     ) -> AnnotationStatus {
         switch annotation.anchor.kind {
-        case .text, .pdfText:
+        case .text:
+            if annotation.anchor.elementType != nil {
+                return ElementAnchorResolver.resolves(annotation.anchor, in: text)
+                    ? .active
+                    : .unresolved
+            }
+            return TextAnchorResolver.range(for: annotation.anchor, in: text) == nil
+                ? .unresolved
+                : .active
+        case .pdfText:
             return TextAnchorResolver.range(for: annotation.anchor, in: text) == nil
                 ? AnnotationStatus.unresolved
                 : AnnotationStatus.active
@@ -2273,11 +2294,43 @@ public actor StudyNotesStore {
         }
     }
 
+    private func refreshAnnotationStatuses(
+        packageURL: URL,
+        materialID: UUID,
+        text: String,
+        kind: StudyMaterialKind
+    ) throws {
+        let annotations = try loadAnnotationFiles(
+            packageURL: packageURL,
+            materialID: materialID
+        )
+        for annotation in annotations {
+            let status = resolvedAnnotationStatus(
+                annotation,
+                text: text,
+                packageURL: packageURL,
+                kind: kind
+            )
+            guard status != annotation.status else {
+                continue
+            }
+            var resolved = annotation
+            resolved.status = status
+            try writeAnnotation(resolved, packageURL: packageURL)
+        }
+    }
+
     private func sameAnchorLocation(
         _ left: AnnotationAnchor,
         _ right: AnnotationAnchor
     ) -> Bool {
-        guard left.kind == right.kind else {
+        guard left.kind == right.kind,
+              left.elementType == right.elementType else {
+            return false
+        }
+        if let leftFingerprint = left.contentFingerprint,
+           let rightFingerprint = right.contentFingerprint,
+           leftFingerprint != rightFingerprint {
             return false
         }
         if let leftRect = left.rect, let rightRect = right.rect {
@@ -2286,6 +2339,20 @@ public actor StudyNotesStore {
                 && abs(leftRect.y - rightRect.y) < 0.005
                 && abs(leftRect.width - rightRect.width) < 0.005
                 && abs(leftRect.height - rightRect.height) < 0.005
+        }
+        if left.elementType != nil {
+            if left.blockPath == right.blockPath {
+                return true
+            }
+            let leftRecovery = left.excerpt.isEmpty
+                ? (left.contentSummary ?? "")
+                : left.excerpt
+            let rightRecovery = right.excerpt.isEmpty
+                ? (right.contentSummary ?? "")
+                : right.excerpt
+            return leftRecovery == rightRecovery
+                && left.prefix == right.prefix
+                && left.suffix == right.suffix
         }
         guard left.excerpt == right.excerpt else {
             return false

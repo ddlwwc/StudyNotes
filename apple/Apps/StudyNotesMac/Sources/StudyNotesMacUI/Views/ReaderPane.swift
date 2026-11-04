@@ -3,20 +3,74 @@ import SwiftUI
 
 struct ReaderPane: View {
     @Bindable var model: WorkspaceModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        VStack(spacing: 0) {
-            if model.isConnected {
-                ReaderTopBar(model: model)
-            }
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                HStack(spacing: 0) {
+                    if model.isReaderOutlineVisible,
+                       !(model.selectedDocument?.headings.isEmpty ?? true) {
+                        ReaderOutlinePane(model: model)
+                            .frame(width: 240)
+                            .transition(.move(edge: .leading).combined(with: .opacity))
+                    }
 
-            Group {
-                if let document = model.selectedDocument {
-                    MaterialReaderView(model: model, document: document)
-                } else {
-                    emptyContent
+                    VStack(spacing: 0) {
+                        if model.isConnected {
+                            ReaderTopBar(model: model)
+                        }
+
+                        Group {
+                            if let document = model.selectedDocument {
+                                MaterialReaderView(model: model, document: document)
+                            } else {
+                                emptyContent
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+
+                if model.isReaderOutlineOverlayPresented {
+                    Color.black.opacity(0.08)
+                        .ignoresSafeArea()
+                        .onTapGesture {
+                            model.closeReaderOutlineOverlay()
+                        }
+
+                    ReaderOutlinePane(model: model, showsCloseButton: true)
+                        .frame(width: 260)
+                        .padding(.top, 52)
+                        .transition(.move(edge: .leading).combined(with: .opacity))
                 }
             }
+            .onAppear {
+                model.updateReaderViewport(
+                    width: proxy.size.width,
+                    height: proxy.size.height
+                )
+            }
+            .onChange(of: proxy.size.width) { _, width in
+                model.updateReaderViewport(
+                    width: width,
+                    height: proxy.size.height
+                )
+            }
+            .onChange(of: proxy.size.height) { _, height in
+                model.updateReaderViewport(
+                    width: proxy.size.width,
+                    height: height
+                )
+            }
+            .animation(
+                reduceMotion ? nil : .easeInOut(duration: 0.18),
+                value: model.isReaderOutlineVisible
+            )
+            .animation(
+                reduceMotion ? nil : .easeInOut(duration: 0.18),
+                value: model.isReaderOutlineOverlayPresented
+            )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(SNColor.white)
@@ -56,14 +110,111 @@ struct ReaderPane: View {
     }
 }
 
+private struct ReaderOutlinePane: View {
+    @Bindable var model: WorkspaceModel
+    var showsCloseButton = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("目录")
+                    .font(.sn(12, weight: .semibold))
+                    .foregroundStyle(SNColor.ink)
+
+                Spacer()
+
+                if showsCloseButton {
+                    Button {
+                        model.closeReaderOutlineOverlay()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .medium))
+                            .frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(SNColor.muted)
+                    .help("关闭目录")
+                }
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 44)
+
+            Rectangle()
+                .fill(SNColor.border)
+                .frame(height: 1)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(model.selectedDocument?.headings ?? []) { heading in
+                        HStack(spacing: 4) {
+                            Button {
+                                model.readerHeadingJumpID = heading.id
+                                model.closeReaderOutlineOverlay()
+                            } label: {
+                                Text(heading.title)
+                                    .font(.sn(11))
+                                    .foregroundStyle(SNColor.text)
+                                    .lineLimit(2)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.leading, CGFloat(max(0, heading.level - 1)) * 12)
+                                    .padding(.vertical, 6)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                model.prepareSectionSummary(heading: heading)
+                                model.closeReaderOutlineOverlay()
+                            } label: {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(SNColor.blue)
+                                    .frame(width: 24, height: 24)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(model.selectedProvider == nil)
+                            .help("总结本节")
+                        }
+                    }
+                }
+                .padding(8)
+            }
+            .scrollIndicators(.hidden)
+        }
+        .frame(maxHeight: .infinity)
+        .background(SNColor.white)
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(SNColor.border)
+                .frame(width: 1)
+        }
+        .shadow(
+            color: showsCloseButton ? Color.black.opacity(0.12) : .clear,
+            radius: 16,
+            x: 8,
+            y: 0
+        )
+    }
+}
+
 private struct ReaderTopBar: View {
     @Bindable var model: WorkspaceModel
-    @State private var showingOutline = false
     @State private var showingSearch = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 8) {
+            ReaderToolButton(
+                title: "材料栏",
+                systemImage: "list.bullet.indent",
+                isEnabled: true,
+                help: model.isMaterialPaneVisible ? "隐藏材料目录栏" : "显示材料目录栏"
+            ) {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                    model.togglePane(.materials)
+                }
+            }
+
             Image(systemName: "books.vertical")
                 .font(.system(size: 12))
                 .foregroundStyle(SNColor.muted)
@@ -72,6 +223,8 @@ private struct ReaderTopBar: View {
                 .font(.sn(11))
                 .foregroundStyle(SNColor.text)
                 .lineLimit(1)
+                .truncationMode(.middle)
+                .layoutPriority(1)
 
             Spacer(minLength: 12)
 
@@ -81,10 +234,9 @@ private struct ReaderTopBar: View {
                 isEnabled: !(model.selectedDocument?.headings.isEmpty ?? true),
                 help: "目录"
             ) {
-                showingOutline.toggle()
-            }
-            .popover(isPresented: $showingOutline, arrowEdge: .bottom) {
-                outlinePopover
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                    model.toggleReaderOutline()
+                }
             }
 
             ReaderToolButton(
@@ -192,55 +344,6 @@ private struct ReaderTopBar: View {
         return model.scopeTitle
     }
 
-    private var outlinePopover: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("目录")
-                .font(.sn(12, weight: .semibold))
-                .foregroundStyle(SNColor.ink)
-                .padding(12)
-
-            Divider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(model.selectedDocument?.headings ?? []) { heading in
-                        HStack(spacing: 4) {
-                            Button {
-                                model.readerHeadingJumpID = heading.id
-                                showingOutline = false
-                            } label: {
-                                Text(heading.title)
-                                    .font(.sn(11))
-                                    .foregroundStyle(SNColor.text)
-                                    .lineLimit(2)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.leading, CGFloat(max(0, heading.level - 1)) * 12)
-                                    .padding(.vertical, 6)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-
-                            Button {
-                                model.prepareSectionSummary(heading: heading)
-                                showingOutline = false
-                            } label: {
-                                Image(systemName: "sparkles")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(SNColor.blue)
-                                    .frame(width: 24, height: 24)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(model.selectedProvider == nil)
-                            .help("总结本节")
-                        }
-                    }
-                }
-                .padding(8)
-            }
-        }
-        .frame(width: 280, height: 340)
-    }
-
     private var searchPopover: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("文内搜索")
@@ -285,6 +388,8 @@ private struct ReaderToolButton: View {
                     .font(.system(size: 11))
                 Text(title)
                     .font(.sn(10))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
             .foregroundStyle(SNColor.text)
             .padding(.horizontal, 6)
@@ -373,6 +478,7 @@ private struct ReaderDocumentView: View {
             .padding(.bottom, 56)
             .frame(maxWidth: .infinity)
         }
+        .scrollIndicators(.hidden)
     }
 
     private var bodyMarkdown: String {
@@ -496,6 +602,7 @@ private struct ReaderWelcomeView: View {
             .padding(.bottom, 56)
             .frame(maxWidth: .infinity)
         }
+        .scrollIndicators(.hidden)
     }
 }
 

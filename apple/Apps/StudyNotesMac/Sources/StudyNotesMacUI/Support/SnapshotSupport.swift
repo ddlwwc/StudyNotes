@@ -3,14 +3,20 @@ import SwiftUI
 public enum SnapshotWorkspaceMode: Equatable {
     case tree
     case searchResults
+    case readerOutline
 }
 
 @MainActor
 public struct SnapshotWorkspaceView: View {
     private let mode: SnapshotWorkspaceMode
+    private let isDarkMode: Bool
 
-    public init(mode: SnapshotWorkspaceMode = .tree) {
+    public init(
+        mode: SnapshotWorkspaceMode = .tree,
+        isDarkMode: Bool = false
+    ) {
         self.mode = mode
+        self.isDarkMode = isDarkMode
     }
 
     public var body: some View {
@@ -20,8 +26,15 @@ public struct SnapshotWorkspaceView: View {
                 SnapshotSidebar()
                     .frame(width: SNMetric.sidebarWidth)
 
-                SnapshotMaterialList(mode: mode)
-                    .frame(width: SNMetric.materialListWidth)
+                if mode != .readerOutline {
+                    SnapshotMaterialList(mode: mode)
+                        .frame(width: SNMetric.materialListWidth)
+                }
+
+                if mode == .readerOutline {
+                    SnapshotOutline()
+                        .frame(width: 240)
+                }
 
                 SnapshotReader()
                     .frame(minWidth: 460, maxWidth: .infinity)
@@ -32,7 +45,8 @@ public struct SnapshotWorkspaceView: View {
         }
         .frame(width: 1_440, height: 1_024)
         .background(SNColor.white)
-        .preferredColorScheme(.light)
+        .environment(\.colorScheme, isDarkMode ? .dark : .light)
+        .preferredColorScheme(isDarkMode ? .dark : .light)
     }
 }
 
@@ -488,10 +502,62 @@ private struct SnapshotTreeMaterialRow: View {
     }
 }
 
+private struct SnapshotOutline: View {
+    private let headings = [
+        ("认知负荷理论与学习设计", 1),
+        ("三种认知负荷", 2),
+        ("负荷类型与设计动作", 2),
+        ("本节要点", 2),
+        ("进一步核对", 2)
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("目录")
+                .font(.sn(12, weight: .semibold))
+                .foregroundStyle(SNColor.ink)
+                .padding(.horizontal, 14)
+                .frame(height: 44)
+
+            Rectangle()
+                .fill(SNColor.border)
+                .frame(height: 1)
+
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(Array(headings.enumerated()), id: \.offset) { index, item in
+                    HStack(spacing: 4) {
+                        Text(item.0)
+                            .font(.sn(11, weight: index == 0 ? .medium : .regular))
+                            .foregroundStyle(index == 0 ? SNColor.ink : SNColor.text)
+                            .lineLimit(2)
+                            .padding(.leading, CGFloat(item.1 - 1) * 12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 10))
+                            .foregroundStyle(SNColor.blue.opacity(0.75))
+                    }
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 32)
+                }
+            }
+            .padding(.top, 8)
+
+            Spacer()
+        }
+        .background(SNColor.white)
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(SNColor.border)
+                .frame(width: 1)
+        }
+    }
+}
+
 private struct SnapshotReader: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
+                SnapshotReaderTool(title: "材料栏", systemImage: "list.bullet.indent")
                 Image(systemName: "books.vertical")
                     .font(.system(size: 12))
                     .foregroundStyle(SNColor.muted)
@@ -576,9 +642,6 @@ private struct SnapshotStudyPanel: View {
                     .font(.sn(15, weight: .semibold))
                     .foregroundStyle(SNColor.ink)
                 Spacer()
-                Image(systemName: "sidebar.right")
-                    .font(.system(size: 13))
-                    .foregroundStyle(SNColor.muted)
             }
             .padding(.horizontal, 14)
             .frame(height: 52)
@@ -720,12 +783,7 @@ private struct SnapshotStudyPanel: View {
 
             Spacer(minLength: 0)
         }
-        .background(SNColor.panel)
-        .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(SNColor.border)
-                .frame(width: 1)
-        }
+        .background(SNColor.white)
     }
 }
 
@@ -738,6 +796,12 @@ private enum SampleSnapshotContent {
     - **内在负荷**：来自材料本身的复杂性。
     - **外在负荷**：由不恰当的呈现方式产生。
     - **生成性负荷**：用于图式建构和迁移。
+
+    | 负荷类型 | 主要来源 | 设计动作 |
+    | :--- | :--- | ---: |
+    | 内在负荷 | 材料复杂度 | 分段 |
+    | 外在负荷 | 呈现方式 | 降噪 |
+    | 生成性负荷 | 学习活动 | 反馈 |
 
     > 有效设计应降低无关负荷，并为生成性加工留出空间。
 
