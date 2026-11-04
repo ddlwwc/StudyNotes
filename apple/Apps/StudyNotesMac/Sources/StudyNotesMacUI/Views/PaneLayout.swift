@@ -12,16 +12,17 @@ struct WorkspacePaneDivider: View {
 
     @State private var dragStartWidth: Double?
     @State private var isHovering = false
+    @State private var isDragging = false
 
     var body: some View {
-        Rectangle()
-            .fill(SNColor.border)
+        ZStack {
+            Color.clear
+
+            Rectangle()
+                .fill(isHovering || isDragging ? SNColor.blueLine : Color.clear)
+                .frame(width: 1)
+        }
             .frame(width: 7)
-            .overlay {
-                Rectangle()
-                    .fill(isHovering ? SNColor.blueLine : SNColor.border)
-                    .frame(width: 1)
-            }
             .contentShape(Rectangle())
             .onHover { hovering in
                 isHovering = hovering
@@ -34,6 +35,7 @@ struct WorkspacePaneDivider: View {
             .gesture(
                 DragGesture(minimumDistance: 2)
                     .onChanged { value in
+                        isDragging = true
                         if dragStartWidth == nil {
                             dragStartWidth = width
                         }
@@ -42,6 +44,7 @@ struct WorkspacePaneDivider: View {
                         onChange(min(max(next, range.lowerBound), range.upperBound))
                     }
                     .onEnded { _ in
+                        isDragging = false
                         dragStartWidth = nil
                     }
             )

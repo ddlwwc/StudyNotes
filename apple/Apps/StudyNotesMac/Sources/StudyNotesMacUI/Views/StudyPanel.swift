@@ -3,7 +3,6 @@ import StudyNotesKit
 
 struct StudyPanel: View {
     @Bindable var model: WorkspaceModel
-    @Environment(\.openSettings) private var openSettings
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var followUpPrompt = ""
     @State private var conversationToRename: AIConversation?
@@ -85,11 +84,6 @@ struct StudyPanel: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(SNColor.panel)
-        .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(SNColor.border)
-                .frame(width: 1)
-        }
         .alert("重命名 AI 研读会话", isPresented: $isRenamingConversation) {
             TextField("会话名称", text: $conversationName)
             Button("取消", role: .cancel) {}
@@ -360,8 +354,9 @@ struct StudyPanel: View {
     }
 
     private func openAISettings() {
-        model.settingsPage = .ai
-        openSettings()
+        Task {
+            await model.openSettings(page: .ai)
+        }
     }
 }
 
