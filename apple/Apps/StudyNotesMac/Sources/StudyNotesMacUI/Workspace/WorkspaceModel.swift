@@ -8,6 +8,21 @@ public enum WorkspaceEditorExportFormat: String, Sendable {
     case package
 }
 
+public enum AIProviderSettingsTransition: Equatable, Sendable {
+    case editProvider(UUID)
+    case newProvider
+    case settingsPage(WorkspaceSettingsPage)
+    case returnToWorkspace
+    case workspaceCollection(WorkspaceCollection)
+}
+
+private struct AIProviderDraft: Equatable {
+    var name = ""
+    var baseURLText = "https://api.openai.com/v1"
+    var model = ""
+    var apiKey = ""
+}
+
 @MainActor
 @Observable
 public final class WorkspaceModel {
@@ -74,7 +89,15 @@ public final class WorkspaceModel {
     public var isShowingLinkMaterials = false
     public var isShowingPublishPreview = false
     public var annotationDraftRequest: AnnotationDraftRequest?
-    public var selectedProviderID: UUID?
+    public private(set) var defaultProviderID: UUID?
+    public private(set) var providerEditingID: UUID?
+    public private(set) var isCreatingAIProviderDraft = false
+    public var providerDraftName = ""
+    public var providerDraftBaseURLText = "https://api.openai.com/v1"
+    public var providerDraftModel = ""
+    public var providerDraftAPIKey = ""
+    public private(set) var pendingAIProviderTransition:
+        AIProviderSettingsTransition?
     public var aiPromptText = ""
     public var readerSelection: ReaderSelection?
     public var annotationJumpID: UUID?
@@ -116,6 +139,8 @@ public final class WorkspaceModel {
     )
     @ObservationIgnored private let devicePreferences: DevicePreferencesStore
     @ObservationIgnored private let appSettingsStore: AppSettingsStore
+    @ObservationIgnored private let aiProviderSettingsStore:
+        AIProviderSettingsStore
     @ObservationIgnored private let treeExpansionStore:
         WorkspaceTreeExpansionStore
     @ObservationIgnored private let aiClient: OpenAICompatibleClient
@@ -128,6 +153,7 @@ public final class WorkspaceModel {
     @ObservationIgnored private var treeSelectionAnchorID: UUID?
     @ObservationIgnored private var pendingEditorRecovery:
         EditorDocumentTransaction?
+    private var providerDraftBaseline = AIProviderDraft()
 
     public init(
         rootStore: WorkspaceRootStore = WorkspaceRootStore(),
@@ -137,6 +163,7 @@ public final class WorkspaceModel {
         ),
         devicePreferences: DevicePreferencesStore = DevicePreferencesStore(),
         appSettingsStore: AppSettingsStore = AppSettingsStore(),
+        providerUserDefaults: UserDefaults = .standard,
         treeExpansionStore: WorkspaceTreeExpansionStore =
             WorkspaceTreeExpansionStore(),
         aiClient: OpenAICompatibleClient = OpenAICompatibleClient(),
@@ -167,13 +194,22 @@ public final class WorkspaceModel {
         }
         self.devicePreferences = devicePreferences
         self.appSettingsStore = appSettingsStore
+        let providerSettingsStore = AIProviderSettingsStore(
+            userDefaults: providerUserDefaults
+        )
+        aiProviderSettingsStore = providerSettingsStore
         self.treeExpansionStore = treeExpansionStore
         self.aiClient = aiClient
         self.webArticleFetcher = webArticleFetcher
         workspacePreferences = devicePreferences.loadWorkspacePreferences()
         readingPreferences = devicePreferences.loadReadingPreferences()
-        providerProfiles = AIProviderSettingsStore.load()
-        selectedProviderID = providerProfiles.first?.id
+        providerProfiles = providerSettingsStore.load().sorted {
+            $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+        defaultProviderID = appSettingsStore.load().defaultAIProviderID
+        repairDefaultAIProviderIfNeeded()
+        providerEditingID = defaultProviderID
+        revealAIProviderDraft(for: defaultProviderID)
         mediaNetworkMonitor.pathUpdateHandler = { [weak self] path in
             guard path.status == .satisfied else {
                 return
@@ -348,10 +384,14 @@ public final class WorkspaceModel {
     }
 
     public var selectedProvider: AIProviderProfile? {
-        guard let selectedProviderID else {
-            return providerProfiles.first
+        guard let defaultProviderID else {
+            return nil
         }
-        return providerProfiles.first { $0.id == selectedProviderID }
+        return providerProfiles.first { $0.id == defaultProviderID }
+    }
+
+    public var hasUnsavedAIProviderChanges: Bool {
+        currentAIProviderDraft != providerDraftBaseline
     }
 
     public var activeConversation: AIConversation? {
@@ -688,6 +728,9 @@ public final class WorkspaceModel {
     public func openSettings(
         page: WorkspaceSettingsPage = .workspace
     ) async -> Bool {
+        if isShowingSettings {
+            return requestSettingsPage(page)
+        }
         if !isShowingSettings {
             guard await flushMarkdownEditorBeforeNavigation() else {
                 return false
@@ -702,6 +745,56 @@ public final class WorkspaceModel {
         isShowingSettings = false
     }
 
+    @discardableResult
+    public func requestReturnToWorkspace() -> Bool {
+        requestAIProviderTransition(.returnToWorkspace)
+    }
+
+    @discardableResult
+    public func requestSettingsPage(_ page: WorkspaceSettingsPage) -> Bool {
+        guard page != settingsPage else {
+            return true
+        }
+        return requestAIProviderTransition(.settingsPage(page))
+    }
+
+    @discardableResult
+    public func requestEditProvider(_ id: UUID) -> Bool {
+        requestAIProviderTransition(.editProvider(id))
+    }
+
+    @discardableResult
+    public func requestNewAIProviderDraft() -> Bool {
+        requestAIProviderTransition(.newProvider)
+    }
+
+    public func cancelPendingAIProviderTransition() {
+        pendingAIProviderTransition = nil
+    }
+
+    @discardableResult
+    public func saveAIProviderDraftAndContinue() -> Bool {
+        guard let transition = pendingAIProviderTransition else {
+            return false
+        }
+        guard saveAIProviderDraft() else {
+            pendingAIProviderTransition = nil
+            return false
+        }
+        pendingAIProviderTransition = nil
+        performAIProviderTransition(transition)
+        return true
+    }
+
+    public func discardAIProviderDraftAndContinue() {
+        guard let transition = pendingAIProviderTransition else {
+            return
+        }
+        pendingAIProviderTransition = nil
+        discardAIProviderDraft()
+        performAIProviderTransition(transition)
+    }
+
     public func selectCollection(_ collection: WorkspaceCollection) async {
         guard !isLoadingIndex else {
             return
@@ -713,6 +806,17 @@ public final class WorkspaceModel {
         guard await flushMarkdownEditorBeforeNavigation() else {
             return
         }
+        if isShowingSettings,
+           settingsPage == .ai,
+           hasUnsavedAIProviderChanges {
+            pendingAIProviderTransition = .workspaceCollection(collection)
+            return
+        }
+        resetWorkspace(for: collection)
+        await selectFirstMaterialIfAvailable()
+    }
+
+    private func resetWorkspace(for collection: WorkspaceCollection) {
         returnToWorkspace()
         invalidateNoteLoad()
         selectedCollection = collection
@@ -726,7 +830,6 @@ public final class WorkspaceModel {
         readerSelection = nil
         searchHits = []
         searchHitsQuery = ""
-        await selectFirstMaterialIfAvailable()
     }
 
     public func selectKnowledgeBase(_ id: UUID?) async {
@@ -2811,7 +2914,8 @@ public final class WorkspaceModel {
               let baseURL = URL(
                   string: baseURLText.trimmingCharacters(in: .whitespacesAndNewlines)
               ),
-              ["http", "https"].contains(baseURL.scheme?.lowercased() ?? "") else {
+              ["http", "https"].contains(baseURL.scheme?.lowercased() ?? ""),
+              baseURL.host?.isEmpty == false else {
             errorMessage = "请填写供应商名称、有效的 HTTP(S) 基础地址和模型标识。"
             return false
         }
@@ -2838,8 +2942,10 @@ public final class WorkspaceModel {
                 $0.name.localizedStandardCompare($1.name) == .orderedAscending
             }
             providerProfiles = updated
-            selectedProviderID = profile.id
-            AIProviderSettingsStore.save(updated)
+            providerEditingID = profile.id
+            repairDefaultAIProviderIfNeeded()
+            aiProviderSettingsStore.save(updated)
+            revealAIProviderDraft(for: profile.id)
             actionNotice = "已保存 AI 供应商“\(profile.name)”"
             return true
         } catch {
@@ -2853,17 +2959,160 @@ public final class WorkspaceModel {
             try secretStore.delete(account: profile.keychainAccount)
         } catch {
             present(error)
+            return
         }
         providerProfiles.removeAll { $0.id == profile.id }
-        AIProviderSettingsStore.save(providerProfiles)
-        if selectedProviderID == profile.id {
-            selectedProviderID = providerProfiles.first?.id
+        aiProviderSettingsStore.save(providerProfiles)
+        repairDefaultAIProviderIfNeeded()
+        if providerEditingID == profile.id {
+            revealAIProviderDraft(for: defaultProviderID)
         }
         actionNotice = "已删除 AI 供应商“\(profile.name)”"
     }
 
+    @discardableResult
+    public func setDefaultAIProvider(_ id: UUID) -> Bool {
+        guard providerProfiles.contains(where: { $0.id == id }) else {
+            return false
+        }
+        defaultProviderID = id
+        try? appSettingsStore.update {
+            $0.defaultAIProviderID = id
+        }
+        return true
+    }
+
+    public func selectProviderForEditing(_ id: UUID?) {
+        guard let id else {
+            beginNewAIProviderDraft()
+            return
+        }
+        guard let profile = providerProfiles.first(where: { $0.id == id }) else {
+            return
+        }
+        applyAIProviderDraft(profile)
+    }
+
+    public func beginNewAIProviderDraft() {
+        revealAIProviderDraft(for: nil, isNew: true)
+    }
+
+    public func discardAIProviderDraft() {
+        revealAIProviderDraft(
+            for: providerEditingID,
+            isNew: isCreatingAIProviderDraft
+        )
+    }
+
+    @discardableResult
+    public func saveAIProviderDraft() -> Bool {
+        saveProviderProfile(
+            id: providerEditingID,
+            name: providerDraftName,
+            baseURLText: providerDraftBaseURLText,
+            model: providerDraftModel,
+            apiKey: providerDraftAPIKey
+        )
+    }
+
+    @discardableResult
+    public func clearProviderAPIKey(_ profile: AIProviderProfile) -> Bool {
+        do {
+            try secretStore.delete(account: profile.keychainAccount)
+            actionNotice = "已清除 AI 供应商“\(profile.name)”的 API Key"
+            return true
+        } catch {
+            present(error)
+            return false
+        }
+    }
+
     public func hasAPIKey(for profile: AIProviderProfile) -> Bool {
         ((try? secretStore.load(account: profile.keychainAccount)) ?? nil)?.isEmpty == false
+    }
+
+    private var currentAIProviderDraft: AIProviderDraft {
+        AIProviderDraft(
+            name: providerDraftName,
+            baseURLText: providerDraftBaseURLText,
+            model: providerDraftModel,
+            apiKey: providerDraftAPIKey
+        )
+    }
+
+    private func revealAIProviderDraft(
+        for id: UUID?,
+        isNew: Bool = false
+    ) {
+        if let id,
+           let profile = providerProfiles.first(where: { $0.id == id }) {
+            applyAIProviderDraft(profile)
+        } else {
+            providerEditingID = nil
+            isCreatingAIProviderDraft = isNew
+            providerDraftName = ""
+            providerDraftBaseURLText = "https://api.openai.com/v1"
+            providerDraftModel = ""
+            providerDraftAPIKey = ""
+            providerDraftBaseline = currentAIProviderDraft
+        }
+    }
+
+    private func applyAIProviderDraft(_ profile: AIProviderProfile) {
+        providerEditingID = profile.id
+        isCreatingAIProviderDraft = false
+        providerDraftName = profile.name
+        providerDraftBaseURLText = profile.baseURL.absoluteString
+        providerDraftModel = profile.model
+        providerDraftAPIKey = ""
+        providerDraftBaseline = currentAIProviderDraft
+    }
+
+    private func repairDefaultAIProviderIfNeeded() {
+        let candidate = defaultProviderID.flatMap { id in
+            providerProfiles.contains(where: { $0.id == id }) ? id : nil
+        } ?? providerProfiles.first?.id
+        defaultProviderID = candidate
+        guard appSettingsStore.load().defaultAIProviderID != candidate else {
+            return
+        }
+        try? appSettingsStore.update {
+            $0.defaultAIProviderID = candidate
+        }
+    }
+
+    @discardableResult
+    private func requestAIProviderTransition(
+        _ transition: AIProviderSettingsTransition
+    ) -> Bool {
+        guard isShowingSettings,
+              settingsPage == .ai,
+              hasUnsavedAIProviderChanges else {
+            performAIProviderTransition(transition)
+            return true
+        }
+        pendingAIProviderTransition = transition
+        return false
+    }
+
+    private func performAIProviderTransition(
+        _ transition: AIProviderSettingsTransition
+    ) {
+        switch transition {
+        case let .editProvider(id):
+            selectProviderForEditing(id)
+        case .newProvider:
+            beginNewAIProviderDraft()
+        case let .settingsPage(page):
+            settingsPage = page
+        case .returnToWorkspace:
+            isShowingSettings = false
+        case let .workspaceCollection(collection):
+            resetWorkspace(for: collection)
+            Task { @MainActor [weak self] in
+                await self?.selectFirstMaterialIfAvailable()
+            }
+        }
     }
 
     public func prepareSelectionExplanation() {

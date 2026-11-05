@@ -1,3 +1,4 @@
+import StudyNotesKit
 import SwiftUI
 
 public enum SnapshotWorkspaceMode: Equatable {
@@ -8,24 +9,39 @@ public enum SnapshotWorkspaceMode: Equatable {
     case readerAnnotations
     case settings
     case compactSettings
+    case aiSettings
+    case compactAISettings
+    case emptyAISettings
+    case compactEmptyAISettings
 
     var isShowingSettings: Bool {
-        self == .settings || self == .compactSettings
+        self == .settings
+            || self == .compactSettings
+            || isShowingAISettings
+    }
+
+    var isShowingAISettings: Bool {
+        self == .aiSettings
+            || self == .compactAISettings
+            || self == .emptyAISettings
+            || self == .compactEmptyAISettings
+    }
+
+    var isShowingEmptyAISettings: Bool {
+        self == .emptyAISettings || self == .compactEmptyAISettings
     }
 
     public var canvasSize: CGSize {
         switch self {
-        case .compactSettings:
+        case .compactSettings, .compactAISettings, .compactEmptyAISettings,
+             .readerOutlineOverlay:
             CGSize(
                 width: SNMetric.minimumWindowWidth,
                 height: SNMetric.minimumWindowHeight
             )
-        case .readerOutlineOverlay:
-            CGSize(
-                width: SNMetric.minimumWindowWidth,
-                height: SNMetric.minimumWindowHeight
-            )
-        case .tree, .searchResults, .readerOutline, .readerAnnotations, .settings:
+        case .tree, .searchResults, .readerOutline, .readerAnnotations,
+             .settings,
+             .aiSettings, .emptyAISettings:
             CGSize(width: 1_440, height: 1_024)
         }
     }
@@ -35,7 +51,7 @@ public enum SnapshotWorkspaceMode: Equatable {
 public struct SnapshotWorkspaceView: View {
     private let mode: SnapshotWorkspaceMode
     private let isDarkMode: Bool
-    @State private var model = WorkspaceModel()
+    @State private var model: WorkspaceModel
 
     public init(
         mode: SnapshotWorkspaceMode = .tree,
@@ -43,6 +59,9 @@ public struct SnapshotWorkspaceView: View {
     ) {
         self.mode = mode
         self.isDarkMode = isDarkMode
+        _model = State(
+            initialValue: SnapshotWorkspaceFixture.makeModel(mode: mode)
+        )
     }
 
     public var body: some View {
@@ -93,6 +112,106 @@ public struct SnapshotWorkspaceView: View {
 
 #Preview("知识库工作台") {
     SnapshotWorkspaceView()
+}
+
+@MainActor
+private enum SnapshotWorkspaceFixture {
+    private static let alphaID = UUID(
+        uuidString: "00000000-0000-4000-8000-000000000059"
+    )!
+    private static let betaID = UUID(
+        uuidString: "00000000-0000-4000-8000-000000000060"
+    )!
+
+    static func makeModel(mode: SnapshotWorkspaceMode) -> WorkspaceModel {
+        let suiteName = "StudyNotesMacSnapshot.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        let appSettingsStore = AppSettingsStore(userDefaults: defaults)
+        let secretStore = SnapshotMemorySecretStore()
+
+        if mode.isShowingAISettings {
+            configureAIProfiles(
+                defaults: defaults,
+                appSettingsStore: appSettingsStore,
+                secretStore: secretStore,
+                includesProfiles: !mode.isShowingEmptyAISettings
+            )
+        }
+
+        let model = WorkspaceModel(
+            rootStore: WorkspaceRootStore(userDefaults: defaults),
+            secretStore: secretStore,
+            mediaSecretStore: SnapshotMemorySecretStore(),
+            devicePreferences: DevicePreferencesStore(userDefaults: defaults),
+            appSettingsStore: appSettingsStore,
+            providerUserDefaults: defaults,
+            treeExpansionStore: WorkspaceTreeExpansionStore(
+                userDefaults: defaults
+            )
+        )
+        if mode.isShowingAISettings {
+            model.settingsPage = .ai
+        }
+        return model
+    }
+
+    private static func configureAIProfiles(
+        defaults: UserDefaults,
+        appSettingsStore: AppSettingsStore,
+        secretStore: SnapshotMemorySecretStore,
+        includesProfiles: Bool
+    ) {
+        guard includesProfiles else {
+            try? appSettingsStore.save(AppSettings())
+            return
+        }
+
+        let alpha = AIProviderProfile(
+            id: alphaID,
+            name: "Alpha Cloud",
+            baseURL: URL(string: "https://api.alpha.example/v1")!,
+            model: "alpha-chat",
+            keychainAccount: "snapshot.alpha"
+        )
+        let beta = AIProviderProfile(
+            id: betaID,
+            name: "Beta Local",
+            baseURL: URL(string: "http://127.0.0.1:11434/v1")!,
+            model: "beta-chat",
+            keychainAccount: "snapshot.beta"
+        )
+
+        AIProviderSettingsStore(userDefaults: defaults).save([beta, alpha])
+        try? appSettingsStore.save(AppSettings(defaultAIProviderID: alpha.id))
+        try? secretStore.save(
+            "snapshot-placeholder-key",
+            account: alpha.keychainAccount
+        )
+    }
+}
+
+private final class SnapshotMemorySecretStore: SecretStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: String] = [:]
+
+    func save(_ secret: String, account: String) throws {
+        lock.withLock {
+            values[account] = secret
+        }
+    }
+
+    func load(account: String) throws -> String? {
+        lock.withLock {
+            values[account]
+        }
+    }
+
+    func delete(account: String) throws {
+        lock.withLock {
+            _ = values.removeValue(forKey: account)
+        }
+    }
 }
 
 private struct SnapshotSidebar: View {
