@@ -55,7 +55,7 @@ struct MarkdownEditorBridgeTests {
                 ],
                 blocks: [block]
             ),
-            .blockInsertRequested(block),
+            .blockInsertRequested(block, anchorText: "段落"),
             .blockUpdateRequested(block),
             .blockRemoveRequested(block.id),
             .markdownChanged("# 新标题\n\n正文"),

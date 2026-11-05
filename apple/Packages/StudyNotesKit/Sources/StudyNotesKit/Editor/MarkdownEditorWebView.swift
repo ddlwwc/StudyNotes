@@ -799,7 +799,15 @@ private final class MarkdownEditorWebCoordinator:
         refreshFrame = requestAnimationFrame(refreshAnnotations);
       };
 
-      const selectionPayload = () => {
+      const fingerprintText = async text => {
+        const bytes = new TextEncoder().encode(text);
+        const digest = await crypto.subtle.digest("SHA-256", bytes);
+        return Array.from(new Uint8Array(digest))
+          .map(value => value.toString(16).padStart(2, "0"))
+          .join("");
+      };
+
+      const selectionPayload = async () => {
         const selection = window.getSelection();
         if (!selection?.rangeCount || selection.isCollapsed) return null;
         const range = selection.getRangeAt(0);
@@ -810,6 +818,11 @@ private final class MarkdownEditorWebCoordinator:
         const quote = normalize(range.toString());
         if (!quote) return null;
         const block = blockFor(range.startContainer);
+        const selectionElementType = block?.matches("img")
+          ? "image"
+          : block?.matches("table")
+          ? "table"
+          : null;
         const blockText = normalize(
           block?.innerText || block?.textContent || editorRoot.innerText
         );
@@ -831,15 +844,15 @@ private final class MarkdownEditorWebCoordinator:
           suffix,
           offset,
           blockPath: blockPathFor(block),
-          elementType: elementTypeFor(block),
-          contentFingerprint: quote,
+          elementType: selectionElementType,
+          contentFingerprint: await fingerprintText(blockText),
           viewportY: Number.isFinite(rect.top) ? rect.top : null
         };
       };
 
-      const reportSelection = () => {
+      const reportSelection = async () => {
         if (state.mode !== 'annotate') return;
-        const selection = selectionPayload();
+        const selection = await selectionPayload();
         const signature = JSON.stringify(selection);
         if (signature === lastSelectionSignature) return;
         lastSelectionSignature = signature;
@@ -1772,7 +1785,18 @@ private final class MarkdownEditorWebCoordinator:
           fallback: fallbackForBlock(type, data),
           data
         };
-        post({ type: "blockInsertRequested", block });
+        const anchorNode = editor?.view.domAtPos(
+          slashPosition ?? editor?.state.selection.from ?? 0
+        ).node;
+        const anchorElement = blockFor(anchorNode);
+        const anchorText = normalize(
+          anchorElement?.innerText || anchorElement?.textContent || ""
+        );
+        post({
+          type: "blockInsertRequested",
+          block,
+          anchorText: anchorText || null
+        });
         showEditorStatus(`${factory.label}已插入，正在保存到旁路数据。`);
       };
 

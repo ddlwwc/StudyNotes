@@ -2554,8 +2554,11 @@ public final class WorkspaceModel {
                     materialID: document.id,
                     title: document.summary.title,
                     markdown: document.markdown,
-                    fingerprint: ContentFingerprint.sha256(document.markdown),
-                    compatibilityBlocks: decoded.compatibilityBlocks
+                    fingerprint: document.contentFingerprint
+                        ?? ContentFingerprint.sha256(document.markdown),
+                    compatibilityBlocks: decoded.compatibilityBlocks,
+                    isLocked: document.isLocked,
+                    blocks: document.blocks
                 )
             )
             selectedDocument = document

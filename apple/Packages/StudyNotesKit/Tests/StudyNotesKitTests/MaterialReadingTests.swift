@@ -323,6 +323,18 @@ struct MaterialReadingTests {
 
         _ = try await store.saveReaderCopy(
             id: note.summary.id,
+            text: "新增开头。\n\n工作记忆有限。有效设计应降低无关负荷，并留出生成性加工空间。"
+        )
+        let refreshed = try #require(
+            try await store.loadAnnotations(materialID: note.summary.id).first
+        )
+        #expect(refreshed.status == .active)
+        #expect(refreshed.anchor.offset == 14)
+        #expect(refreshed.anchor.blockPath == [1])
+        #expect(refreshed.anchor.contentSummary == anchor.excerpt)
+
+        _ = try await store.saveReaderCopy(
+            id: note.summary.id,
             text: "内容已经完全不同。"
         )
         let unresolved = try #require(

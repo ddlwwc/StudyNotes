@@ -187,8 +187,8 @@ public final class MarkdownEditorSession {
             self.title = title
             self.compatibilityBlocks = compatibilityBlocks
             self.blocks = blocks
-        case let .blockInsertRequested(block):
-            insertBlock(block)
+        case let .blockInsertRequested(block, anchorText):
+            insertBlock(block, afterText: anchorText)
         case let .blockUpdateRequested(block):
             updateBlock(block)
         case let .blockRemoveRequested(blockID):
@@ -503,14 +503,20 @@ public final class MarkdownEditorSession {
         Task { await reduce(.contentChanged) }
     }
 
-    public func insertBlock(_ block: EditorDocumentBlockEnvelope) {
+    public func insertBlock(
+        _ block: EditorDocumentBlockEnvelope,
+        afterText anchorText: String? = nil
+    ) {
         do {
             try block.validate()
             guard !blocks.contains(where: { $0.id == block.id }) else {
                 throw EditorBlockError.duplicateBlockID(block.id)
             }
             blocks.append(block)
-            appendToMarkdown(Self.markdown(for: block))
+            insertMarkdown(
+                Self.markdown(for: block),
+                afterText: anchorText
+            )
             sendLoadedDocument()
             Task { await reduce(.contentChanged) }
         } catch {
@@ -579,6 +585,30 @@ public final class MarkdownEditorSession {
         if !markdown.hasSuffix("\n") {
             markdown += "\n"
         }
+    }
+
+    private func insertMarkdown(
+        _ value: String,
+        afterText anchorText: String?
+    ) {
+        let normalizedAnchor = anchorText?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        if let normalizedAnchor, !normalizedAnchor.isEmpty,
+           let anchorRange = markdown.range(of: normalizedAnchor) {
+            let insertionPoint = paragraphEnd(after: anchorRange.upperBound)
+            let separator = insertionPoint == markdown.endIndex ? "\n\n" : "\n"
+            markdown.insert(contentsOf: separator + value, at: insertionPoint)
+            return
+        }
+        appendToMarkdown(value)
+    }
+
+    private func paragraphEnd(after start: String.Index) -> String.Index {
+        if let boundary = markdown[start...].range(of: "\n\n")?.lowerBound {
+            return boundary
+        }
+        return markdown.endIndex
     }
 
     private func normalizeBlockSpacing() {

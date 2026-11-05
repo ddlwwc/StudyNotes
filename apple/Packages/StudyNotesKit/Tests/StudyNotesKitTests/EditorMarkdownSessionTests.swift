@@ -233,6 +233,38 @@ struct MarkdownEditorSessionTests {
         #expect(!session.markdown.contains("studynotes:block"))
     }
 
+    @Test("structured blocks insert after the active Markdown block")
+    func structuredBlockInsertionAnchor() throws {
+        let session = MarkdownEditorSession(
+            snapshot: snapshot(
+                title: "Blocks",
+                markdown: "# Blocks\n\nbefore\n\nafter"
+            )
+        ) { request in
+            .saved(
+                title: request.title,
+                markdown: request.markdown,
+                fingerprint: request.expectedFingerprint
+            )
+        }
+        let block = EditorDocumentBlockEnvelope(
+            id: UUID(),
+            type: "formula",
+            fallback: "x = 1",
+            data: .object(["latex": .string("x = 1")])
+        )
+
+        session.insertBlock(block, afterText: "before")
+
+        let marker = try #require(
+            session.markdown.range(of: "<!-- studynotes:block")
+        )
+        let before = try #require(session.markdown.range(of: "before"))
+        let after = try #require(session.markdown.range(of: "after"))
+        #expect(before.lowerBound < marker.lowerBound)
+        #expect(marker.lowerBound < after.lowerBound)
+    }
+
     @Test("runtime block messages use the session block lifecycle")
     func runtimeBlockMessages() {
         let session = MarkdownEditorSession(
@@ -254,7 +286,7 @@ struct MarkdownEditorSessionTests {
             ])
         )
 
-        session.receive(.blockInsertRequested(original))
+        session.receive(.blockInsertRequested(original, anchorText: nil))
         #expect(session.blocks == [original])
         #expect(session.markdown.contains("type=\"mermaid\""))
 

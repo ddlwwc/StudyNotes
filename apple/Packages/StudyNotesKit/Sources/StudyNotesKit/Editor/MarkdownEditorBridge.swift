@@ -87,7 +87,10 @@ public enum MarkdownEditorBridgeMessage: Equatable, Sendable {
         compatibilityBlocks: [MarkdownCompatibilityBlock],
         blocks: [EditorDocumentBlockEnvelope]
     )
-    case blockInsertRequested(EditorDocumentBlockEnvelope)
+    case blockInsertRequested(
+        EditorDocumentBlockEnvelope,
+        anchorText: String?
+    )
     case blockUpdateRequested(EditorDocumentBlockEnvelope)
     case blockRemoveRequested(UUID)
     case markdownChanged(String)
@@ -151,6 +154,7 @@ extension MarkdownEditorBridgeMessage: Codable {
         case blocks
         case block
         case blockID
+        case anchorText
         case sourceMode
         case command
         case attachmentKind
@@ -189,6 +193,10 @@ extension MarkdownEditorBridgeMessage: Codable {
                 try container.decode(
                     EditorDocumentBlockEnvelope.self,
                     forKey: .block
+                ),
+                anchorText: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .anchorText
                 )
             )
         case .blockUpdateRequested:
@@ -317,9 +325,10 @@ extension MarkdownEditorBridgeMessage: Codable {
                 forKey: .compatibilityBlocks
             )
             try container.encode(blocks, forKey: .blocks)
-        case .blockInsertRequested(let block):
+        case .blockInsertRequested(let block, let anchorText):
             try container.encode(Kind.blockInsertRequested, forKey: .type)
             try container.encode(block, forKey: .block)
+            try container.encodeIfPresent(anchorText, forKey: .anchorText)
         case .blockUpdateRequested(let block):
             try container.encode(Kind.blockUpdateRequested, forKey: .type)
             try container.encode(block, forKey: .block)

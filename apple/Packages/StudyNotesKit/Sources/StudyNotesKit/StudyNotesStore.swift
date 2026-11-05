@@ -2930,19 +2930,101 @@ public actor StudyNotesStore {
             materialID: materialID
         )
         for annotation in annotations {
-            let status = resolvedAnnotationStatus(
+            var resolved = annotation
+            resolved.status = resolvedAnnotationStatus(
                 annotation,
                 text: text,
                 packageURL: packageURL,
                 kind: kind
             )
-            guard status != annotation.status else {
+            if annotation.anchor.kind == .text,
+               annotation.anchor.elementType == nil,
+               let range = TextAnchorResolver.range(
+                   for: annotation.anchor,
+                   in: text
+               ) {
+                resolved.anchor = refreshedTextAnchor(
+                    annotation.anchor,
+                    range: range,
+                    text: text
+                )
+            }
+            guard resolved.status != annotation.status
+                    || resolved.anchor != annotation.anchor else {
                 continue
             }
-            var resolved = annotation
-            resolved.status = status
+            resolved.updatedAt = Date()
             try writeAnnotation(resolved, packageURL: packageURL)
         }
+    }
+
+    private func refreshedTextAnchor(
+        _ anchor: AnnotationAnchor,
+        range: NSRange,
+        text: String
+    ) -> AnnotationAnchor {
+        let source = text as NSString
+        let excerpt = source.substring(with: range)
+        let prefixStart = max(0, range.location - 48)
+        let prefix = source.substring(
+            with: NSRange(
+                location: prefixStart,
+                length: range.location - prefixStart
+            )
+        )
+        let suffixStart = range.location + range.length
+        let suffixLength = min(48, source.length - suffixStart)
+        let suffix = source.substring(
+            with: NSRange(location: suffixStart, length: suffixLength)
+        )
+        let blockPath = markdownBlockPath(
+            atUTF16Offset: range.location,
+            in: text
+        )
+        let blockText = markdownBlock(
+            at: blockPath.first,
+            in: text
+        )
+        return AnnotationAnchor(
+            kind: anchor.kind,
+            excerpt: excerpt,
+            prefix: prefix,
+            suffix: suffix,
+            offset: range.location,
+            blockPath: blockPath,
+            pageIndex: anchor.pageIndex,
+            rect: anchor.rect,
+            elementType: anchor.elementType,
+            contentFingerprint: ContentFingerprint.sha256(blockText),
+            contentSummary: excerpt
+        )
+    }
+
+    private func markdownBlockPath(
+        atUTF16Offset offset: Int,
+        in text: String
+    ) -> [Int] {
+        let blocks = text.components(separatedBy: "\n\n")
+        var cursor = 0
+        for (index, block) in blocks.enumerated() {
+            let length = (block as NSString).length
+            if offset <= cursor + length {
+                return [index]
+            }
+            cursor += length + 2
+        }
+        return blocks.isEmpty ? [] : [blocks.count - 1]
+    }
+
+    private func markdownBlock(
+        at index: Int?,
+        in text: String
+    ) -> String {
+        let blocks = text.components(separatedBy: "\n\n")
+        guard let index, blocks.indices.contains(index) else {
+            return text
+        }
+        return blocks[index]
     }
 
     private func sameAnchorLocation(
