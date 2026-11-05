@@ -6,6 +6,169 @@ import WebKit
 
 @Suite("Mac editor WKWebView runtime")
 struct EditorRuntimeTests {
+    @Test("block images keep the following fence on its own line")
+    @MainActor
+    func blockImageFenceRoundTrips() async throws {
+        let resource = MarkdownEditorResources.webResource
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        let handler = RuntimeMessageHandler()
+        configuration.userContentController.add(
+            handler,
+            name: resource.messageHandlerName
+        )
+        let webView = WKWebView(
+            frame: NSRect(x: 0, y: 0, width: 760, height: 900),
+            configuration: configuration
+        )
+        let navigator = RuntimeNavigator()
+        webView.navigationDelegate = navigator
+        webView.loadFileURL(
+            resource.htmlURL,
+            allowingReadAccessTo: resource.baseURL
+        )
+        try await navigator.finished()
+        try await Task.sleep(for: .milliseconds(300))
+
+        let markdown = """
+        # 标题
+
+        ![示意图](https://example.com/image.png)
+
+        ```
+        第一行
+        第二行
+        ```
+        """
+        let payload = try JSONSerialization.data(
+            withJSONObject: [
+                "type": "loadDocument",
+                "title": "标题",
+                "markdown": markdown,
+                "compatibilityBlocks": [],
+                "blocks": []
+            ]
+        )
+        let payloadJSON = try #require(
+            String(data: payload, encoding: .utf8)
+        )
+        _ = try await webView.evaluateJavaScript(
+            """
+            window.StudyNotesEditor.receive(\(payloadJSON));
+            document.getElementById("title").value = "标题更新";
+            document.getElementById("title").dispatchEvent(
+              new Event("input", { bubbles: true })
+            );
+            """
+        )
+        try await Task.sleep(for: .milliseconds(300))
+        let serialized = try #require(
+            handler.messages.last(where: {
+                $0["type"] as? String == "markdownChanged"
+            })?["markdown"] as? String
+        )
+        _ = try MarkdownEditorCodec().decode(serialized)
+        #expect(
+            serialized.contains(
+                ")\n\n```\n第一行\n第二行\n```"
+            )
+        )
+    }
+
+    @Test("editor images open a zoomable preview on click")
+    @MainActor
+    func imagePreviewZoom() async throws {
+        let resource = MarkdownEditorResources.webResource
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        let handler = RuntimeMessageHandler()
+        configuration.userContentController.add(
+            handler,
+            name: resource.messageHandlerName
+        )
+        let webView = WKWebView(
+            frame: NSRect(x: 0, y: 0, width: 760, height: 900),
+            configuration: configuration
+        )
+        let navigator = RuntimeNavigator()
+        webView.navigationDelegate = navigator
+        webView.loadFileURL(
+            resource.htmlURL,
+            allowingReadAccessTo: resource.baseURL
+        )
+        try await navigator.finished()
+        try await Task.sleep(for: .milliseconds(300))
+
+        let payload = try JSONSerialization.data(
+            withJSONObject: [
+                "type": "loadDocument",
+                "title": "图片预览",
+                "markdown": """
+                # 图片预览
+
+                ![示意图](https://example.com/image.png)
+                """,
+                "compatibilityBlocks": [],
+                "blocks": []
+            ]
+        )
+        let payloadJSON = try #require(
+            String(data: payload, encoding: .utf8)
+        )
+        _ = try await webView.evaluateJavaScript(
+            """
+            window.StudyNotesEditor.receive(\(payloadJSON));
+            const image = document.querySelector('#editor img');
+            image.dispatchEvent(new MouseEvent('click', {
+              bubbles: true,
+              cancelable: true,
+              clientX: 400,
+              clientY: 300
+            }));
+            """
+        )
+
+        let openedResult = try await webView.evaluateJavaScript(
+            "Boolean(document.querySelector('.sn-image-preview'));"
+        )
+        #expect(try #require(openedResult as? Bool))
+
+        let zoomedResult = try await webView.evaluateJavaScript(
+            """
+            (() => {
+              const overlay = document.querySelector('.sn-image-preview');
+              overlay.dispatchEvent(new WheelEvent('wheel', {
+                bubbles: true,
+                cancelable: true,
+                clientX: 400,
+                clientY: 300,
+                deltaY: -120
+              }));
+              return overlay.querySelector('img').style.transform;
+            })();
+            """
+        )
+        let zoomed = try #require(zoomedResult as? String)
+        #expect(zoomed.contains("scale("))
+        #expect(!zoomed.contains("scale(1)"))
+
+        let closedResult = try await webView.evaluateJavaScript(
+            """
+            (() => {
+              document.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'Escape',
+                bubbles: true,
+                cancelable: true
+              }));
+              return !document.querySelector('.sn-image-preview');
+            })();
+            """
+        )
+        #expect(try #require(closedResult as? Bool))
+    }
+
     @Test("vendor rendering and advanced blocks load offline")
     @MainActor
     func runtimeRendersOfflineBlocks() async throws {
@@ -157,17 +320,20 @@ private final class RuntimeNavigator: NSObject, WKNavigationDelegate {
 
 @MainActor
 private final class RuntimeMessageHandler: NSObject, WKScriptMessageHandler {
+    private(set) var messages: [[String: Any]] = []
     private(set) var failures: [String] = []
 
     func userContentController(
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
-        guard let dictionary = message.body as? [String: Any],
-              dictionary["type"] as? String == "failed" else {
+        guard let dictionary = message.body as? [String: Any] else {
             return
         }
-        failures.append(dictionary["reason"] as? String ?? "")
+        messages.append(dictionary)
+        if dictionary["type"] as? String == "failed" {
+            failures.append(dictionary["reason"] as? String ?? "")
+        }
     }
 }
 #endif

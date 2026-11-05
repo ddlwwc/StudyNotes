@@ -77,6 +77,9 @@ private struct MarkdownEditorNativeView: NSViewRepresentable {
             coordinator: context.coordinator,
             mediaCoordinator: mediaCoordinator
         )
+        #if os(macOS)
+        hideWebScrollbars(in: webView)
+        #endif
         context.coordinator.attach(
             webView: webView,
             session: session,
@@ -94,6 +97,9 @@ private struct MarkdownEditorNativeView: NSViewRepresentable {
             readingPreferences: readingPreferences,
             onAttachmentRequested: onAttachmentRequested
         )
+        #if os(macOS)
+        hideWebScrollbars(in: webView)
+        #endif
     }
 
     static func dismantleNSView(
@@ -180,6 +186,20 @@ private func makeWebView(
     coordinator.load(resource: resource, in: webView)
     return webView
 }
+
+#if os(macOS)
+@MainActor
+private func hideWebScrollbars(in view: NSView) {
+    if let scrollView = view as? NSScrollView {
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+    }
+    for subview in view.subviews {
+        hideWebScrollbars(in: subview)
+    }
+}
+#endif
 
 @MainActor
 private final class MarkdownEditorWebCoordinator:
@@ -295,6 +315,9 @@ private final class MarkdownEditorWebCoordinator:
         _ webView: WKWebView,
         didFinish navigation: WKNavigation!
     ) {
+        #if os(macOS)
+        hideWebScrollbars(in: webView)
+        #endif
         applyAppearance()
         Task { @MainActor [weak self] in
             guard let self else {

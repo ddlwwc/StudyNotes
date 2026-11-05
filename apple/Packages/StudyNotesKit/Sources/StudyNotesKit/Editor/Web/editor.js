@@ -8,6 +8,7 @@ import { TableKit } from "@tiptap/extension-table"
 import DragHandle from "@tiptap/extension-drag-handle"
 import Placeholder from "@tiptap/extension-placeholder"
 import { Markdown } from "tiptap-markdown"
+import { defaultMarkdownSerializer } from "prosemirror-markdown"
 import { Plugin, PluginKey } from "@tiptap/pm/state"
 import { Decoration, DecorationSet } from "@tiptap/pm/view"
 
@@ -45,6 +46,144 @@ function showStatus(message) {
       statusBanner.hidden = true
     }, 5000)
   }
+}
+
+let closeImagePreview = () => {}
+
+function openImagePreview(sourceImage) {
+  closeImagePreview()
+
+  const source = sourceImage.currentSrc || sourceImage.src
+  if (!source) {
+    return
+  }
+  const previousFocus = document.activeElement
+
+  const overlay = document.createElement("div")
+  overlay.className = "sn-image-preview"
+  overlay.setAttribute("role", "dialog")
+  overlay.setAttribute("aria-label", "图片预览")
+
+  const previewImage = document.createElement("img")
+  previewImage.className = "sn-image-preview-image"
+  previewImage.src = source
+  previewImage.alt = sourceImage.alt || ""
+  previewImage.draggable = false
+
+  const controls = document.createElement("div")
+  controls.className = "sn-image-preview-controls"
+
+  const zoomLabel = document.createElement("span")
+  zoomLabel.textContent = "100%"
+  zoomLabel.style.minWidth = "38px"
+  zoomLabel.style.textAlign = "center"
+
+  const closeButton = document.createElement("button")
+  closeButton.type = "button"
+  closeButton.className = "sn-image-preview-close"
+  closeButton.textContent = "×"
+  closeButton.title = "关闭预览"
+  closeButton.setAttribute("aria-label", "关闭图片预览")
+
+  controls.append(zoomLabel, closeButton)
+  overlay.append(previewImage, controls)
+
+  let scale = 1
+  let translateX = 0
+  let translateY = 0
+  let drag = null
+
+  const applyTransform = () => {
+    previewImage.style.transform =
+      `translate3d(${translateX}px, ${translateY}px, 0) scale(${scale})`
+    zoomLabel.textContent = `${Math.round(scale * 100)}%`
+  }
+
+  const zoomAt = event => {
+    const nextScale = Math.max(
+      0.25,
+      Math.min(8, scale * Math.exp(-event.deltaY * 0.0015))
+    )
+    if (Math.abs(nextScale - scale) < 0.0001) {
+      return
+    }
+    const rect = overlay.getBoundingClientRect()
+    const originX = event.clientX - rect.left - rect.width / 2
+    const originY = event.clientY - rect.top - rect.height / 2
+    const ratio = nextScale / scale
+    translateX = originX - (originX - translateX) * ratio
+    translateY = originY - (originY - translateY) * ratio
+    scale = nextScale
+    applyTransform()
+  }
+
+  overlay.addEventListener("wheel", event => {
+    event.preventDefault()
+    event.stopPropagation()
+    zoomAt(event)
+  }, { passive: false })
+
+  previewImage.addEventListener("pointerdown", event => {
+    event.preventDefault()
+    previewImage.setPointerCapture(event.pointerId)
+    drag = {
+      pointerID: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: translateX,
+      originY: translateY
+    }
+    previewImage.style.cursor = "grabbing"
+  })
+
+  previewImage.addEventListener("pointermove", event => {
+    if (!drag || drag.pointerID !== event.pointerId) {
+      return
+    }
+    translateX = drag.originX + event.clientX - drag.startX
+    translateY = drag.originY + event.clientY - drag.startY
+    applyTransform()
+  })
+
+  const endDrag = event => {
+    if (!drag || drag.pointerID !== event.pointerId) {
+      return
+    }
+    drag = null
+    previewImage.style.cursor = "grab"
+  }
+  previewImage.addEventListener("pointerup", endDrag)
+  previewImage.addEventListener("pointercancel", endDrag)
+
+  const handleKeyDown = event => {
+    if (event.key === "Escape") {
+      event.preventDefault()
+      closeImagePreview()
+    }
+  }
+
+  closeImagePreview = () => {
+    document.removeEventListener("keydown", handleKeyDown)
+    overlay.remove()
+    previousFocus?.focus?.()
+    closeImagePreview = () => {}
+  }
+
+  closeButton.addEventListener("click", closeImagePreview)
+  overlay.addEventListener("click", event => {
+    if (event.target === overlay) {
+      closeImagePreview()
+    }
+  })
+  previewImage.addEventListener("dblclick", event => {
+    event.preventDefault()
+    event.stopPropagation()
+    closeImagePreview()
+  })
+  document.addEventListener("keydown", handleKeyDown)
+  document.body.append(overlay)
+  applyTransform()
+  closeButton.focus()
 }
 
 function escapeHTML(value) {
@@ -141,6 +280,27 @@ const CompatibilityBlock = Node.create({
   }
 })
 
+const MarkdownBlockImage = Image.extend({
+  addStorage() {
+    return {
+      markdown: {
+        serialize(state, node, parent, index) {
+          defaultMarkdownSerializer.nodes.image(
+            state,
+            node,
+            parent,
+            index
+          )
+          if (node.isBlock) {
+            state.closeBlock(node)
+          }
+        },
+        parse: {}
+      }
+    }
+  }
+})
+
 const SearchPluginKey = new PluginKey("studynotes-search")
 
 const SearchExtension = Extension.create({
@@ -213,7 +373,7 @@ const editor = new Editor({
         target: "_blank"
       }
     }),
-    Image.configure({
+    MarkdownBlockImage.configure({
       allowBase64: false,
       inline: false,
       HTMLAttributes: {
@@ -290,6 +450,16 @@ editor.view.dom.addEventListener("keydown", event => {
     toggleFind(false)
   }
 })
+
+editor.view.dom.addEventListener("click", event => {
+  const image = event.target.closest?.("img")
+  if (!image || !editor.view.dom.contains(image)) {
+    return
+  }
+  event.preventDefault()
+  event.stopPropagation()
+  openImagePreview(image)
+}, true)
 
 titleInput.addEventListener("input", () => {
   if (ignoreUpdates) {

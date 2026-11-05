@@ -231,6 +231,14 @@ button {
   min-width: 0;
   min-height: 0;
   overflow: auto;
+  scrollbar-width: none;
+}
+
+#editor-host::-webkit-scrollbar,
+#outline::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 #editor,
@@ -278,6 +286,56 @@ button {
   height: auto;
   margin: 1.25em auto;
   border-radius: 6px;
+  cursor: zoom-in;
+}
+
+.sn-image-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: rgba(10, 12, 16, 0.94);
+  touch-action: none;
+}
+
+.sn-image-preview-image {
+  max-width: 92vw;
+  max-height: 88vh;
+  object-fit: contain;
+  transform-origin: center center;
+  user-select: none;
+  -webkit-user-drag: none;
+  cursor: grab;
+  will-change: transform;
+}
+
+.sn-image-preview-controls {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(20, 22, 28, 0.82);
+  color: #fff;
+  font: 12px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+}
+
+.sn-image-preview-close {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font: 22px/24px -apple-system, BlinkMacSystemFont, Sans-Serif;
+  cursor: pointer;
 }
 
 .tiptap h1,

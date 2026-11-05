@@ -525,7 +525,7 @@ private extension ReaderSelection {
     }
 }
 
-private struct ArticleElementSelection: Equatable {
+struct ArticleElementSelection: Equatable {
     let elementType: String
     let quote: String
     let prefix: String
@@ -536,7 +536,7 @@ private struct ArticleElementSelection: Equatable {
     let viewportY: CGFloat?
 }
 
-private struct ArticleWebView: NSViewRepresentable {
+struct ArticleWebView: NSViewRepresentable {
     let document: MaterialDocument
     let annotations: [MaterialAnnotation]
     let jumpToAnnotationID: UUID?
@@ -583,6 +583,7 @@ private struct ArticleWebView: NSViewRepresentable {
         webView.setValue(false, forKey: "drawsBackground")
         context.coordinator.webView = webView
         context.coordinator.load(document: document, in: webView)
+        Self.hideScrollbars(in: webView)
         return webView
     }
 
@@ -590,6 +591,7 @@ private struct ArticleWebView: NSViewRepresentable {
         context.coordinator.parent = self
         if context.coordinator.documentID != document.id {
             context.coordinator.load(document: document, in: webView)
+            Self.hideScrollbars(in: webView)
             return
         }
         context.coordinator.applyReadingPreferences(
@@ -615,6 +617,7 @@ private struct ArticleWebView: NSViewRepresentable {
                 "window.studyNotesFind(\(javaScriptString(searchText)), false);"
             )
         }
+        Self.hideScrollbars(in: webView)
     }
 
     static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
@@ -634,6 +637,17 @@ private struct ArticleWebView: NSViewRepresentable {
         webView.configuration.userContentController.removeScriptMessageHandler(
             forName: "readerScrollChanged"
         )
+    }
+
+    static func hideScrollbars(in view: NSView) {
+        if let scrollView = view as? NSScrollView {
+            scrollView.hasVerticalScroller = false
+            scrollView.hasHorizontalScroller = false
+            scrollView.autohidesScrollers = true
+        }
+        for subview in view.subviews {
+            hideScrollbars(in: subview)
+        }
     }
 
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
@@ -686,6 +700,7 @@ private struct ArticleWebView: NSViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            ArticleWebView.hideScrollbars(in: webView)
             installRuntime(in: webView)
             applyReadingPreferences(
                 parent.readingPreferences,
@@ -739,6 +754,7 @@ private struct ArticleWebView: NSViewRepresentable {
               line-height: \(preferences.lineHeight) !important;
             }
             article { max-width: \(preferences.lineWidth)px !important; }
+            article img { cursor: zoom-in; }
             h1, h2, h3, h4, h5, h6 { color: \(heading) !important; }
             blockquote { color: \(muted) !important; }
             pre {
@@ -897,7 +913,7 @@ private struct ArticleWebView: NSViewRepresentable {
             }
         }
 
-        private static let runtimeJavaScript = #"""
+        static let runtimeJavaScript = #"""
         (() => {
           if (window.__studyNotesRuntimeInstalled) return;
           window.__studyNotesRuntimeInstalled = true;
@@ -1068,6 +1084,181 @@ private struct ArticleWebView: NSViewRepresentable {
           window.studyNotesScrollBy = (delta) => {
             if (Number.isFinite(delta)) window.scrollBy(0, delta);
           };
+
+          let closeImagePreview = () => {};
+          const openImagePreview = (sourceImage) => {
+            closeImagePreview();
+
+            const source = sourceImage.currentSrc || sourceImage.src;
+            if (!source) return;
+            const previousFocus = document.activeElement;
+
+            const overlay = document.createElement('div');
+            overlay.id = 'studynotes-image-preview';
+            overlay.setAttribute('role', 'dialog');
+            overlay.setAttribute('aria-label', '图片预览');
+            overlay.style.cssText = [
+              'position:fixed',
+              'inset:0',
+              'z-index:2147483647',
+              'display:flex',
+              'align-items:center',
+              'justify-content:center',
+              'overflow:hidden',
+              'background:rgba(10,12,16,.94)',
+              'touch-action:none'
+            ].join(';');
+
+            const previewImage = document.createElement('img');
+            previewImage.src = source;
+            previewImage.alt = sourceImage.alt || '';
+            previewImage.draggable = false;
+            previewImage.style.cssText = [
+              'max-width:92vw',
+              'max-height:88vh',
+              'object-fit:contain',
+              'transform-origin:center center',
+              'user-select:none',
+              '-webkit-user-drag:none',
+              'cursor:grab',
+              'will-change:transform'
+            ].join(';');
+
+            const controls = document.createElement('div');
+            controls.style.cssText = [
+              'position:absolute',
+              'top:18px',
+              'right:18px',
+              'display:flex',
+              'align-items:center',
+              'gap:10px',
+              'padding:6px 8px',
+              'border-radius:8px',
+              'background:rgba(20,22,28,.82)',
+              'color:#fff',
+              'font:12px -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif'
+            ].join(';');
+
+            const zoomLabel = document.createElement('span');
+            zoomLabel.textContent = '100%';
+            zoomLabel.style.minWidth = '38px';
+            zoomLabel.style.textAlign = 'center';
+
+            const closeButton = document.createElement('button');
+            closeButton.type = 'button';
+            closeButton.textContent = '×';
+            closeButton.title = '关闭预览';
+            closeButton.setAttribute('aria-label', '关闭图片预览');
+            closeButton.style.cssText = [
+              'width:28px',
+              'height:28px',
+              'border:0',
+              'border-radius:6px',
+              'background:rgba(255,255,255,.12)',
+              'color:#fff',
+              'font:22px/24px -apple-system,BlinkMacSystemFont,sans-serif',
+              'cursor:pointer'
+            ].join(';');
+
+            controls.append(zoomLabel, closeButton);
+            overlay.append(previewImage, controls);
+
+            let scale = 1;
+            let translateX = 0;
+            let translateY = 0;
+            let drag = null;
+
+            const applyTransform = () => {
+              previewImage.style.transform = `translate3d(${translateX}px, ${translateY}px, 0) scale(${scale})`;
+              zoomLabel.textContent = `${Math.round(scale * 100)}%`;
+            };
+
+            const zoomAt = (event) => {
+              const nextScale = Math.max(
+                0.25,
+                Math.min(8, scale * Math.exp(-event.deltaY * 0.0015))
+              );
+              if (Math.abs(nextScale - scale) < 0.0001) return;
+              const rect = overlay.getBoundingClientRect();
+              const originX = event.clientX - rect.left - rect.width / 2;
+              const originY = event.clientY - rect.top - rect.height / 2;
+              const ratio = nextScale / scale;
+              translateX = originX - (originX - translateX) * ratio;
+              translateY = originY - (originY - translateY) * ratio;
+              scale = nextScale;
+              applyTransform();
+            };
+
+            overlay.addEventListener('wheel', (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              zoomAt(event);
+            }, { passive: false });
+
+            previewImage.addEventListener('pointerdown', (event) => {
+              event.preventDefault();
+              previewImage.setPointerCapture(event.pointerId);
+              drag = {
+                pointerID: event.pointerId,
+                startX: event.clientX,
+                startY: event.clientY,
+                originX: translateX,
+                originY: translateY
+              };
+              previewImage.style.cursor = 'grabbing';
+            });
+
+            previewImage.addEventListener('pointermove', (event) => {
+              if (!drag || drag.pointerID !== event.pointerId) return;
+              translateX = drag.originX + event.clientX - drag.startX;
+              translateY = drag.originY + event.clientY - drag.startY;
+              applyTransform();
+            });
+
+            const endDrag = (event) => {
+              if (!drag || drag.pointerID !== event.pointerId) return;
+              drag = null;
+              previewImage.style.cursor = 'grab';
+            };
+            previewImage.addEventListener('pointerup', endDrag);
+            previewImage.addEventListener('pointercancel', endDrag);
+
+            const handleKeyDown = (event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                closeImagePreview();
+              }
+            };
+
+            closeImagePreview = () => {
+              document.removeEventListener('keydown', handleKeyDown);
+              overlay.remove();
+              previousFocus?.focus?.();
+              closeImagePreview = () => {};
+            };
+
+            closeButton.addEventListener('click', closeImagePreview);
+            overlay.addEventListener('click', (event) => {
+              if (event.target === overlay) closeImagePreview();
+            });
+            previewImage.addEventListener('dblclick', (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              closeImagePreview();
+            });
+            document.addEventListener('keydown', handleKeyDown);
+            document.body.append(overlay);
+            applyTransform();
+            closeButton.focus();
+          };
+
+          article.addEventListener('click', (event) => {
+            const image = event.target.closest?.('img');
+            if (!image || !article.contains(image)) return;
+            event.preventDefault();
+            event.stopPropagation();
+            openImagePreview(image);
+          }, true);
 
           const unwrap = (element) => {
             const parent = element.parentNode;
