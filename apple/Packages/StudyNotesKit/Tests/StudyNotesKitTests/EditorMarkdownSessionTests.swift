@@ -185,6 +185,96 @@ struct MarkdownEditorSessionTests {
                 == "# 媒体\n\n正文\n\n![示意图](\(reference.stringValue))"
         )
         #expect(!session.markdown.contains("http"))
+
+        session.insertMediaReference(reference, kind: .audio, label: "录音")
+        session.insertMediaReference(reference, kind: .video, label: "录像")
+        #expect(session.markdown.contains("<audio controls"))
+        #expect(session.markdown.contains("aria-label=\"录音\""))
+        #expect(session.markdown.contains("<video controls"))
+        #expect(session.markdown.contains("aria-label=\"录像\""))
+    }
+
+    @Test("structured blocks can be inserted, updated and removed")
+    func structuredBlockLifecycle() {
+        let session = MarkdownEditorSession(
+            snapshot: snapshot(title: "Blocks", markdown: "# Blocks\n")
+        ) { request in
+            .saved(
+                title: request.title,
+                markdown: request.markdown,
+                fingerprint: request.expectedFingerprint
+            )
+        }
+        let id = UUID()
+        let block = EditorDocumentBlockEnvelope(
+            id: id,
+            type: "formula",
+            fallback: "E = mc^2",
+            data: .object(["latex": .string("E = mc^2")])
+        )
+
+        session.insertBlock(block)
+        #expect(session.blocks == [block])
+        #expect(session.markdown.contains("studynotes:block"))
+        #expect(session.markdown.contains("type=\"formula\""))
+
+        let updated = EditorDocumentBlockEnvelope(
+            id: id,
+            type: "formula",
+            fallback: "a^2 + b^2 = c^2",
+            data: .object(["latex": .string("a^2 + b^2 = c^2")])
+        )
+        session.updateBlock(updated)
+        #expect(session.blocks == [updated])
+        #expect(session.markdown.contains("a^2 + b^2 = c^2"))
+
+        session.removeBlock(id: id)
+        #expect(session.blocks.isEmpty)
+        #expect(!session.markdown.contains("studynotes:block"))
+    }
+
+    @Test("runtime block messages use the session block lifecycle")
+    func runtimeBlockMessages() {
+        let session = MarkdownEditorSession(
+            snapshot: snapshot(title: "Runtime blocks", markdown: "# Runtime blocks\n")
+        ) { request in
+            .saved(
+                title: request.title,
+                markdown: request.markdown,
+                fingerprint: request.expectedFingerprint
+            )
+        }
+        let original = EditorDocumentBlockEnvelope(
+            id: UUID(),
+            type: "mermaid",
+            fallback: "> **Mermaid**\n> graph TD",
+            data: .object([
+                "source": .string("graph TD\nA-->B"),
+                "renderMode": .string("source")
+            ])
+        )
+
+        session.receive(.blockInsertRequested(original))
+        #expect(session.blocks == [original])
+        #expect(session.markdown.contains("type=\"mermaid\""))
+
+        let updated = EditorDocumentBlockEnvelope(
+            id: original.id,
+            type: "mermaid",
+            fallback: "> **Mermaid**\n> graph LR",
+            data: .object([
+                "source": .string("graph LR\nA-->B"),
+                "renderMode": .string("source")
+            ])
+        )
+        session.receive(.blockUpdateRequested(updated))
+        #expect(session.blocks == [updated])
+        #expect(session.markdown.contains("graph LR"))
+        #expect(!session.markdown.contains("graph TD"))
+
+        session.receive(.blockRemoveRequested(original.id))
+        #expect(session.blocks.isEmpty)
+        #expect(!session.markdown.contains("studynotes:block"))
     }
 
     @Test("new documents start unlocked in edit mode")

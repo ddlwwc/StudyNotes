@@ -3,15 +3,15 @@ import Testing
 
 @Suite("Markdown save policy")
 struct MarkdownSavePolicyTests {
-    @Test("edits debounce for 800 milliseconds and lifecycle events flush now")
+    @Test("edits debounce for 300 milliseconds and lifecycle events flush now")
     func saveTiming() {
         let policy = MarkdownSavePolicy()
         var state = MarkdownSaveState()
 
-        #expect(MarkdownSavePolicy.debounceMilliseconds == 800)
+        #expect(MarkdownSavePolicy.debounceMilliseconds == 300)
         #expect(
             policy.reduce(state: &state, event: .contentChanged)
-                == [.scheduleAutosave(afterMilliseconds: 800)]
+                == [.scheduleAutosave(afterMilliseconds: 300)]
         )
         #expect(state.hasUnsavedChanges)
 

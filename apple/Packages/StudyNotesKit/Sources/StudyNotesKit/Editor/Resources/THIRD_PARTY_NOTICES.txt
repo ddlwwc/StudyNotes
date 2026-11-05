@@ -8,6 +8,14 @@ The bundled editor.js includes software from:
 - markdown-it and markdown-it-task-lists, MIT License
 - Linkify, MIT License
 - Floating UI, MIT License
+- KaTeX 0.19.1, MIT License
+- Mermaid 11.12.0, MIT License
+- highlight.js 11.11.1 styles, BSD-3-Clause License
+
+KaTeX and Mermaid are bundled under Resources/vendor for offline rendering.
+Their complete license texts are copied beside the vendor assets. The
+highlight.js GitHub theme styles are distributed under BSD-3-Clause; the
+complete license text is also copied into Resources/vendor/highlight.
 
 MIT License
 

@@ -252,13 +252,21 @@ private struct ReaderTopBar: View {
             }
 
             ReaderToolButton(
-                title: model.isEditingMarkdown ? "完成编辑" : "编辑",
-                systemImage: model.isEditingMarkdown
+                title: model.isMarkdownDocumentLocked
+                    ? "已锁定"
+                    : model.isEditingMarkdown ? "完成编辑" : "编辑",
+                systemImage: model.isMarkdownDocumentLocked
+                    ? "lock.fill"
+                    : model.isEditingMarkdown
                     ? "checkmark.circle"
                     : "square.and.pencil",
-                isEnabled: model.selectedDocument?.summary.kind == .note
-                    || model.selectedDocument?.summary.kind == .markdown,
-                help: model.isEditingMarkdown
+                isEnabled: (
+                    model.selectedDocument?.summary.kind == .note
+                        || model.selectedDocument?.summary.kind == .markdown
+                ) && !model.isMarkdownDocumentLocked,
+                help: model.isMarkdownDocumentLocked
+                    ? "正文已锁定，仍可在标注模式下添加标注"
+                    : model.isEditingMarkdown
                     ? "保存并结束编辑（⌘E）"
                     : "在阅读区编辑（⌘E）"
             ) {
@@ -268,15 +276,18 @@ private struct ReaderTopBar: View {
             }
             .keyboardShortcut("e", modifiers: .command)
 
-            ReaderToolButton(
-                title: "版本",
-                systemImage: "clock.arrow.circlepath",
-                isEnabled: model.selectedDocument?.summary.kind.isTextDocument == true,
-                help: "查看最近 10 个文字版本"
-            ) {
-                Task {
-                    await model.loadRevisions()
-                    model.isShowingVersions = true
+            if model.selectedDocument?.summary.kind != .note {
+                ReaderToolButton(
+                    title: "版本",
+                    systemImage: "clock.arrow.circlepath",
+                    isEnabled: model.selectedDocument?.summary.kind
+                        .isTextDocument == true,
+                    help: "查看最近 10 个文字版本"
+                ) {
+                    Task {
+                        await model.loadRevisions()
+                        model.isShowingVersions = true
+                    }
                 }
             }
 

@@ -84,8 +84,12 @@ public enum MarkdownEditorBridgeMessage: Equatable, Sendable {
     case loadDocument(
         markdown: String,
         title: String,
-        compatibilityBlocks: [MarkdownCompatibilityBlock]
+        compatibilityBlocks: [MarkdownCompatibilityBlock],
+        blocks: [EditorDocumentBlockEnvelope]
     )
+    case blockInsertRequested(EditorDocumentBlockEnvelope)
+    case blockUpdateRequested(EditorDocumentBlockEnvelope)
+    case blockRemoveRequested(UUID)
     case markdownChanged(String)
     case titleChanged(String)
     case sourceChanged(String)
@@ -110,12 +114,17 @@ public enum MarkdownEditorBridgeMessage: Equatable, Sendable {
 public enum MarkdownEditorAttachmentKind: String, Codable, Equatable, Sendable {
     case image
     case file
+    case audio
+    case video
 }
 
 extension MarkdownEditorBridgeMessage: Codable {
     private enum Kind: String, Codable {
         case ready
         case loadDocument
+        case blockInsertRequested
+        case blockUpdateRequested
+        case blockRemoveRequested
         case markdownChanged
         case titleChanged
         case sourceChanged
@@ -139,6 +148,9 @@ extension MarkdownEditorBridgeMessage: Codable {
         case markdown
         case title
         case compatibilityBlocks
+        case blocks
+        case block
+        case blockID
         case sourceMode
         case command
         case attachmentKind
@@ -166,7 +178,29 @@ extension MarkdownEditorBridgeMessage: Codable {
                 compatibilityBlocks: try container.decodeIfPresent(
                     [MarkdownCompatibilityBlock].self,
                     forKey: .compatibilityBlocks
+                ) ?? [],
+                blocks: try container.decodeIfPresent(
+                    [EditorDocumentBlockEnvelope].self,
+                    forKey: .blocks
                 ) ?? []
+            )
+        case .blockInsertRequested:
+            self = .blockInsertRequested(
+                try container.decode(
+                    EditorDocumentBlockEnvelope.self,
+                    forKey: .block
+                )
+            )
+        case .blockUpdateRequested:
+            self = .blockUpdateRequested(
+                try container.decode(
+                    EditorDocumentBlockEnvelope.self,
+                    forKey: .block
+                )
+            )
+        case .blockRemoveRequested:
+            self = .blockRemoveRequested(
+                try container.decode(UUID.self, forKey: .blockID)
             )
         case .markdownChanged:
             self = .markdownChanged(
@@ -269,7 +303,12 @@ extension MarkdownEditorBridgeMessage: Codable {
         switch self {
         case .ready:
             try container.encode(Kind.ready, forKey: .type)
-        case .loadDocument(let markdown, let title, let compatibilityBlocks):
+        case let .loadDocument(
+            markdown,
+            title,
+            compatibilityBlocks,
+            blocks
+        ):
             try container.encode(Kind.loadDocument, forKey: .type)
             try container.encode(markdown, forKey: .markdown)
             try container.encode(title, forKey: .title)
@@ -277,6 +316,16 @@ extension MarkdownEditorBridgeMessage: Codable {
                 compatibilityBlocks,
                 forKey: .compatibilityBlocks
             )
+            try container.encode(blocks, forKey: .blocks)
+        case .blockInsertRequested(let block):
+            try container.encode(Kind.blockInsertRequested, forKey: .type)
+            try container.encode(block, forKey: .block)
+        case .blockUpdateRequested(let block):
+            try container.encode(Kind.blockUpdateRequested, forKey: .type)
+            try container.encode(block, forKey: .block)
+        case .blockRemoveRequested(let blockID):
+            try container.encode(Kind.blockRemoveRequested, forKey: .type)
+            try container.encode(blockID, forKey: .blockID)
         case .markdownChanged(let markdown):
             try container.encode(Kind.markdownChanged, forKey: .type)
             try container.encode(markdown, forKey: .markdown)

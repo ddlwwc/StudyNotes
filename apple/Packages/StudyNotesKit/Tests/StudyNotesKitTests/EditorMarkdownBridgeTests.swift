@@ -7,6 +7,15 @@ struct MarkdownEditorBridgeTests {
     @Test("bridge messages round-trip through Codable")
     func messageCodable() throws {
         let annotationID = UUID()
+        let block = EditorDocumentBlockEnvelope(
+            id: UUID(),
+            type: "formula",
+            fallback: "> **公式**\n> $$E = mc^2$$",
+            data: .object([
+                "latex": .string("E = mc^2"),
+                "sourceOnly": .bool(true)
+            ])
+        )
         let selection = MarkdownEditorSelection(
             quote: "正文",
             prefix: "标题\n\n",
@@ -43,8 +52,12 @@ struct MarkdownEditorBridgeTests {
                         startLine: 3,
                         endLine: 3
                     )
-                ]
+                ],
+                blocks: [block]
             ),
+            .blockInsertRequested(block),
+            .blockUpdateRequested(block),
+            .blockRemoveRequested(block.id),
             .markdownChanged("# 新标题\n\n正文"),
             .titleChanged("新标题"),
             .sourceChanged("# 新标题\n\n源文本"),
@@ -101,5 +114,21 @@ struct MarkdownEditorBridgeTests {
                     .appending(path: "editor.css").path
             )
         )
+        for relativePath in [
+            "vendor/katex/katex.min.js",
+            "vendor/katex/katex.min.css",
+            "vendor/mermaid/mermaid.min.js"
+        ] {
+            #expect(
+                FileManager.default.fileExists(
+                    atPath: resource.baseURL.appending(path: relativePath).path
+                )
+            )
+        }
+        let html = try? String(
+            contentsOf: resource.htmlURL,
+            encoding: .utf8
+        )
+        #expect(html?.contains("https://") == false)
     }
 }

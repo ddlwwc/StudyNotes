@@ -66,6 +66,16 @@ verify_bundle() {
       exit 1
     fi
   done
+  for resource in \
+    vendor/katex/katex.min.js \
+    vendor/katex/katex.min.css \
+    vendor/mermaid/mermaid.min.js; do
+    local resource_path="$APP_RESOURCES/StudyNotesKit_StudyNotesKit.bundle/Contents/Resources/$resource"
+    if [ ! -f "$resource_path" ]; then
+      echo "missing packaged editor resource: $resource_path" >&2
+      exit 1
+    fi
+  done
 }
 
 open_app() {

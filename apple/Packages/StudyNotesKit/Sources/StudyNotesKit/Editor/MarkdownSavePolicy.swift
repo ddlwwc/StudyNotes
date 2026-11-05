@@ -70,7 +70,7 @@ public enum MarkdownSaveEffect: Equatable, Sendable {
 }
 
 public struct MarkdownSavePolicy: Sendable {
-    public static let debounceMilliseconds = 800
+    public static let debounceMilliseconds = 300
 
     public init() {}
 

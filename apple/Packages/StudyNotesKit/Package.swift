@@ -16,7 +16,8 @@ let package = Package(
             name: "StudyNotesKit",
             exclude: ["Editor/Web"],
             resources: [
-                .process("Editor/Resources")
+                .process("Editor/Resources"),
+                .copy("Editor/vendor")
             ]
         ),
         .testTarget(

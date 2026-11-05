@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct WorkspaceToolbar: ToolbarContent {
     let model: WorkspaceModel
@@ -209,10 +211,51 @@ struct WorkspaceToolbarActions: View {
                         ? "预览公开正文与私人研读层范围"
                         : "只有文章类材料可以发布"
                 )
+
+                if model.selectedDocument?.summary.kind.isTextDocument == true {
+                    Menu {
+                        Button("可读 Markdown…", systemImage: "doc.plaintext") {
+                            export(.markdown)
+                        }
+                        Button("完整 StudyNotes 包…", systemImage: "shippingbox") {
+                            export(.package)
+                        }
+                    } label: {
+                        Label("导出", systemImage: "square.and.arrow.up")
+                            .font(.sn(11))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .frame(width: 74)
+                    .help("导出当前文档")
+                }
             }
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
+    }
+
+    private func export(_ format: WorkspaceEditorExportFormat) {
+        let panel = NSSavePanel()
+        switch format {
+        case .markdown:
+            panel.title = "导出可读 Markdown"
+            panel.nameFieldStringValue = "document.md"
+            panel.allowedContentTypes = [.plainText]
+        case .package:
+            panel.title = "导出完整 StudyNotes 包"
+            panel.nameFieldStringValue = "document.studynotes"
+            panel.allowedContentTypes = [.folder]
+            panel.canCreateDirectories = true
+        }
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+        Task {
+            _ = await model.exportSelectedEditorDocument(
+                as: format,
+                to: url
+            )
+        }
     }
 }
 

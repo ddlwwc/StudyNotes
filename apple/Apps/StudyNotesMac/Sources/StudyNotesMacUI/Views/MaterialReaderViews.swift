@@ -33,6 +33,10 @@ private struct ArticleMaterialReader: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var showsImageImporter = false
     @State private var showsFileImporter = false
+    @State private var showsAudioImporter = false
+    @State private var showsVideoImporter = false
+    @State private var showsAdvancedBlocks = false
+    @State private var showsDocumentCardPicker = false
     @State private var lockError: String?
 
     var body: some View {
@@ -80,6 +84,32 @@ private struct ArticleMaterialReader: View {
                         }
 
                         Spacer()
+
+                        Button {
+                            showsAdvancedBlocks = true
+                        } label: {
+                            Label("复杂块", systemImage: "square.grid.2x2")
+                                .font(.sn(10))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(session.isLocked || session.mode != .edit)
+                        .accessibilityLabel("打开复杂块面板")
+                        .help(
+                            session.isLocked
+                                ? "正文已锁定，不能编辑复杂块"
+                                : "新建或编辑数据表和图形块"
+                        )
+
+                        Button {
+                            showsDocumentCardPicker = true
+                        } label: {
+                            Label("文档卡片", systemImage: "doc.on.doc")
+                                .font(.sn(10))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(session.isLocked || session.mode != .edit)
+                        .accessibilityLabel("插入文档卡片")
+                        .help("引用同一知识库中的另一份学习材料")
 
                         Button {
                             if case let .blocked(reason) =
@@ -152,6 +182,10 @@ private struct ArticleMaterialReader: View {
                             showsImageImporter = true
                         case .file:
                             showsFileImporter = true
+                        case .audio:
+                            showsAudioImporter = true
+                        case .video:
+                            showsVideoImporter = true
                         }
                     }
                 }
@@ -207,6 +241,9 @@ private struct ArticleMaterialReader: View {
         }
         .task(id: model.markdownEditorSession?.materialID) {
             configureMarkdownSession()
+        }
+        .onChange(of: model.markdownEditorSession?.materialID) {
+            showsAdvancedBlocks = false
         }
         .background(SNColor.white)
         .alert(
@@ -278,6 +315,30 @@ private struct ArticleMaterialReader: View {
                     ?? "磁盘内容已变化，当前编辑内容仍保留在编辑器中。"
             )
         }
+        .sheet(isPresented: $showsAdvancedBlocks) {
+            if let session = model.markdownEditorSession {
+                AdvancedBlockToolsPanel(session: session)
+            }
+        }
+        .sheet(isPresented: $showsDocumentCardPicker) {
+            DocumentCardPickerSheet(
+                materials: model.allActiveMaterials.filter {
+                    $0.id != document.id
+                }
+            ) { material in
+                model.markdownEditorSession?.insertBlock(
+                    EditorDocumentBlockEnvelope(
+                        id: UUID(),
+                        type: "document-card",
+                        fallback: "[\(material.title)](studynotes://document/\(material.id.uuidString))",
+                        data: .object([
+                            "materialID": .string(material.id.uuidString),
+                            "title": .string(material.title)
+                        ])
+                    )
+                )
+            }
+        }
         .fileImporter(
             isPresented: $showsImageImporter,
             allowedContentTypes: [.image],
@@ -291,6 +352,20 @@ private struct ArticleMaterialReader: View {
             allowsMultipleSelection: false
         ) { result in
             handleAttachment(result, kind: .file)
+        }
+        .fileImporter(
+            isPresented: $showsAudioImporter,
+            allowedContentTypes: [.audio],
+            allowsMultipleSelection: false
+        ) { result in
+            handleAttachment(result, kind: .audio)
+        }
+        .fileImporter(
+            isPresented: $showsVideoImporter,
+            allowedContentTypes: [.movie],
+            allowsMultipleSelection: false
+        ) { result in
+            handleAttachment(result, kind: .video)
         }
     }
 
@@ -310,9 +385,20 @@ private struct ArticleMaterialReader: View {
                     url.stopAccessingSecurityScopedResource()
                 }
             }
+            let fallbackContentType: String
+            switch kind {
+            case .image:
+                fallbackContentType = "image/jpeg"
+            case .audio:
+                fallbackContentType = "audio/mpeg"
+            case .video:
+                fallbackContentType = "video/mp4"
+            case .file:
+                fallbackContentType = "application/octet-stream"
+            }
             let contentType = NoteMediaPolicy.contentType(
                 forFileExtension: url.pathExtension
-            ) ?? (kind == .image ? "image/jpeg" : "application/octet-stream")
+            ) ?? fallbackContentType
             guard case let .inserted(insertion)? = await model.insertNoteMedia(
                 fileAt: url,
                 contentType: contentType,
@@ -361,6 +447,62 @@ private struct ArticleMaterialReader: View {
         }
         session.updateAnnotations(model.annotations)
         session.selectAnnotation(model.annotationJumpID)
+    }
+}
+
+private struct DocumentCardPickerSheet: View {
+    let materials: [StudyMaterialSummary]
+    let onInsert: (StudyMaterialSummary) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedID: UUID?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("插入文档卡片")
+                .font(.sn(16, weight: .semibold))
+
+            if materials.isEmpty {
+                Text("当前知识库没有其他可引用的材料。")
+                    .font(.sn(12))
+                    .foregroundStyle(SNColor.muted)
+                    .frame(maxWidth: .infinity, minHeight: 120)
+            } else {
+                List(materials, selection: $selectedID) { material in
+                    HStack(spacing: 8) {
+                        Image(systemName: material.kind.systemImage)
+                            .foregroundStyle(SNColor.blue)
+                        Text(material.title)
+                            .font(.sn(12))
+                            .lineLimit(1)
+                    }
+                    .tag(material.id)
+                    .accessibilityLabel("\(material.kind.displayName)：\(material.title)")
+                }
+                .frame(minHeight: 260)
+            }
+
+            HStack {
+                Spacer()
+                Button("取消") {
+                    dismiss()
+                }
+                Button("插入") {
+                    guard let selectedID,
+                          let material = materials.first(where: {
+                              $0.id == selectedID
+                          }) else {
+                        return
+                    }
+                    onInsert(material)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(SNColor.blue)
+                .disabled(selectedID == nil)
+            }
+        }
+        .padding(20)
+        .frame(width: 440, height: 380)
     }
 }
 

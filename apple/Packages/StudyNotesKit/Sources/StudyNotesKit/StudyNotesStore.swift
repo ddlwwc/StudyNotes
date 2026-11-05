@@ -745,6 +745,92 @@ public actor StudyNotesStore {
         }
     }
 
+    @discardableResult
+    public func exportEditorDocumentMarkdown(
+        id: UUID,
+        to destinationURL: URL
+    ) throws -> URL {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+
+        return try coordinatedRead(at: rootURL) {
+            guard let located = try locateMaterial(
+                id: id,
+                rootURL: rootURL,
+                includeRecycled: false
+            ), located.manifest.kind.isTextDocument else {
+                throw StudyNotesError.materialNotFound
+            }
+            let content = try loadEditorDocumentContent(for: located)
+            let blocks = content.blocks.compactMap { $0.editorBlock() }
+            return try EditorExportService().writeReadableMarkdown(
+                markdown: content.markdown,
+                blocks: blocks,
+                destinationURL: destinationURL
+            )
+        }
+    }
+
+    @discardableResult
+    public func exportEditorDocumentPackage(
+        id: UUID,
+        to destinationURL: URL
+    ) throws -> URL {
+        let rootURL = try availableRootURL()
+        try prepareRootDirectories(at: rootURL)
+
+        return try coordinatedRead(at: rootURL) {
+            guard let located = try locateMaterial(
+                id: id,
+                rootURL: rootURL,
+                includeRecycled: false
+            ), located.manifest.kind.isTextDocument else {
+                throw StudyNotesError.materialNotFound
+            }
+            let content = try loadEditorDocumentContent(for: located)
+            let blocks = content.blocks.compactMap { $0.editorBlock() }
+            let parent = destinationURL.deletingLastPathComponent()
+            let temporary = parent.appending(
+                path: ".package-\(UUID().uuidString)",
+                directoryHint: .isDirectory
+            )
+            try fileManager.createDirectory(
+                at: parent,
+                withIntermediateDirectories: true
+            )
+            do {
+                try fileManager.copyItem(
+                    at: located.packageURL,
+                    to: temporary
+                )
+                let transactionDirectory = temporary
+                    .appending(path: "content", directoryHint: .isDirectory)
+                    .appending(
+                        path: "transactions",
+                        directoryHint: .isDirectory
+                    )
+                try? fileManager.removeItem(at: transactionDirectory)
+                let readable = try EditorMarkdownFallback()
+                    .readableMarkdown(
+                        content.markdown,
+                        blocks: blocks
+                    )
+                try Data(readable.utf8).write(
+                    to: temporary.appending(path: "readable.md"),
+                    options: .atomic
+                )
+                if fileManager.fileExists(atPath: destinationURL.path) {
+                    try fileManager.removeItem(at: destinationURL)
+                }
+                try fileManager.moveItem(at: temporary, to: destinationURL)
+                return destinationURL
+            } catch {
+                try? fileManager.removeItem(at: temporary)
+                throw error
+            }
+        }
+    }
+
     public func importFiles(
         at fileURLs: [URL],
         knowledgeBaseID: UUID?,

@@ -8,6 +8,7 @@ public struct MarkdownEditorSnapshot: Equatable, Sendable {
     public let fingerprint: String
     public let compatibilityBlocks: [MarkdownCompatibilityBlock]
     public let isLocked: Bool
+    public let blocks: [EditorDocumentBlockEnvelope]
 
     public init(
         materialID: UUID,
@@ -15,7 +16,8 @@ public struct MarkdownEditorSnapshot: Equatable, Sendable {
         markdown: String,
         fingerprint: String,
         compatibilityBlocks: [MarkdownCompatibilityBlock],
-        isLocked: Bool = false
+        isLocked: Bool = false,
+        blocks: [EditorDocumentBlockEnvelope] = []
     ) {
         self.materialID = materialID
         self.title = title
@@ -23,6 +25,7 @@ public struct MarkdownEditorSnapshot: Equatable, Sendable {
         self.fingerprint = fingerprint
         self.compatibilityBlocks = compatibilityBlocks
         self.isLocked = isLocked
+        self.blocks = blocks
     }
 }
 
@@ -30,6 +33,7 @@ public struct MarkdownEditorSaveRequest: Equatable, Sendable {
     public let materialID: UUID
     public let title: String
     public let markdown: String
+    public let blocks: [EditorDocumentBlockEnvelope]
     public let expectedFingerprint: String
     public let createRecoveryVersion: Bool
 
@@ -37,12 +41,14 @@ public struct MarkdownEditorSaveRequest: Equatable, Sendable {
         materialID: UUID,
         title: String,
         markdown: String,
+        blocks: [EditorDocumentBlockEnvelope] = [],
         expectedFingerprint: String,
         createRecoveryVersion: Bool
     ) {
         self.materialID = materialID
         self.title = title
         self.markdown = markdown
+        self.blocks = blocks
         self.expectedFingerprint = expectedFingerprint
         self.createRecoveryVersion = createRecoveryVersion
     }
@@ -80,6 +86,7 @@ public final class MarkdownEditorSession {
     public private(set) var title: String
     public private(set) var markdown: String
     public private(set) var compatibilityBlocks: [MarkdownCompatibilityBlock]
+    public private(set) var blocks: [EditorDocumentBlockEnvelope]
     public private(set) var saveState: MarkdownSaveState
     public private(set) var titleConflict: MarkdownEditorTitleConflict?
     public private(set) var errorMessage: String?
@@ -124,6 +131,7 @@ public final class MarkdownEditorSession {
         title = snapshot.title
         markdown = snapshot.markdown
         compatibilityBlocks = snapshot.compatibilityBlocks
+        blocks = snapshot.blocks
         expectedFingerprint = snapshot.fingerprint
         saveState = MarkdownSaveState()
         self.codec = codec
@@ -169,10 +177,22 @@ public final class MarkdownEditorSession {
         case .ready:
             didBecomeReady = true
             sendDocumentRuntime()
-        case let .loadDocument(markdown, title, compatibilityBlocks):
+        case let .loadDocument(
+            markdown,
+            title,
+            compatibilityBlocks,
+            blocks
+        ):
             self.markdown = markdown
             self.title = title
             self.compatibilityBlocks = compatibilityBlocks
+            self.blocks = blocks
+        case let .blockInsertRequested(block):
+            insertBlock(block)
+        case let .blockUpdateRequested(block):
+            updateBlock(block)
+        case let .blockRemoveRequested(blockID):
+            removeBlock(id: blockID)
         case let .markdownChanged(markdown):
             self.markdown = markdown
             scheduleContentChanged()
@@ -415,6 +435,7 @@ public final class MarkdownEditorSession {
         title = snapshot.title
         markdown = snapshot.markdown
         compatibilityBlocks = snapshot.compatibilityBlocks
+        blocks = snapshot.blocks
         expectedFingerprint = snapshot.fingerprint
         isLocked = snapshot.isLocked
         mode = snapshot.isLocked ? .annotate : .edit
@@ -462,6 +483,14 @@ public final class MarkdownEditorSession {
             markdownSyntax = "![\(normalizedLabel.isEmpty ? "图片" : normalizedLabel)](\(reference.stringValue))"
         case .file:
             markdownSyntax = "[\(normalizedLabel.isEmpty ? "附件" : normalizedLabel)](\(reference.stringValue))"
+        case .audio:
+            markdownSyntax = """
+            <audio controls src="\(reference.stringValue)" aria-label="\(normalizedLabel.isEmpty ? "音频" : normalizedLabel)"></audio>
+            """
+        case .video:
+            markdownSyntax = """
+            <video controls src="\(reference.stringValue)" aria-label="\(normalizedLabel.isEmpty ? "视频" : normalizedLabel)"></video>
+            """
         }
         if !markdown.isEmpty, !markdown.hasSuffix("\n") {
             markdown += "\n"
@@ -472,6 +501,93 @@ public final class MarkdownEditorSession {
         markdown += markdownSyntax
         sendLoadedDocument()
         Task { await reduce(.contentChanged) }
+    }
+
+    public func insertBlock(_ block: EditorDocumentBlockEnvelope) {
+        do {
+            try block.validate()
+            guard !blocks.contains(where: { $0.id == block.id }) else {
+                throw EditorBlockError.duplicateBlockID(block.id)
+            }
+            blocks.append(block)
+            appendToMarkdown(Self.markdown(for: block))
+            sendLoadedDocument()
+            Task { await reduce(.contentChanged) }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func updateBlock(_ block: EditorDocumentBlockEnvelope) {
+        guard let index = blocks.firstIndex(where: { $0.id == block.id })
+        else {
+            errorMessage = "没有找到要更新的复杂块。"
+            return
+        }
+        do {
+            try block.validate()
+            let previous = blocks[index]
+            blocks[index] = block
+            if let range = markdown.range(
+                of: Self.markdown(for: previous),
+                options: [.literal]
+            ) {
+                markdown.replaceSubrange(range, with: Self.markdown(for: block))
+            }
+            sendLoadedDocument()
+            Task { await reduce(.contentChanged) }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    public func removeBlock(id: UUID) {
+        guard let index = blocks.firstIndex(where: { $0.id == id })
+        else {
+            return
+        }
+        let block = blocks.remove(at: index)
+        if let range = markdown.range(
+            of: Self.markdown(for: block),
+            options: [.literal]
+        ) {
+            markdown.removeSubrange(range)
+            normalizeBlockSpacing()
+        }
+        sendLoadedDocument()
+        Task { await reduce(.contentChanged) }
+    }
+
+    public static func markdown(
+        for block: EditorDocumentBlockEnvelope
+    ) -> String {
+        """
+        <!-- studynotes:block id="\(block.id.uuidString)" type="\(block.type)" version="\(block.version)" -->
+        \(block.fallback)
+        <!-- /studynotes:block -->
+        """
+    }
+
+    private func appendToMarkdown(_ value: String) {
+        if !markdown.isEmpty, !markdown.hasSuffix("\n") {
+            markdown += "\n"
+        }
+        if !markdown.isEmpty, !markdown.hasSuffix("\n\n") {
+            markdown += "\n"
+        }
+        markdown += value
+        if !markdown.hasSuffix("\n") {
+            markdown += "\n"
+        }
+    }
+
+    private func normalizeBlockSpacing() {
+        while markdown.contains("\n\n\n") {
+            markdown = markdown.replacingOccurrences(
+                of: "\n\n\n",
+                with: "\n\n"
+            )
+        }
     }
 
     private func reduce(_ event: MarkdownSaveEvent) async {
@@ -576,6 +692,7 @@ public final class MarkdownEditorSession {
                     materialID: materialID,
                     title: title,
                     markdown: markdown,
+                    blocks: blocks,
                     expectedFingerprint: expectedFingerprint,
                     createRecoveryVersion: createRecoveryVersion
                 )
@@ -615,7 +732,8 @@ public final class MarkdownEditorSession {
             .loadDocument(
                 markdown: markdown,
                 title: title,
-                compatibilityBlocks: compatibilityBlocks
+                compatibilityBlocks: compatibilityBlocks,
+                blocks: blocks
             )
         )
     }

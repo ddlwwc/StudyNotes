@@ -3,6 +3,11 @@ import Network
 import Observation
 import StudyNotesKit
 
+public enum WorkspaceEditorExportFormat: String, Sendable {
+    case markdown
+    case package
+}
+
 @MainActor
 @Observable
 public final class WorkspaceModel {
@@ -121,6 +126,8 @@ public final class WorkspaceModel {
     @ObservationIgnored private var noteLoadGeneration = 0
     @ObservationIgnored private var refreshGeneration = 0
     @ObservationIgnored private var treeSelectionAnchorID: UUID?
+    @ObservationIgnored private var pendingEditorRecovery:
+        EditorDocumentTransaction?
 
     public init(
         rootStore: WorkspaceRootStore = WorkspaceRootStore(),
@@ -2434,6 +2441,12 @@ public final class WorkspaceModel {
         markdownEditorSession != nil
     }
 
+    public var isMarkdownDocumentLocked: Bool {
+        markdownEditorSession?.isLocked
+            ?? selectedDocument?.isLocked
+            ?? false
+    }
+
     public func beginMarkdownEditing() {
         guard let document = selectedDocument,
               document.summary.kind == .note
@@ -2444,19 +2457,39 @@ public final class WorkspaceModel {
             return
         }
         let decoded = try? MarkdownEditorCodec().decode(document.markdown)
+        let pending = pendingEditorRecovery?.materialID == document.id
+            ? pendingEditorRecovery
+            : nil
+        let initialMarkdown = pending?.markdown ?? document.markdown
+        let initialTitle = pending?.title ?? document.summary.title
+        let initialBlocks = pending?.blocks ?? document.blocks
         markdownEditorSession = MarkdownEditorSession(
             snapshot: MarkdownEditorSnapshot(
                 materialID: document.id,
-                title: document.summary.title,
-                markdown: document.markdown,
-                fingerprint: ContentFingerprint.sha256(document.markdown),
-                compatibilityBlocks: decoded?.compatibilityBlocks ?? []
+                title: initialTitle,
+                markdown: initialMarkdown,
+                fingerprint: document.contentFingerprint
+                    ?? ContentFingerprint.sha256(document.markdown),
+                compatibilityBlocks: decoded?.compatibilityBlocks ?? [],
+                isLocked: document.isLocked,
+                blocks: initialBlocks
             )
         ) { [weak self] request in
             guard let self else {
                 return .failed(reason: "编辑器所属工作区已关闭。")
             }
             return await self.persistMarkdownEditor(request)
+        } lockHandler: { [weak self] in
+            guard let self else {
+                return .blocked(reason: "编辑器所属工作区已关闭。")
+            }
+            return await self.persistMarkdownEditorLock()
+        }
+        markdownEditorSession?.updateAnnotations(annotations)
+        markdownEditorSession?.selectAnnotation(annotationJumpID)
+        if pending != nil {
+            actionNotice = "已恢复上次未提交的编辑器内容"
+            pendingEditorRecovery = nil
         }
     }
 
@@ -2465,22 +2498,30 @@ public final class WorkspaceModel {
         guard let session = markdownEditorSession else {
             return true
         }
-        await session.endEditing()
-        if session.saveState.status == .saved,
-           session.titleConflict == nil,
-           session.errorMessage == nil {
-            markdownEditorSession = nil
+        switch await session.lock() {
+        case .allowed:
+            if let document = try? await store?.loadMaterialDocument(
+                id: session.materialID
+            ) {
+                selectedDocument = await resolvedMediaDocument(document)
+                annotations = (try? await store?.loadAnnotations(
+                    materialID: session.materialID
+                )) ?? annotations
+                session.updateAnnotations(annotations)
+            }
+            actionNotice = "已保存并完成编辑"
             return true
+        case let .blocked(reason):
+            errorMessage = reason
+            return false
         }
-        errorMessage = session.errorMessage ?? "当前编辑内容尚未保存。"
-        return false
     }
 
     public func toggleMarkdownEditing() async {
-        if isEditingMarkdown {
-            _ = await finishMarkdownEditing()
-        } else {
+        if !isEditingMarkdown {
             beginMarkdownEditing()
+        } else if !isMarkdownDocumentLocked {
+            _ = await finishMarkdownEditing()
         }
     }
 
@@ -2548,6 +2589,43 @@ public final class WorkspaceModel {
         }
     }
 
+    public func exportSelectedEditorDocument(
+        as format: WorkspaceEditorExportFormat,
+        to destinationURL: URL
+    ) async -> Bool {
+        guard let store,
+              let materialID = markdownEditorSession?.materialID
+                ?? selectedDocument?.summary.id else {
+            return false
+        }
+        guard await prepareEditorAction(.export) else {
+            return false
+        }
+        isPerformingAction = true
+        defer { isPerformingAction = false }
+        do {
+            switch format {
+            case .markdown:
+                try await store.exportEditorDocumentMarkdown(
+                    id: materialID,
+                    to: destinationURL
+                )
+            case .package:
+                try await store.exportEditorDocumentPackage(
+                    id: materialID,
+                    to: destinationURL
+                )
+            }
+            actionNotice = format == .markdown
+                ? "已导出 Markdown"
+                : "已导出完整 StudyNotes 包"
+            return true
+        } catch {
+            present(error)
+            return false
+        }
+    }
+
     public func saveReaderCopy(_ text: String) async -> Bool {
         guard let store, let document = selectedDocument else {
             return false
@@ -2561,7 +2639,9 @@ public final class WorkspaceModel {
             selectedNote = updated.summary.kind == .note
                 ? MarkdownNote(summary: updated.summary, markdown: updated.markdown)
                 : nil
-            revisions = try await store.loadTextRevisions(id: document.summary.id)
+            revisions = document.summary.kind == .note
+                ? []
+                : try await store.loadTextRevisions(id: document.summary.id)
             isShowingEditReaderCopy = false
             actionNotice = "已保存阅读副本并保留最近的文字版本"
             await reloadIndexPreservingSelection()
@@ -2579,18 +2659,21 @@ public final class WorkspaceModel {
             return .failed(reason: "学习目录尚未连接。")
         }
         do {
-            let current = try await store.loadMaterialDocument(
+            let current = try await store.loadEditorDocument(
                 id: request.materialID
             )
-            let currentFingerprint = ContentFingerprint.sha256(current.markdown)
+            let currentFingerprint = current.contentFingerprint
             guard currentFingerprint == request.expectedFingerprint else {
                 return .conflict(currentFingerprint: currentFingerprint)
             }
-            _ = try await store.saveReaderCopy(
-                id: request.materialID,
-                text: request.markdown,
-                title: request.title,
-                createRecoveryVersion: request.createRecoveryVersion
+            let saved = try await store.saveEditorDocument(
+                EditorDocumentSaveRequest(
+                    materialID: request.materialID,
+                    title: request.title,
+                    markdown: request.markdown,
+                    blocks: request.blocks,
+                    expectedContentFingerprint: request.expectedFingerprint
+                )
             )
             let updated = try await store.loadMaterialDocument(
                 id: request.materialID
@@ -2605,20 +2688,36 @@ public final class WorkspaceModel {
             annotations = try await store.loadAnnotations(
                 materialID: request.materialID
             )
-            revisions = try await store.loadTextRevisions(
-                id: request.materialID
-            )
+            markdownEditorSession?.updateAnnotations(annotations)
+            revisions = []
             await reloadIndexPreservingSelection()
-            actionNotice = request.createRecoveryVersion
-                ? "已保存并创建可恢复版本"
-                : "已保存"
+            actionNotice = "已保存本地"
             return .saved(
-                title: request.title,
+                title: saved.title,
                 markdown: updated.markdown,
-                fingerprint: ContentFingerprint.sha256(updated.markdown)
+                fingerprint: saved.contentFingerprint
             )
         } catch {
             return .failed(reason: error.localizedDescription)
+        }
+    }
+
+    private func persistMarkdownEditorLock() async -> MarkdownEditorActionDecision {
+        guard let store, let session = markdownEditorSession else {
+            return .blocked(reason: "编辑器所属工作区已关闭。")
+        }
+        guard annotationDraftRequest == nil,
+              inlineAnnotationDraft == nil else {
+            return .blocked(reason: "请先保存或取消未提交的标注草稿。")
+        }
+        do {
+            _ = try await store.setEditorDocumentLocked(
+                id: session.materialID,
+                isLocked: true
+            )
+            return .allowed
+        } catch {
+            return .blocked(reason: error.localizedDescription)
         }
     }
 
@@ -2640,6 +2739,10 @@ public final class WorkspaceModel {
 
     public func loadRevisions() async {
         guard let store, let document = selectedDocument else {
+            return
+        }
+        guard document.summary.kind != .note else {
+            revisions = []
             return
         }
         guard await prepareEditorAction(.versions) else {
@@ -3494,6 +3597,7 @@ public final class WorkspaceModel {
             readerSelection = nil
             inlineAnnotationDraft = nil
             annotationLayoutPositions = [:]
+            pendingEditorRecovery = nil
             return
         }
 
@@ -3536,7 +3640,12 @@ public final class WorkspaceModel {
             sourceFileURL: document.sourceFileURL,
             mediaURLs: mediaURLs,
             pageCount: document.pageCount,
-            hasTextLayer: document.hasTextLayer
+            hasTextLayer: document.hasTextLayer,
+            isLocked: document.isLocked,
+            currentGenerationID: document.currentGenerationID,
+            contentFingerprint: document.contentFingerprint,
+            blocks: document.blocks,
+            derivedRebuildPending: document.derivedRebuildPending
         )
     }
 
@@ -3556,6 +3665,9 @@ public final class WorkspaceModel {
 
         do {
             let loadedDocument = try await store.loadMaterialDocument(id: id)
+            let pending = try? await store.loadPendingEditorDocumentTransaction(
+                id: id
+            )
             let document = await resolvedMediaDocument(loadedDocument)
             let loadedAnnotations = try await store.loadAnnotations(materialID: id)
             let loadedConversations = try await store.loadConversations(materialID: id)
@@ -3573,6 +3685,11 @@ public final class WorkspaceModel {
             annotationLayoutPositions = [:]
             annotationJumpID = nil
             activeConversationID = loadedConversations.first?.id
+            pendingEditorRecovery = pending
+            if document.summary.kind == .note
+                || document.summary.kind == .markdown {
+                beginMarkdownEditing()
+            }
         } catch {
             guard noteLoadGeneration == generation else {
                 return

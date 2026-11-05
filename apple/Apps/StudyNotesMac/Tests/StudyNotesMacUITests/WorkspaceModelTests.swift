@@ -887,6 +887,48 @@ struct WorkspaceModelTests {
         #expect(workspace.model.errorMessage != nil)
     }
 
+    @Test("workspace notes use one generation-backed editor and persist lock")
+    func workspaceUsesEditorTransactionAndLock() async throws {
+        let workspace = try await makeWorkspace { store in
+            let knowledgeBase = try await store.createKnowledgeBase(named: "事务")
+            _ = try await store.createMarkdownNote(
+                title: "事务笔记",
+                in: knowledgeBase.id,
+                markdown: "# 事务笔记\n\n初始正文"
+            )
+            return knowledgeBase.id
+        }
+        defer { workspace.remove() }
+
+        await workspace.model.selectKnowledgeBase(workspace.knowledgeBaseID)
+        let material = try #require(workspace.model.materials.first)
+        await workspace.model.selectMaterial(material.id)
+        let session = try #require(workspace.model.markdownEditorSession)
+        #expect(!session.isLocked)
+        #expect(session.mode == .edit)
+        let legacyStore = StudyNotesStore(rootURL: workspace.directory)
+        let legacyRevisionCount = try await legacyStore.loadTextRevisions(
+            id: material.id
+        ).count
+
+        session.receive(.markdownChanged("# 事务笔记\n\n事务正文"))
+        await session.requestExplicitSave()
+        #expect(session.saveState.status == .saved)
+
+        let store = StudyNotesStore(rootURL: workspace.directory)
+        let saved = try await store.loadEditorDocument(id: material.id)
+        #expect(saved.markdown == "# 事务笔记\n\n事务正文")
+        #expect(saved.currentGenerationID != nil)
+        let revisions = try await store.loadTextRevisions(id: material.id)
+        #expect(revisions.count == legacyRevisionCount)
+
+        #expect(await workspace.model.finishMarkdownEditing())
+        #expect(workspace.model.markdownEditorSession === session)
+        #expect(session.isLocked)
+        #expect(session.mode == .annotate)
+        #expect(try await store.loadEditorDocument(id: material.id).isLocked)
+    }
+
     private func makeModel(
         defaults: UserDefaults,
         mediaSecretStore: any SecretStoring = MemorySecretStore()
