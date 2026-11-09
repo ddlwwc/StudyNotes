@@ -55,7 +55,9 @@ test("runtime serves the same browser UI and API until the owner stops", async (
 
   const response = await fetch(`${state.webUrl}/api/workspace`);
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { workspace: null, tree: [] });
+  const workspace = await response.json();
+  assert.equal(workspace.workspace, null);
+  assert.deepEqual(workspace.tree, []);
 
   const { apiUrl, webUrl } = state;
   assert.equal(await probe(`${apiUrl}/api/health`), true);

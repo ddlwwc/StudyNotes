@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { access, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -37,12 +38,19 @@ if (!(await exists(python))) {
   await run("python3", ["-m", "venv", venvDir], { cwd: root });
 }
 
-if (!(await exists(marker))) {
+const requirements = await readFile(
+  path.join(backendDir, "requirements.txt"),
+  "utf8"
+);
+const fingerprint = createHash("sha256").update(requirements).digest("hex");
+const installedFingerprint = await readFile(marker, "utf8").catch(() => "");
+
+if (installedFingerprint.trim() !== fingerprint) {
   console.log("Installing StudyNotes backend dependencies...");
   await run(
     python,
     ["-m", "pip", "install", "-r", path.join(backendDir, "requirements.txt")],
     { cwd: root }
   );
-  await writeFile(marker, `${new Date().toISOString()}\n`, "utf8");
+  await writeFile(marker, `${fingerprint}\n`, "utf8");
 }

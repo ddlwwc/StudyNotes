@@ -5,7 +5,7 @@
   "type": "module",
   "main": "desktop/main.cjs",
   "scripts": {
-    "postinstall": "node scripts/install-electron.mjs && node scripts/setup-backend.mjs",
+    "postinstall": "node scripts/install-electron.mjs && node scripts/setup-backend.mjs && node scripts/copy-pdfjs-assets.mjs",
     "dev": "node scripts/dev.mjs",
     "dev:desktop": "electron desktop/main.cjs",
     "build": "next build",
@@ -20,6 +20,7 @@
   "dependencies": {
     "lucide-react": "0.468.0",
     "next": "16.4.5",
+    "pdfjs-dist": "4.10.38",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "react-markdown": "10.1.0",
