@@ -3,14 +3,19 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "main": "desktop/main.cjs",
   "scripts": {
-    "postinstall": "node scripts/install-electron.mjs",
+    "postinstall": "node scripts/install-electron.mjs && node scripts/setup-backend.mjs",
     "dev": "node scripts/dev.mjs",
     "dev:desktop": "electron desktop/main.cjs",
     "build": "next build",
-    "test": "playwright test",
+    "build:backend": "node scripts/build-backend.mjs",
+    "package:mac": "npm run build && npm run build:backend && electron-builder --mac dmg && node scripts/package-smoke.mjs",
+    "smoke:package": "node scripts/package-smoke.mjs",
+    "test": "npm run test:runtime && playwright test",
     "test:e2e": "playwright test",
-    "check": "npm run test:e2e && npm run build"
+    "test:runtime": "node --test desktop/test/*.test.cjs",
+    "check": "npm run test && npm run build && npm run build:backend"
   },
   "dependencies": {
     "lucide-react": "0.468.0",
@@ -26,6 +31,52 @@
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
     "electron": "45.2.3",
+    "electron-builder": "26.18.0",
     "typescript": "7.0.2"
+  },
+  "build": {
+    "appId": "com.studynotes.desktop",
+    "productName": "StudyNotes",
+    "artifactName": "StudyNotes-${version}-${arch}.${ext}",
+    "asar": true,
+    "asarUnpack": [
+      "desktop/**/*.cjs"
+    ],
+    "files": [
+      "desktop/**/*.cjs",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": ".next/standalone",
+        "to": "web"
+      },
+      {
+        "from": ".next/standalone/node_modules",
+        "to": "web/node_modules"
+      },
+      {
+        "from": ".next/static",
+        "to": "web/.next/static"
+      },
+      {
+        "from": "backend/dist/studynotes-api",
+        "to": "backend/studynotes-api"
+      }
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "npmRebuild": false,
+    "mac": {
+      "category": "public.app-category.education",
+      "identity": null,
+      "target": [
+        "dmg"
+      ]
+    },
+    "dmg": {
+      "title": "StudyNotes ${version}"
+    }
   }
 }
