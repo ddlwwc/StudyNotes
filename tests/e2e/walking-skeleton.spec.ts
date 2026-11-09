@@ -623,6 +623,183 @@ test("external Markdown changes refresh the page tree and open page", async ({
   }
 });
 
+test("Cmd+K searches Markdown content and jumps to the matching block", async ({
+  page
+}) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  const chapterDir = path.join(workspaceDir, "课程", "第一章");
+  await mkdir(chapterDir, { recursive: true });
+  const targetParagraph = "稀疏路由只激活少量专家。";
+  const filler = Array.from(
+    { length: 36 },
+    (_, index) => `这是用于撑开页面的说明段落 ${index + 1}。`
+  ).join("\n\n");
+  await writeFile(
+    path.join(chapterDir, "注意力机制.md"),
+    [
+      "---",
+      "tags:",
+      "  - 认知科学",
+      "  - transformer",
+      "---",
+      "",
+      "# 注意力机制",
+      "",
+      "注意力帮助我们筛选信息。",
+      "",
+      filler,
+      "",
+      "## 稀疏路由",
+      "",
+      targetParagraph,
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+
+  const app = await startApp();
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await expect(
+      page.getByRole("button", { name: "注意力机制.md", exact: true })
+    ).toBeVisible();
+
+    await page.keyboard.press("Meta+k");
+    const dialog = page.getByRole("dialog", { name: "搜索学习资料" });
+    await expect(dialog).toBeVisible();
+    const search = dialog.getByRole("searchbox", { name: "搜索学习资料" });
+
+    await search.fill("第一章");
+    await expect(dialog.getByText("课程/第一章/注意力机制.md")).toBeVisible();
+
+    await search.fill("认知科学");
+    await expect(dialog.getByText("标签：认知科学")).toBeVisible();
+
+    await search.fill("注意力机制");
+    await expect(
+      dialog.getByRole("button", { name: /注意力机制\.md/ })
+    ).toBeVisible();
+
+    await search.fill("稀疏路由只激活少量专家");
+    await dialog
+      .getByRole("button", { name: /稀疏路由只激活少量专家/ })
+      .click();
+
+    await expect(dialog).toBeHidden();
+    const target = page.getByText(targetParagraph, { exact: true });
+    await expect(target).toBeVisible();
+    await expect(target).toBeInViewport();
+    await expect(page.locator(".search-target")).toContainText(targetParagraph);
+  } finally {
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("Cmd+K opens a PDF search result on the matching page", async ({ page }) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  await mkdir(path.join(workspaceDir, "课程"), { recursive: true });
+  await writeFile(
+    path.join(workspaceDir, "课程", "注意力研究.pdf"),
+    createTextLayerPdf()
+  );
+  const app = await startApp();
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await expect(
+      page.getByRole("button", { name: "注意力研究.pdf", exact: true })
+    ).toBeVisible();
+
+    await page.keyboard.press("Meta+k");
+    const dialog = page.getByRole("dialog", { name: "搜索学习资料" });
+    const search = dialog.getByRole("searchbox", { name: "搜索学习资料" });
+    await search.fill("Second page evidence");
+    await expect(dialog.getByText("第 2 页", { exact: true })).toBeVisible();
+    await dialog
+      .getByRole("button", { name: /Second page evidence/ })
+      .click();
+
+    await expect(page.getByText("第 2 / 3 页", { exact: true })).toBeVisible();
+  } finally {
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("the search index updates incrementally and can be rebuilt from files", async ({
+  page
+}) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  const courseDir = path.join(workspaceDir, "课程");
+  const firstPath = path.join(courseDir, "第一章.md");
+  const secondPath = path.join(courseDir, "第二章.md");
+  await mkdir(courseDir, { recursive: true });
+  await writeFile(firstPath, "# 第一章\n\n共同种子。\n", "utf8");
+  await writeFile(secondPath, "# 第二章\n\n共同种子。\n", "utf8");
+  const app = await startApp();
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+
+    const initial = await page.evaluate(async () => {
+      const response = await fetch("/api/search?q=共同种子");
+      return (await response.json()) as {
+        index: { indexedSources: number };
+        results: unknown[];
+      };
+    });
+    expect(initial.index.indexedSources).toBe(2);
+    expect(initial.results).toHaveLength(2);
+
+    await writeFile(
+      firstPath,
+      "# 第一章\n\n共同种子。\n\n只更新这一份资料的增量词。\n",
+      "utf8"
+    );
+    const incremental = await page.evaluate(async () => {
+      const response = await fetch("/api/search?q=增量词");
+      return (await response.json()) as {
+        index: { indexedSources: number; unchangedSources: number };
+        results: Array<{ path: string }>;
+      };
+    });
+    expect(incremental.index.indexedSources).toBe(1);
+    expect(incremental.index.unchangedSources).toBe(1);
+    expect(incremental.results.map((result) => result.path)).toEqual([
+      "课程/第一章.md"
+    ]);
+
+    const rebuilt = await page.evaluate(async () => {
+      const response = await fetch("/api/search/reindex", { method: "POST" });
+      return (await response.json()) as {
+        index: { indexedSources: number };
+      };
+    });
+    expect(rebuilt.index.indexedSources).toBe(2);
+
+    const afterRebuild = await page.evaluate(async () => {
+      const response = await fetch("/api/search?q=增量词");
+      return (await response.json()) as {
+        results: Array<{ path: string }>;
+      };
+    });
+    expect(afterRebuild.results.map((result) => result.path)).toEqual([
+      "课程/第一章.md"
+    ]);
+  } finally {
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
 test("an external edit conflicts with unsaved content without overwriting Markdown", async ({
   page
 }) => {
