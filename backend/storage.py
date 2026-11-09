@@ -1,5 +1,7 @@
+import json
 import os
 import sqlite3
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -90,6 +92,34 @@ def initialize_database() -> None:
                 body,
                 tokenize = 'trigram case_sensitive 0'
             );
+
+            CREATE TABLE IF NOT EXISTS learning_sessions (
+                id TEXT PRIMARY KEY,
+                workspace_path TEXT NOT NULL,
+                path TEXT NOT NULL,
+                block_id TEXT,
+                quote TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS learning_sessions_workspace
+            ON learning_sessions (workspace_path, updated_at);
+
+            CREATE TABLE IF NOT EXISTS session_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_path TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                answer_type TEXT,
+                citations_json TEXT,
+                context_json TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS session_messages_session
+            ON session_messages (workspace_path, session_id, id);
             """
         )
 
@@ -129,6 +159,140 @@ def save_active_workspace(workspace: Path) -> None:
             """,
             (str(workspace),),
         )
+
+
+def load_app_setting(key: str, default: str = "") -> str:
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT value FROM app_state WHERE key = ?",
+            (key,),
+        ).fetchone()
+    return str(row["value"]) if row is not None else default
+
+
+def save_app_setting(key: str, value: str) -> None:
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO app_state (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, value),
+        )
+
+
+def create_learning_session(
+    workspace: Path,
+    relative_path: str,
+    block_id: str,
+    quote: str,
+) -> dict[str, object]:
+    session_id = str(uuid.uuid4())
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO learning_sessions (
+                id,
+                workspace_path,
+                path,
+                block_id,
+                quote
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                str(workspace.resolve()),
+                relative_path,
+                block_id,
+                quote,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM learning_sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("Learning session was not persisted.")
+    return dict(row)
+
+
+def load_learning_session(
+    workspace: Path,
+    session_id: str,
+) -> Optional[dict[str, object]]:
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM learning_sessions
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (str(workspace.resolve()), session_id),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def save_session_message(
+    workspace: Path,
+    session_id: str,
+    role: str,
+    content: str,
+    *,
+    answer_type: Optional[str] = None,
+    citations: object = None,
+    context: object = None,
+) -> dict[str, object]:
+    citations_json = (
+        json.dumps(citations, ensure_ascii=False)
+        if citations is not None
+        else None
+    )
+    context_json = (
+        json.dumps(context, ensure_ascii=False)
+        if context is not None
+        else None
+    )
+    with connect() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO session_messages (
+                workspace_path,
+                session_id,
+                role,
+                content,
+                answer_type,
+                citations_json,
+                context_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(workspace.resolve()),
+                session_id,
+                role,
+                content,
+                answer_type,
+                citations_json,
+                context_json,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE learning_sessions
+            SET updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (str(workspace.resolve()), session_id),
+        )
+        row = connection.execute(
+            "SELECT * FROM session_messages WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("Session message was not persisted.")
+    return dict(row)
 
 
 def save_document_draft(

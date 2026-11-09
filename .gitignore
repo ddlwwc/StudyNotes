@@ -4,6 +4,8 @@
 .env.*
 !.env.example
 .venv/
+backend/.venv/
+backend/.venv
 backend/.venv-build/
 backend/build/
 backend/dist/

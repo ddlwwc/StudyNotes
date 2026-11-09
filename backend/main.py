@@ -6,7 +6,7 @@ from typing import Optional
 
 import fitz
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from documents import (
@@ -15,19 +15,34 @@ from documents import (
     save_document,
     sidecar_path_for,
 )
+from model_client import (
+    ModelConfig,
+    ModelRequestError,
+    test_model_connection,
+)
 from search_index import rebuild_workspace_index, search_workspace
+from secret_store import has_api_key, load_api_key, save_api_key
 from storage import (
+    create_learning_session,
     delete_document_draft,
     initialize_database,
+    load_learning_session,
     list_source_citations,
+    load_app_setting,
     load_active_workspace,
     load_document_draft,
     load_source_citation,
     load_saved_workspace_path,
     move_document_draft,
     save_active_workspace,
+    save_app_setting,
     save_document_draft,
     save_source_citation,
+)
+from tutor import (
+    TutorContextError,
+    bind_tutor_selection,
+    event_stream,
 )
 
 
@@ -49,6 +64,24 @@ app = FastAPI(title="StudyNotes API", lifespan=lifespan)
 
 class OpenWorkspaceRequest(BaseModel):
     path: str
+
+
+class ModelSettingsRequest(BaseModel):
+    base_url: str = ""
+    model: str = ""
+    api_key: str = ""
+
+
+class CreateTutorSessionRequest(BaseModel):
+    path: str
+    block_id: str
+    quote: str
+
+
+class CreateTutorTurnRequest(BaseModel):
+    question: str
+    mode: str = "guided"
+    supplement_requested: bool = False
 
 
 class CreateCitationRequest(BaseModel):
@@ -236,6 +269,42 @@ def normalize_quote(value: str) -> str:
     return " ".join(value.split())
 
 
+def serialize_model_settings() -> dict[str, object]:
+    base_url = load_app_setting("model_base_url")
+    model = load_app_setting("model_name")
+    configured = bool(base_url and model and has_api_key())
+    return {
+        "baseUrl": base_url,
+        "model": model,
+        "hasApiKey": has_api_key(),
+        "configured": configured,
+    }
+
+
+def model_config_from_request(request: ModelSettingsRequest) -> ModelConfig:
+    base_url = request.base_url.strip()
+    model = request.model.strip()
+    api_key = request.api_key.strip() or load_api_key()
+    if not base_url:
+        raise HTTPException(status_code=422, detail="请填写 Base URL。")
+    if not base_url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=422, detail="Base URL 必须使用 HTTP 或 HTTPS。")
+    if not model:
+        raise HTTPException(status_code=422, detail="请填写聊天模型。")
+    if not api_key:
+        raise HTTPException(status_code=422, detail="请填写 API Key。")
+    return ModelConfig(base_url=base_url, api_key=api_key, model=model)
+
+
+def configured_model() -> ModelConfig:
+    base_url = load_app_setting("model_base_url")
+    model = load_app_setting("model_name")
+    api_key = load_api_key()
+    if not base_url or not model or not api_key:
+        raise HTTPException(status_code=409, detail="请先配置模型服务。")
+    return ModelConfig(base_url=base_url, api_key=api_key, model=model)
+
+
 def open_pdf(file_path: Path) -> tuple[bytes, fitz.Document]:
     try:
         pdf_bytes = file_path.read_bytes()
@@ -286,6 +355,100 @@ def serialize_citation(citation: dict[str, object]) -> dict[str, object]:
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/model-settings")
+def model_settings() -> dict[str, object]:
+    return serialize_model_settings()
+
+
+@app.put("/api/model-settings")
+def update_model_settings(request: ModelSettingsRequest) -> dict[str, object]:
+    config = model_config_from_request(request)
+    try:
+        if request.api_key.strip():
+            save_api_key(config.api_key)
+    except RuntimeError as secret_error:
+        raise HTTPException(status_code=500, detail=str(secret_error)) from secret_error
+    save_app_setting("model_base_url", config.base_url)
+    save_app_setting("model_name", config.model)
+    return serialize_model_settings()
+
+
+@app.post("/api/model-settings/test")
+def test_model_settings(request: ModelSettingsRequest) -> dict[str, bool]:
+    config = model_config_from_request(request)
+    try:
+        test_model_connection(config)
+    except ModelRequestError as model_error:
+        raise HTTPException(
+            status_code=model_error.status,
+            detail=str(model_error),
+        ) from model_error
+    return {"ok": True}
+
+
+@app.post("/api/tutor/sessions")
+def create_tutor_session(
+    request: CreateTutorSessionRequest,
+) -> dict[str, object]:
+    root = require_active_workspace()
+    resolve_workspace_file(request.path, {".md"})
+    try:
+        selected = bind_tutor_selection(
+            root,
+            request.path,
+            request.block_id,
+            request.quote,
+        )
+    except TutorContextError as context_error:
+        raise HTTPException(status_code=422, detail=str(context_error)) from context_error
+    session = create_learning_session(
+        root,
+        request.path,
+        str(selected["blockId"]),
+        str(selected["quote"]),
+    )
+    return {
+        "id": session["id"],
+        "path": session["path"],
+        "blockId": session["block_id"],
+        "quote": session["quote"],
+        "createdAt": session["created_at"],
+    }
+
+
+@app.post("/api/tutor/sessions/{session_id}/turns")
+def create_tutor_turn(
+    session_id: str,
+    request: CreateTutorTurnRequest,
+) -> StreamingResponse:
+    root = require_active_workspace()
+    session = load_learning_session(root, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Learning session 不存在。")
+    question = request.question.strip()
+    if not question:
+        raise HTTPException(status_code=422, detail="请输入问题。")
+    if request.mode not in {"guided", "direct"}:
+        raise HTTPException(status_code=422, detail="辅导模式无效。")
+    resolve_workspace_file(str(session["path"]), {".md"})
+    config = configured_model()
+    return StreamingResponse(
+        event_stream(
+            root,
+            session,
+            config,
+            question,
+            request.mode,
+            request.supplement_requested,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/workspace")

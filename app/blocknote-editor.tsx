@@ -35,6 +35,11 @@ export type MarkdownDocument = {
   title: string;
 };
 
+export type TutorSelection = {
+  blockId: string;
+  quote: string;
+};
+
 type ConflictState = {
   current: MarkdownDocument;
   message: string;
@@ -139,13 +144,19 @@ async function readJson<T>(response: Response): Promise<T> {
 }
 
 export function BlockNoteEditor({
+  citationTargetId,
+  citationTargetQuote,
   initialDocument,
   initialSearchTarget,
-  onPathAvailability
+  onPathAvailability,
+  onTutorSelectionChange
 }: {
+  citationTargetId?: string | null;
+  citationTargetQuote?: string | null;
   initialDocument: MarkdownDocument;
   initialSearchTarget: SearchResult | null;
   onPathAvailability: (available: boolean) => void;
+  onTutorSelectionChange?: (selection: TutorSelection | null) => void;
 }) {
   const editor = useCreateBlockNote({
     initialContent: [{ type: "paragraph", content: "" }]
@@ -224,6 +235,7 @@ export function BlockNoteEditor({
 
   function loadDocumentIntoEditor(document: MarkdownDocument) {
     hydratingRef.current = true;
+    onTutorSelectionChange?.(null);
     loadedMetadataRef.current = metadataMap(document.blocks);
     const parsed = editor.tryParseMarkdownToBlocks(
       document.content
@@ -315,6 +327,49 @@ export function BlockNoteEditor({
 
     return () => window.clearInterval(timer);
   }, [initialDocument.path, initialSearchTarget]);
+
+  useEffect(() => {
+    if (!citationTargetId && !citationTargetQuote) {
+      return;
+    }
+    const surface = pageRef.current;
+    if (!surface) {
+      return;
+    }
+    surface
+      .querySelectorAll(".citation-target")
+      .forEach((element) => {
+        element.classList.remove("citation-target");
+        element.removeAttribute("aria-current");
+      });
+    let target: Element | null = null;
+    if (citationTargetId) {
+      try {
+        target = surface.querySelector(
+          `[data-node-type="blockContainer"][data-id="${CSS.escape(
+            citationTargetId
+          )}"]`
+        );
+      } catch {
+        target = null;
+      }
+    }
+    if (!target && citationTargetQuote) {
+      const expected = citationTargetQuote.replace(/\s+/g, " ").trim();
+      target =
+        [...surface.querySelectorAll('[data-node-type="blockContainer"]')].find(
+          (element) =>
+            (element.textContent ?? "")
+              .replace(/\s+/g, " ")
+              .includes(expected)
+        ) ?? null;
+    }
+    if (target) {
+      target.classList.add("citation-target");
+      target.setAttribute("aria-current", "citation");
+      target.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }, [citationTargetId, citationTargetQuote]);
 
   useEffect(() => {
     let active = true;
@@ -560,6 +615,38 @@ export function BlockNoteEditor({
     });
   }
 
+  function captureTutorSelection() {
+    if (!onTutorSelectionChange) {
+      return;
+    }
+    const surface = pageRef.current;
+    const selection = window.getSelection();
+    if (!surface || !selection || selection.rangeCount === 0) {
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    const anchor =
+      range.startContainer.nodeType === Node.ELEMENT_NODE
+        ? (range.startContainer as Element)
+        : range.startContainer.parentElement;
+    if (!anchor || !surface.contains(anchor)) {
+      return;
+    }
+    const block = anchor.closest(
+      '[data-node-type="blockContainer"]'
+    ) as HTMLElement | null;
+    const blockId = block?.dataset.id;
+    if (!block || !blockId) {
+      return;
+    }
+    const selectedText = selection.toString().replace(/\s+/g, " ").trim();
+    const blockText = (block.textContent ?? "").replace(/\s+/g, " ").trim();
+    const quote = selectedText || blockText;
+    if (quote) {
+      onTutorSelectionChange({ blockId, quote });
+    }
+  }
+
   useEffect(() => {
     window.addEventListener("beforeunload", flushDraft);
     return () => {
@@ -572,7 +659,12 @@ export function BlockNoteEditor({
   }, []);
 
   return (
-    <div className="blocknote-page" ref={pageRef}>
+    <div
+      className="blocknote-page"
+      ref={pageRef}
+      onKeyUp={captureTutorSelection}
+      onMouseUp={captureTutorSelection}
+    >
       <div className="editor-statusbar" aria-live="polite">
         <span
           className={`save-state ${

@@ -18,10 +18,13 @@ import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import {
   BlockNoteEditor,
-  type MarkdownDocument
+  type MarkdownDocument,
+  type TutorSelection
 } from "./blocknote-editor";
+import { ModelSettingsDialog } from "./model-settings-dialog";
 import { PdfViewer } from "./pdf-viewer";
 import { SearchDialog, type SearchResult } from "./search-dialog";
+import { TutorPanel, type TutorCitation } from "./tutor-panel";
 
 type TreeNode = {
   name: string;
@@ -146,6 +149,13 @@ export default function HomePage() {
     useState<WorkspaceState["staleWorkspace"]>(null);
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [openFile, setOpenFile] = useState<OpenFile | null>(null);
+  const [tutorSelection, setTutorSelection] = useState<TutorSelection | null>(
+    null
+  );
+  const [citationTarget, setCitationTarget] = useState<{
+    blockId: string | null;
+    quote: string;
+  } | null>(null);
   const [openPdfPath, setOpenPdfPath] = useState<string | null>(null);
   const [pdfInitialPage, setPdfInitialPage] = useState(1);
   const [markdownSearchTarget, setMarkdownSearchTarget] =
@@ -162,6 +172,7 @@ export default function HomePage() {
   const [moveDialogOpen, setMoveDialogOpen] = useState(false);
   const [movePath, setMovePath] = useState("");
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -326,6 +337,8 @@ export default function HomePage() {
       }
 
       setOpenFile(data);
+      setTutorSelection(null);
+      setCitationTarget(null);
       setMarkdownSearchTarget(searchTarget);
       setPdfInitialPage(1);
       setOpenPdfPath(null);
@@ -356,6 +369,13 @@ export default function HomePage() {
       setOpenFile(null);
       setError("当前 Markdown 页面已从磁盘移除或移动。");
     }
+  }, []);
+
+  const handleCitationSelect = useCallback((citation: TutorCitation) => {
+    setCitationTarget({
+      blockId: citation.blockId,
+      quote: citation.quote
+    });
   }, []);
 
   function selectedDirectoryPath(): string {
@@ -537,7 +557,12 @@ export default function HomePage() {
             <span>搜索</span>
             <kbd>⌘ K</kbd>
           </button>
-          <button className="icon-button" type="button" aria-label="设置" disabled>
+          <button
+            className="icon-button"
+            type="button"
+            aria-label="设置"
+            onClick={() => setModelSettingsOpen(true)}
+          >
             <Settings2 aria-hidden="true" size={17} />
           </button>
         </div>
@@ -616,7 +641,9 @@ export default function HomePage() {
           ) : null}
         </aside>
 
-        <section className="content">
+        <section
+          className={`content ${openFile ? "has-reading-surface" : ""}`}
+        >
           {loading ? (
             <div className="center-state" role="status">
               <LoaderCircle className="spin" aria-hidden="true" size={22} />
@@ -634,18 +661,31 @@ export default function HomePage() {
               path={openPdfPath}
             />
           ) : openFile ? (
-            <article className="document">
-              <header className="document-header">
-                <span>{openFile.path}</span>
-                <span className="blocknote-label">BlockNote</span>
-              </header>
-              <BlockNoteEditor
-                key={`${openFile.path}:${markdownSearchTarget?.id ?? ""}`}
-                initialDocument={openFile}
-                initialSearchTarget={markdownSearchTarget}
-                onPathAvailability={handlePathAvailability}
+            <div className="reading-workspace">
+              <article className="document">
+                <header className="document-header">
+                  <span>{openFile.path}</span>
+                  <span className="blocknote-label">BlockNote</span>
+                </header>
+                <BlockNoteEditor
+                  citationTargetId={citationTarget?.blockId}
+                  citationTargetQuote={citationTarget?.quote}
+                  key={`${openFile.path}:${markdownSearchTarget?.id ?? ""}`}
+                  initialDocument={openFile}
+                  initialSearchTarget={markdownSearchTarget}
+                  onPathAvailability={handlePathAvailability}
+                  onTutorSelectionChange={(selection) => {
+                    setTutorSelection(selection);
+                    setCitationTarget(null);
+                  }}
+                />
+              </article>
+              <TutorPanel
+                onCitationSelect={handleCitationSelect}
+                path={openFile.path}
+                selection={tutorSelection}
               />
-            </article>
+            </div>
           ) : workspace ? (
             <div className="empty-document">
               <h1>{workspace.name}</h1>
@@ -778,6 +818,10 @@ export default function HomePage() {
             </form>
           </div>
         </div>
+      ) : null}
+
+      {modelSettingsOpen ? (
+        <ModelSettingsDialog onClose={() => setModelSettingsOpen(false)} />
       ) : null}
 
       {moveDialogOpen ? (
