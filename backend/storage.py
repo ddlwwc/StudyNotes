@@ -57,7 +57,7 @@ def initialize_database() -> None:
         )
 
 
-def load_active_workspace() -> Optional[Path]:
+def load_saved_workspace_path() -> Optional[Path]:
     with connect() as connection:
         row = connection.execute(
             "SELECT value FROM app_state WHERE key = 'active_workspace_path'"
@@ -66,7 +66,13 @@ def load_active_workspace() -> Optional[Path]:
     if row is None:
         return None
 
-    workspace = Path(row["value"])
+    return Path(row["value"])
+
+
+def load_active_workspace() -> Optional[Path]:
+    workspace = load_saved_workspace_path()
+    if workspace is None:
+        return None
     return workspace if workspace.is_dir() else None
 
 

@@ -8,8 +8,11 @@ import {
   FolderOpen,
   Library,
   LoaderCircle,
+  Pencil,
+  Plus,
   Search,
-  Settings2
+  Settings2,
+  Trash2
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
@@ -26,6 +29,9 @@ type TreeNode = {
 };
 
 type WorkspaceState = {
+  staleWorkspace: null | {
+    path: string;
+  };
   tree: TreeNode[];
   workspace: null | {
     name: string;
@@ -39,15 +45,44 @@ type OpenFile = {
   title: string;
 };
 
+function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
+  for (const node of nodes) {
+    if (node.path === path) {
+      return node;
+    }
+    if (node.children) {
+      const match = findTreeNode(node.children, path);
+      if (match) {
+        return match;
+      }
+    }
+  }
+  return null;
+}
+
+function mapMovedPath(path: string, oldPath: string, newPath: string): string {
+  if (path === oldPath) {
+    return newPath;
+  }
+  if (path.startsWith(`${oldPath}/`)) {
+    return `${newPath}${path.slice(oldPath.length)}`;
+  }
+  return path;
+}
+
 function TreeNodes({
   activePath,
   nodes,
   onOpenFile,
+  onSelect,
+  selectedPath,
   depth = 0
 }: {
   activePath: string | null;
   nodes: TreeNode[];
   onOpenFile: (node: TreeNode) => void;
+  onSelect: (node: TreeNode) => void;
+  selectedPath: string | null;
   depth?: number;
 }) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
@@ -59,18 +94,21 @@ function TreeNodes({
         return (
           <li key={node.path}>
             <button
+              aria-pressed={selectedPath === node.path}
               className={`tree-row ${node.type === "file" ? "is-file" : ""} ${
                 activePath === node.path ? "is-active" : ""
-              }`}
+              } ${selectedPath === node.path ? "is-selected" : ""}`}
               style={{ paddingLeft: `${8 + depth * 16}px` }}
               type="button"
               onClick={() => {
-                if (node.type === "directory") {
+                const wasSelected = selectedPath === node.path;
+                onSelect(node);
+                if (node.type === "directory" && wasSelected) {
                   setCollapsed((current) => ({
                     ...current,
                     [node.path]: !isCollapsed
                   }));
-                } else {
+                } else if (node.type === "file") {
                   onOpenFile(node);
                 }
               }}
@@ -91,6 +129,8 @@ function TreeNodes({
                 activePath={activePath}
                 nodes={node.children}
                 onOpenFile={onOpenFile}
+                onSelect={onSelect}
+                selectedPath={selectedPath}
                 depth={depth + 1}
               />
             ) : null}
@@ -103,14 +143,23 @@ function TreeNodes({
 
 export default function HomePage() {
   const [workspace, setWorkspace] = useState<WorkspaceState["workspace"]>(null);
+  const [staleWorkspace, setStaleWorkspace] =
+    useState<WorkspaceState["staleWorkspace"]>(null);
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [openFile, setOpenFile] = useState<OpenFile | null>(null);
   const [openPdfPath, setOpenPdfPath] = useState<string | null>(null);
+  const [selectedNode, setSelectedNode] = useState<TreeNode | null>(null);
   const [workspacePath, setWorkspacePath] = useState("");
   const [canBrowse, setCanBrowse] = useState(false);
   const [loading, setLoading] = useState(true);
   const [openingFile, setOpeningFile] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [working, setWorking] = useState(false);
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [newPageName, setNewPageName] = useState("");
+  const [moveDialogOpen, setMoveDialogOpen] = useState(false);
+  const [movePath, setMovePath] = useState("");
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -125,9 +174,12 @@ export default function HomePage() {
         const data = (await response.json()) as WorkspaceState;
         if (active) {
           setWorkspace(data.workspace);
+          setStaleWorkspace(data.staleWorkspace);
           setTree(data.tree);
           if (data.workspace) {
             setWorkspacePath(data.workspace.path);
+          } else if (data.staleWorkspace) {
+            setWorkspacePath(data.staleWorkspace.path);
           }
         }
       } catch (loadError) {
@@ -148,6 +200,84 @@ export default function HomePage() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!workspace) {
+      return;
+    }
+
+    let active = true;
+
+    async function refreshWorkspace() {
+      try {
+        const response = await fetch("/api/workspace", { cache: "no-store" });
+        if (!response.ok) {
+          return;
+        }
+        const data = (await response.json()) as WorkspaceState;
+        if (!active) {
+          return;
+        }
+
+        setWorkspace(data.workspace);
+        setStaleWorkspace(data.staleWorkspace);
+        setTree(data.tree);
+        if (!data.workspace) {
+          setOpenFile(null);
+        }
+        setSelectedNode((current) =>
+          current && data.workspace ? findTreeNode(data.tree, current.path) : null
+        );
+      } catch {
+        // Keep the last usable tree while the local service recovers.
+      }
+    }
+
+    const interval = window.setInterval(() => void refreshWorkspace(), 800);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [workspace?.path]);
+
+  useEffect(() => {
+    if (!openFile) {
+      return;
+    }
+
+    let active = true;
+    const openPath = openFile.path;
+
+    async function refreshOpenFile() {
+      try {
+        const response = await fetch(
+          `/api/file?path=${encodeURIComponent(openPath)}`,
+          { cache: "no-store" }
+        );
+        if (!active) {
+          return;
+        }
+        if (!response.ok) {
+          setOpenFile(null);
+          setError("当前 Markdown 页面已从磁盘移除或移动。");
+          return;
+        }
+
+        const data = (await response.json()) as OpenFile;
+        setOpenFile((current) =>
+          current?.path === openPath ? data : current
+        );
+      } catch {
+        // Keep the current page while the local service recovers.
+      }
+    }
+
+    const interval = window.setInterval(() => void refreshOpenFile(), 800);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [openFile?.path]);
 
   useEffect(() => {
     setCanBrowse(Boolean(window.studyNotes));
@@ -172,9 +302,11 @@ export default function HomePage() {
       }
 
       setWorkspace(data.workspace);
+      setStaleWorkspace(data.staleWorkspace);
       setTree(data.tree);
       setOpenFile(null);
       setOpenPdfPath(null);
+      setSelectedNode(null);
       if (data.workspace) {
         setWorkspacePath(data.workspace.path);
       }
@@ -222,6 +354,158 @@ export default function HomePage() {
     }
   }
 
+  function selectedDirectoryPath(): string {
+    if (!selectedNode) {
+      return "";
+    }
+    if (selectedNode.type === "directory") {
+      return selectedNode.path;
+    }
+    return selectedNode.path.split("/").slice(0, -1).join("/");
+  }
+
+  async function createPage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setWorking(true);
+    setError(null);
+
+    try {
+      const response = await fetch("/api/pages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          directory: selectedDirectoryPath(),
+          name: newPageName
+        })
+      });
+      const data = (await response.json()) as {
+        detail?: string;
+        path: string;
+        tree: TreeNode[];
+      };
+      if (!response.ok) {
+        throw new Error(data.detail ?? "无法创建 Markdown 页面。");
+      }
+
+      setTree(data.tree);
+      setSelectedNode(findTreeNode(data.tree, data.path));
+      setCreateDialogOpen(false);
+      setNewPageName("");
+    } catch (createError) {
+      setError(
+        createError instanceof Error
+          ? createError.message
+          : "无法创建 Markdown 页面。"
+      );
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function moveEntry(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedNode) {
+      return;
+    }
+
+    setWorking(true);
+    setError(null);
+
+    try {
+      const response = await fetch("/api/entries", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          path: selectedNode.path,
+          new_path: movePath
+        })
+      });
+      const data = (await response.json()) as {
+        detail?: string;
+        newPath: string;
+        oldPath: string;
+        tree: TreeNode[];
+      };
+      if (!response.ok) {
+        throw new Error(data.detail ?? "无法重命名或移动这个条目。");
+      }
+
+      setTree(data.tree);
+      setSelectedNode(findTreeNode(data.tree, data.newPath));
+      setOpenFile((current) => {
+        if (!current) {
+          return current;
+        }
+        const movedPath = mapMovedPath(current.path, data.oldPath, data.newPath);
+        if (movedPath === current.path) {
+          return current;
+        }
+        return {
+          ...current,
+          path: movedPath,
+          title: movedPath.split("/").at(-1)?.replace(/\.md$/i, "") ?? current.title
+        };
+      });
+      setMoveDialogOpen(false);
+      setMovePath("");
+    } catch (moveError) {
+      setError(
+        moveError instanceof Error
+          ? moveError.message
+          : "无法重命名或移动这个条目。"
+      );
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function deleteEntry() {
+    if (!selectedNode) {
+      return;
+    }
+
+    setWorking(true);
+    setError(null);
+
+    try {
+      const response = await fetch(
+        `/api/entries?path=${encodeURIComponent(selectedNode.path)}`,
+        { method: "DELETE" }
+      );
+      const data = (await response.json()) as {
+        deletedPath: string;
+        detail?: string;
+        tree: TreeNode[];
+      };
+      if (!response.ok) {
+        throw new Error(data.detail ?? "无法删除这个条目。");
+      }
+
+      setTree(data.tree);
+      setOpenFile((current) => {
+        if (
+          current &&
+          (current.path === data.deletedPath ||
+            current.path.startsWith(`${data.deletedPath}/`))
+        ) {
+          return null;
+        }
+        return current;
+      });
+      const parentPath = data.deletedPath.split("/").slice(0, -1).join("/");
+      setSelectedNode(findTreeNode(data.tree, parentPath));
+      setDeleteDialogOpen(false);
+    } catch (deleteError) {
+      setError(
+        deleteError instanceof Error
+          ? deleteError.message
+          : "无法删除这个条目。"
+      );
+    } finally {
+      setWorking(false);
+    }
+  }
+
   async function chooseWorkspace() {
     const selected = await window.studyNotes?.chooseWorkspaceDirectory();
     if (selected) {
@@ -263,13 +547,55 @@ export default function HomePage() {
         <aside className="sidebar">
           <div className="sidebar-heading">
             <span>资料</span>
-            <FolderOpen aria-hidden="true" size={15} />
+            <div className="sidebar-actions">
+              <button
+                aria-label="新建页面"
+                className="sidebar-action"
+                disabled={!workspace}
+                title="新建页面"
+                type="button"
+                onClick={() => {
+                  setNewPageName("未命名.md");
+                  setCreateDialogOpen(true);
+                }}
+              >
+                <Plus aria-hidden="true" size={15} />
+              </button>
+              <button
+                aria-label="重命名或移动"
+                className="sidebar-action"
+                disabled={!workspace || !selectedNode}
+                title="重命名或移动"
+                type="button"
+                onClick={() => {
+                  if (!selectedNode) {
+                    return;
+                  }
+                  setMovePath(selectedNode.path);
+                  setMoveDialogOpen(true);
+                }}
+              >
+                <Pencil aria-hidden="true" size={14} />
+              </button>
+              <button
+                aria-label="删除"
+                className="sidebar-action"
+                disabled={!workspace || selectedNode?.type !== "file"}
+                title="删除"
+                type="button"
+                onClick={() => setDeleteDialogOpen(true)}
+              >
+                <Trash2 aria-hidden="true" size={14} />
+              </button>
+            </div>
           </div>
           {tree.length > 0 ? (
             <TreeNodes
               activePath={openFile?.path ?? openPdfPath}
               nodes={tree}
               onOpenFile={(node) => void openFileNode(node)}
+              onSelect={setSelectedNode}
+              selectedPath={selectedNode?.path ?? null}
             />
           ) : (
             <p className="sidebar-empty">打开 workspace 后显示目录与页面。</p>
@@ -312,6 +638,42 @@ export default function HomePage() {
             <div className="empty-document">
               <h1>{workspace.name}</h1>
               <p>从左侧资料树选择一个 Markdown 页面或 PDF。</p>
+            </div>
+          ) : staleWorkspace ? (
+            <div className="workspace-picker">
+              <div className="picker-icon" aria-hidden="true">
+                <FolderOpen size={24} />
+              </div>
+              <p className="eyebrow">路径已变化</p>
+              <h1>Notebook workspace 需要重新定位</h1>
+              <p className="stale-workspace-label">原路径</p>
+              <p className="stale-workspace-path">{staleWorkspace.path}</p>
+              <p className="picker-copy">
+                本地学习记录仍然保留，请选择改名或移动后的目录。
+              </p>
+              <form className="picker-form" onSubmit={openWorkspace}>
+                <label htmlFor="relocated-workspace-path">
+                  新的 workspace 路径
+                </label>
+                <div className="path-row">
+                  <input
+                    id="relocated-workspace-path"
+                    name="relocated-workspace-path"
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={workspacePath}
+                    onChange={(event) => setWorkspacePath(event.target.value)}
+                  />
+                  <button
+                    className="primary-button"
+                    type="submit"
+                    disabled={submitting || workspacePath.trim().length === 0}
+                  >
+                    {submitting ? "正在恢复…" : "重新定位工作区"}
+                  </button>
+                </div>
+              </form>
+              {error ? <p className="error-message">{error}</p> : null}
             </div>
           ) : (
             <div className="workspace-picker">
@@ -362,6 +724,128 @@ export default function HomePage() {
           )}
         </section>
       </div>
+
+      {createDialogOpen ? (
+        <div className="modal-backdrop">
+          <div
+            aria-labelledby="create-page-title"
+            aria-modal="true"
+            className="dialog"
+            role="dialog"
+          >
+            <h2 id="create-page-title">新建 Markdown 页面</h2>
+            <p className="dialog-copy">
+              创建位置：{selectedDirectoryPath() || workspace?.name || "workspace 根目录"}
+            </p>
+            <form onSubmit={createPage}>
+              <label htmlFor="new-page-name">页面名称</label>
+              <input
+                autoFocus
+                id="new-page-name"
+                name="new-page-name"
+                value={newPageName}
+                onChange={(event) => setNewPageName(event.target.value)}
+              />
+              {error ? <p className="error-message">{error}</p> : null}
+              <div className="dialog-actions">
+                <button
+                  className="secondary-text-button"
+                  type="button"
+                  onClick={() => setCreateDialogOpen(false)}
+                >
+                  取消
+                </button>
+                <button
+                  className="primary-button"
+                  disabled={working || newPageName.trim().length === 0}
+                  type="submit"
+                >
+                  {working ? "正在创建…" : "创建页面"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
+
+      {moveDialogOpen ? (
+        <div className="modal-backdrop">
+          <div
+            aria-labelledby="move-entry-title"
+            aria-modal="true"
+            className="dialog"
+            role="dialog"
+          >
+            <h2 id="move-entry-title">重命名或移动</h2>
+            <p className="dialog-copy">
+              输入相对于 workspace 的新路径。目录使用名称，页面保留 .md 后缀。
+            </p>
+            <form onSubmit={moveEntry}>
+              <label htmlFor="new-entry-path">新相对路径</label>
+              <input
+                autoFocus
+                id="new-entry-path"
+                name="new-entry-path"
+                value={movePath}
+                onChange={(event) => setMovePath(event.target.value)}
+              />
+              {error ? <p className="error-message">{error}</p> : null}
+              <div className="dialog-actions">
+                <button
+                  className="secondary-text-button"
+                  type="button"
+                  onClick={() => setMoveDialogOpen(false)}
+                >
+                  取消
+                </button>
+                <button
+                  className="primary-button"
+                  disabled={working || movePath.trim().length === 0}
+                  type="submit"
+                >
+                  {working ? "正在保存…" : "保存路径"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
+
+      {deleteDialogOpen && selectedNode ? (
+        <div className="modal-backdrop">
+          <div
+            aria-labelledby="delete-entry-title"
+            aria-modal="true"
+            className="dialog"
+            role="dialog"
+          >
+            <h2 id="delete-entry-title">
+              删除 Markdown 页面
+            </h2>
+            <p className="dialog-copy">
+              将永久删除“{selectedNode.path}”。这个操作无法撤销。
+            </p>
+            {error ? <p className="error-message">{error}</p> : null}
+            <div className="dialog-actions">
+              <button
+                className="secondary-text-button"
+                type="button"
+                onClick={() => setDeleteDialogOpen(false)}
+              >
+                取消
+              </button>
+              <button
+                className="danger-button"
+                disabled={working}
+                type="button"
+                onClick={() => void deleteEntry()}
+              >
+                {working ? "正在删除…" : "确认删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
