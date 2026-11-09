@@ -1,32 +1,56 @@
-import { startServices, stopServices } from "./services.mjs";
+import { fork } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const services = await startServices();
-
-console.log(`StudyNotes web: ${services.webUrl}`);
-console.log(`StudyNotes API: ${services.apiUrl}`);
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const supervisor = fork(path.join(root, "desktop", "supervisor.cjs"), {
+  cwd: root,
+  stdio: ["ignore", "inherit", "inherit", "ipc"]
+});
 
 let stopping = false;
 
-async function stop(exitCode = 0) {
+function stop() {
   if (stopping) {
     return;
   }
-
   stopping = true;
-  await stopServices(services);
-  process.exit(exitCode);
+  if (supervisor.connected) {
+    supervisor.send({ type: "stop" });
+  }
 }
 
-process.on("SIGINT", () => void stop());
-process.on("SIGTERM", () => void stop());
+supervisor.on("message", (message) => {
+  if (message.phase === "ready") {
+    console.log(`StudyNotes web: ${message.webUrl}`);
+    console.log(`StudyNotes API: ${message.apiUrl}`);
+  } else if (message.phase === "error") {
+    console.error(message.message);
+    process.exitCode = 1;
+    stop();
+  }
+});
 
-for (const child of [services.webProcess, services.apiProcess]) {
-  child.once("exit", (code) => {
-    if (!stopping) {
-      console.error("A StudyNotes development service exited unexpectedly.");
-      void stop(code ?? 1);
-    }
-  });
-}
+supervisor.on("error", (error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
 
-await new Promise(() => {});
+supervisor.on("exit", (code) => {
+  if (!stopping && code !== 0) {
+    process.exitCode = code ?? 1;
+  }
+});
+
+supervisor.send({
+  type: "start",
+  options: {
+    appRoot: root,
+    dataDir:
+      process.env.STUDY_NOTES_DATA_DIR ?? path.join(root, "data"),
+    packaged: false
+  }
+});
+
+process.on("SIGINT", stop);
+process.on("SIGTERM", stop);
