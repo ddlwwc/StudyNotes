@@ -5,7 +5,9 @@ import {
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
+  stat,
   writeFile
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -250,6 +252,224 @@ test("the active Notebook workspace survives an application restart", async ({
   } finally {
     await secondApp.stop();
     await rm(workspaceDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("a user can create a Markdown page in the selected directory", async ({
+  page
+}) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  await mkdir(path.join(workspaceDir, "课程"), { recursive: true });
+  const app = await startApp();
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await page.getByRole("button", { name: "课程", exact: true }).click();
+    await expect(
+      page.getByRole("button", { name: "删除", exact: true })
+    ).toBeDisabled();
+
+    await page.getByRole("button", { name: "新建页面" }).click();
+    await expect(page.getByText("Markdown 页面不存在。")).toHaveCount(0);
+    await page.getByLabel("页面名称").fill("课堂笔记.md");
+    await page.getByRole("button", { name: "创建页面" }).click();
+
+    await expect(
+      page.getByRole("button", { name: "课堂笔记.md", exact: true })
+    ).toBeVisible();
+    expect(
+      await readFile(path.join(workspaceDir, "课程", "课堂笔记.md"), "utf8")
+    ).toBe("# 课堂笔记\n\n");
+  } finally {
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("a user can move a page and rename a directory without losing content", async ({
+  page
+}) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  const courseDir = path.join(workspaceDir, "课程");
+  const archiveDir = path.join(workspaceDir, "归档");
+  await mkdir(courseDir, { recursive: true });
+  await mkdir(archiveDir, { recursive: true });
+  const markdown = "# 课堂笔记\n\n不能丢失的内容。\n";
+  await writeFile(path.join(courseDir, "课堂笔记.md"), markdown, "utf8");
+  const app = await startApp();
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await page
+      .getByRole("button", { name: "课堂笔记.md", exact: true })
+      .click();
+    await page.getByRole("button", { name: "重命名或移动" }).click();
+    await page.getByLabel("新相对路径").fill("归档/课堂笔记.md");
+    await page.getByRole("button", { name: "保存路径" }).click();
+
+    await expect(
+      page.getByRole("button", { name: "课堂笔记.md", exact: true })
+    ).toBeVisible();
+    expect(
+      await readFile(path.join(archiveDir, "课堂笔记.md"), "utf8")
+    ).toBe(markdown);
+    await expect(
+      page.getByRole("button", { name: "归档", exact: true })
+    ).toHaveAttribute("aria-pressed", "false");
+
+    await page.getByRole("button", { name: "课程", exact: true }).click();
+    await page.getByRole("button", { name: "重命名或移动" }).click();
+    await page.getByLabel("新相对路径").fill("课程资料");
+    await page.getByRole("button", { name: "保存路径" }).click();
+
+    await expect(
+      page.getByRole("button", { name: "课程资料", exact: true })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "课程", exact: true })
+    ).toHaveCount(0);
+    expect((await stat(path.join(workspaceDir, "课程资料"))).isDirectory()).toBe(
+      true
+    );
+  } finally {
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("deleting a page requires explicit confirmation", async ({ page }) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  const courseDir = path.join(workspaceDir, "课程");
+  const markdownPath = path.join(courseDir, "待删除.md");
+  await mkdir(courseDir, { recursive: true });
+  await writeFile(markdownPath, "# 待删除\n", "utf8");
+  const app = await startApp();
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await page.getByRole("button", { name: "待删除.md", exact: true }).click();
+    await page.getByRole("button", { name: "删除", exact: true }).click();
+
+    await expect(
+      page.getByRole("heading", { name: "删除 Markdown 页面" })
+    ).toBeVisible();
+    expect((await stat(markdownPath)).isFile()).toBe(true);
+
+    await page.getByRole("button", { name: "确认删除" }).click();
+    await expect(
+      page.getByRole("button", { name: "待删除.md", exact: true })
+    ).toHaveCount(0);
+    await expect(stat(markdownPath)).rejects.toThrow();
+  } finally {
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("external Markdown changes refresh the page tree and open page", async ({
+  page
+}) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  const courseDir = path.join(workspaceDir, "课程");
+  const livePagePath = path.join(courseDir, "实时.md");
+  const addedPagePath = path.join(courseDir, "外部新增.md");
+  const movedPagePath = path.join(courseDir, "外部移动.md");
+  await mkdir(courseDir, { recursive: true });
+  await writeFile(livePagePath, "# 实时\n\n初始内容。\n", "utf8");
+  const app = await startApp();
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await page.getByRole("button", { name: "实时.md", exact: true }).click();
+    await expect(page.getByText("初始内容。")).toBeVisible();
+
+    await writeFile(addedPagePath, "# 外部新增\n", "utf8");
+    await expect(
+      page.getByRole("button", { name: "外部新增.md", exact: true })
+    ).toBeVisible();
+
+    await writeFile(
+      livePagePath,
+      "# 实时\n\n外部更新内容。\n",
+      "utf8"
+    );
+    await expect(page.getByText("外部更新内容。")).toBeVisible();
+
+    await rename(addedPagePath, movedPagePath);
+    await expect(
+      page.getByRole("button", { name: "外部移动.md", exact: true })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "外部新增.md", exact: true })
+    ).toHaveCount(0);
+
+    await rm(movedPagePath);
+    await expect(
+      page.getByRole("button", { name: "外部移动.md", exact: true })
+    ).toHaveCount(0);
+  } finally {
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("a moved Notebook workspace can be relocated without losing its records", async ({
+  page
+}) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  const movedWorkspaceDir = `${workspaceDir}-moved`;
+  const dataDir = await mkdtemp(path.join(tmpdir(), "studynotes-data-"));
+  const courseDir = path.join(workspaceDir, "课程");
+  const markdown = "# 可恢复页面\n\n学习记录仍然保留。\n";
+  await mkdir(courseDir, { recursive: true });
+  await writeFile(path.join(courseDir, "可恢复页面.md"), markdown, "utf8");
+  const canonicalWorkspacePath = await realpath(workspaceDir);
+  await mkdir(movedWorkspaceDir, { recursive: true });
+  const canonicalMovedPath = await realpath(movedWorkspaceDir);
+  await rm(movedWorkspaceDir, { recursive: true, force: true });
+  const app = await startApp({ dataDir });
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await expect(
+      page.getByRole("button", { name: "可恢复页面.md", exact: true })
+    ).toBeVisible();
+
+    await rename(workspaceDir, movedWorkspaceDir);
+    await expect(
+      page.getByRole("heading", {
+        name: "Notebook workspace 需要重新定位"
+      })
+    ).toBeVisible();
+    await expect(
+      page.getByText(canonicalWorkspacePath, { exact: true })
+    ).toBeVisible();
+
+    await page.getByLabel("新的 workspace 路径").fill(movedWorkspaceDir);
+    await page.getByRole("button", { name: "重新定位工作区" }).click();
+
+    await expect(
+      page.getByRole("button", { name: "可恢复页面.md", exact: true })
+    ).toBeVisible();
+    await page
+      .getByRole("button", { name: "可恢复页面.md", exact: true })
+      .click();
+    await expect(page.getByText("学习记录仍然保留。")).toBeVisible();
+    await expect(page.getByText(canonicalMovedPath, { exact: true })).toBeVisible();
+  } finally {
+    await app.stop();
+    await rm(movedWorkspaceDir, { recursive: true, force: true });
     await rm(dataDir, { recursive: true, force: true });
   }
 });
