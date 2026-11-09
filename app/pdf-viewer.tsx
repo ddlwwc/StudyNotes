@@ -180,14 +180,15 @@ export function PdfViewer({ path }: { path: string }) {
         textContainer.replaceChildren();
         activePdfjs.setLayerDimensions(textContainer, viewport, false, false);
         textContainer.style.setProperty("--scale-factor", String(viewport.scale));
-        textLayer = new activePdfjs.TextLayer({
+        const nextTextLayer = new activePdfjs.TextLayer({
           textContentSource: page.streamTextContent({
             includeMarkedContent: true
           }),
           container: textContainer,
           viewport
         });
-        await textLayer.render();
+        textLayer = nextTextLayer;
+        await nextTextLayer.render();
       } catch (renderError) {
         if (
           !cancelled &&

@@ -14,10 +14,12 @@ import {
   Settings2,
   Trash2
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import {
+  BlockNoteEditor,
+  type MarkdownDocument
+} from "./blocknote-editor";
 import { PdfViewer } from "./pdf-viewer";
 
 type TreeNode = {
@@ -39,11 +41,7 @@ type WorkspaceState = {
   };
 };
 
-type OpenFile = {
-  content: string;
-  path: string;
-  title: string;
-};
+type OpenFile = MarkdownDocument;
 
 function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
   for (const node of nodes) {
@@ -241,45 +239,6 @@ export default function HomePage() {
   }, [workspace?.path]);
 
   useEffect(() => {
-    if (!openFile) {
-      return;
-    }
-
-    let active = true;
-    const openPath = openFile.path;
-
-    async function refreshOpenFile() {
-      try {
-        const response = await fetch(
-          `/api/file?path=${encodeURIComponent(openPath)}`,
-          { cache: "no-store" }
-        );
-        if (!active) {
-          return;
-        }
-        if (!response.ok) {
-          setOpenFile(null);
-          setError("当前 Markdown 页面已从磁盘移除或移动。");
-          return;
-        }
-
-        const data = (await response.json()) as OpenFile;
-        setOpenFile((current) =>
-          current?.path === openPath ? data : current
-        );
-      } catch {
-        // Keep the current page while the local service recovers.
-      }
-    }
-
-    const interval = window.setInterval(() => void refreshOpenFile(), 800);
-    return () => {
-      active = false;
-      window.clearInterval(interval);
-    };
-  }, [openFile?.path]);
-
-  useEffect(() => {
     setCanBrowse(Boolean(window.studyNotes));
   }, []);
 
@@ -353,6 +312,13 @@ export default function HomePage() {
       setOpeningFile(false);
     }
   }
+
+  const handlePathAvailability = useCallback((available: boolean) => {
+    if (!available) {
+      setOpenFile(null);
+      setError("当前 Markdown 页面已从磁盘移除或移动。");
+    }
+  }, []);
 
   function selectedDirectoryPath(): string {
     if (!selectedNode) {
@@ -624,15 +590,13 @@ export default function HomePage() {
             <article className="document">
               <header className="document-header">
                 <span>{openFile.path}</span>
-                <button className="read-only-label" type="button" disabled>
-                  只读
-                </button>
+                <span className="blocknote-label">BlockNote</span>
               </header>
-              <div className="markdown-body">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {openFile.content}
-                </ReactMarkdown>
-              </div>
+              <BlockNoteEditor
+                key={openFile.path}
+                initialDocument={openFile}
+                onPathAvailability={handlePathAvailability}
+              />
             </article>
           ) : workspace ? (
             <div className="empty-document">

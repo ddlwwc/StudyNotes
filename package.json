@@ -18,6 +18,11 @@
     "check": "npm run test && npm run build && npm run build:backend"
   },
   "dependencies": {
+    "@blocknote/core": "^0.57.0",
+    "@blocknote/mantine": "^0.57.0",
+    "@blocknote/react": "^0.57.0",
+    "@mantine/core": "^8.3.11",
+    "@mantine/hooks": "^8.3.11",
     "lucide-react": "0.468.0",
     "next": "16.4.5",
     "pdfjs-dist": "4.10.38",

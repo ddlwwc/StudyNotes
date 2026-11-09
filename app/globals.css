@@ -594,15 +594,151 @@ button:disabled {
   white-space: nowrap;
 }
 
-.read-only-label {
+.blocknote-label {
   flex: 0 0 auto;
   padding: 3px 8px;
   border: 0;
   border-radius: 999px;
-  background: var(--orange-soft);
-  color: var(--orange);
+  background: var(--blue-soft);
+  color: var(--blue-deep);
   font-size: 10px;
   font-weight: 700;
+}
+
+.blocknote-page {
+  --bn-colors-editor-background: var(--paper);
+  --bn-colors-editor-text: #263248;
+  --bn-colors-menu-background: var(--paper);
+  --bn-colors-menu-text: var(--ink);
+  --bn-colors-hovered-background: var(--soft);
+  --bn-colors-selected-background: var(--blue-soft);
+  --bn-colors-border: var(--line);
+  min-height: calc(100vh - 108px);
+  padding: 20px 36px 100px;
+}
+
+.blocknote-surface {
+  min-height: 420px;
+}
+
+.blocknote-surface .bn-editor {
+  padding-inline: 32px;
+  color: #263248;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 15px;
+}
+
+.blocknote-surface .bn-side-menu {
+  color: var(--faint);
+}
+
+.editor-statusbar {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.save-state {
+  font-weight: 650;
+}
+
+.save-state.is-error {
+  color: #b42318;
+}
+
+.draft-state {
+  color: var(--faint);
+}
+
+.editor-notice,
+.editor-banner,
+.editor-conflict {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  margin: 0 8px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #f8faff;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.editor-notice code {
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-banner > div:first-child,
+.editor-conflict > div:nth-child(2) {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.editor-banner strong,
+.editor-conflict strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.editor-banner span,
+.editor-conflict span {
+  overflow-wrap: anywhere;
+}
+
+.editor-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.editor-banner-actions button,
+.icon-text-button,
+.danger-text-button {
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: white;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.editor-banner-actions button:hover {
+  border-color: var(--blue);
+  color: var(--blue-deep);
+}
+
+.editor-conflict {
+  border-color: #f3c8a3;
+  background: var(--orange-soft);
+  color: #86501b;
+}
+
+.danger-text-button {
+  border-color: #e3a49d;
+  color: #9d291f;
 }
 
 .markdown-body {
@@ -958,6 +1094,25 @@ button:disabled {
 
   .markdown-body {
     padding: 28px 22px 80px;
+  }
+
+  .blocknote-page {
+    padding: 16px 8px 80px;
+  }
+
+  .blocknote-surface .bn-editor {
+    padding-inline: 12px;
+  }
+
+  .editor-notice,
+  .editor-banner,
+  .editor-conflict {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .editor-banner-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
   }
 
   .pdf-toolbar {
