@@ -57,6 +57,11 @@ type ImageUploadState =
   | { fileName: string; status: "uploading" }
   | { fileName: string; file: File; message: string; status: "failed" };
 
+type ImageBlockRef = {
+  id: string;
+  url: string;
+};
+
 const AUTOSAVE_DELAY_MS = 700;
 const POLL_INTERVAL_MS = 800;
 
@@ -74,6 +79,35 @@ function hasIncompleteImageBlock(blocks: BlockLike[]): boolean {
       isIncompleteImageBlock(block) ||
       hasIncompleteImageBlock(block.children ?? [])
   );
+}
+
+function isRemoteImageUrl(url: string): boolean {
+  return /^(https?:|data:|blob:)/i.test(url);
+}
+
+function imageBlocks(blocks: BlockLike[]): ImageBlockRef[] {
+  return blocks.flatMap((block) => {
+    const url = block.props?.url;
+    const current =
+      block.type === "image" && typeof url === "string" && url
+        ? [{ id: block.id, url }]
+        : [];
+    return [...current, ...imageBlocks(block.children ?? [])];
+  });
+}
+
+function localImageUrl(pagePath: string, imageUrl: string): string {
+  if (isRemoteImageUrl(imageUrl)) {
+    return imageUrl;
+  }
+  const pageDirectory = pagePath.split("/").slice(0, -1).join("/");
+  const resolved = new URL(
+    imageUrl,
+    `https://workspace.local/${pageDirectory ? `${pageDirectory}/` : ""}`
+  );
+  return `/api/images/asset?path=${encodeURIComponent(
+    resolved.pathname.replace(/^\/+/, "")
+  )}`;
 }
 
 function hydrateBlocks(
@@ -178,6 +212,7 @@ export function BlockNoteEditor({
   });
   const editor = useCreateBlockNote({
     initialContent: [{ type: "paragraph", content: "" }],
+    resolveFileUrl: async (url) => localImageUrl(initialDocument.path, url),
     uploadFile: (file, blockId) => uploadHandlerRef.current(file, blockId)
   });
   const [status, setStatus] = useState("正在加载…");
@@ -195,6 +230,8 @@ export function BlockNoteEditor({
   const [uploadState, setUploadState] = useState<ImageUploadState>({
     status: "idle"
   });
+  const [pendingImageDeletes, setPendingImageDeletes] = useState<string[]>([]);
+  const [deletingImage, setDeletingImage] = useState(false);
 
   const revisionRef = useRef(initialDocument.revision);
   const dirtyRef = useRef(false);
@@ -207,6 +244,11 @@ export function BlockNoteEditor({
   const saveTimerRef = useRef<number | null>(null);
   const draftQueueRef = useRef<Promise<void>>(Promise.resolve());
   const hydratingRef = useRef(true);
+  const knownRemoteImagesRef = useRef(
+    imageBlocks(initialDocument.blocks as unknown as BlockLike[])
+      .map((image) => image.url)
+      .filter(isRemoteImageUrl)
+  );
 
   async function postImage(file: File): Promise<{
     cached: boolean;
@@ -475,6 +517,17 @@ export function BlockNoteEditor({
       return;
     }
 
+    const currentRemoteImages = imageBlocks(snapshot.blocks)
+      .map((image) => image.url)
+      .filter(isRemoteImageUrl);
+    const removedImages = [...knownRemoteImagesRef.current].filter(
+      (url) => !currentRemoteImages.includes(url)
+    );
+    knownRemoteImagesRef.current = currentRemoteImages;
+    if (removedImages.length > 0) {
+      setPendingImageDeletes(removedImages);
+    }
+
     dirtyRef.current = true;
     changeVersionRef.current += 1;
     setStatus("未保存");
@@ -621,6 +674,81 @@ export function BlockNoteEditor({
     }
   }
 
+  async function migrateLocalImages() {
+    const localImages = imageBlocks(
+      editor.document as unknown as BlockLike[]
+    ).filter((image) => !isRemoteImageUrl(image.url));
+    if (localImages.length === 0) {
+      return;
+    }
+    setStatus("正在迁移本地图片…");
+    try {
+      const uploaded = new Map<string, string>();
+      for (const image of localImages) {
+        const response = await fetch("/api/images/local", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            path: initialDocument.path,
+            src: image.url
+          })
+        });
+        const payload = (await response.json()) as {
+          detail?: string;
+          url?: string;
+        };
+        if (!response.ok || !payload.url) {
+          throw new Error(payload.detail ?? "本地图片迁移失败。");
+        }
+        uploaded.set(image.id, payload.url);
+      }
+      for (const [blockId, url] of uploaded) {
+        editor.updateBlock(blockId, { props: { url } });
+      }
+      setStatus("本地图片已迁移");
+    } catch (migrationError) {
+      setStatus(
+        migrationError instanceof Error
+          ? migrationError.message
+          : "本地图片迁移失败。"
+      );
+    }
+  }
+
+  async function finishImageRemoval(deleteRemote: boolean) {
+    if (!deleteRemote) {
+      setPendingImageDeletes([]);
+      return;
+    }
+    setDeletingImage(true);
+    try {
+      for (const url of pendingImageDeletes) {
+        const response = await fetch("/api/images/delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url })
+        });
+        const payload = (await response.json()) as {
+          detail?: string;
+          status?: string;
+        };
+        if (!response.ok) {
+          throw new Error(payload.detail ?? "删除云端图片失败。");
+        }
+        if (payload.status === "still_referenced") {
+          throw new Error("图片仍被其他页面引用，未删除云端对象。");
+        }
+      }
+      setPendingImageDeletes([]);
+    } catch (deleteError) {
+      setStatus(
+        deleteError instanceof Error ? deleteError.message : "删除云端图片失败。"
+      );
+    } finally {
+      setDeletingImage(false);
+    }
+  }
+
   return (
     <div className="blocknote-page">
       <div className="editor-statusbar" aria-live="polite">
@@ -636,6 +764,17 @@ export function BlockNoteEditor({
           <span className="upload-state" role="status">
             正在上传图片…
           </span>
+        ) : null}
+        {imageBlocks(editor.document as unknown as BlockLike[]).some(
+          (image) => !isRemoteImageUrl(image.url)
+        ) ? (
+          <button
+            className="editor-inline-action"
+            type="button"
+            onClick={() => void migrateLocalImages()}
+          >
+            迁移本地图片
+          </button>
         ) : null}
       </div>
 
@@ -657,6 +796,31 @@ export function BlockNoteEditor({
             <RotateCw aria-hidden="true" size={14} />
             重试
           </button>
+        </div>
+      ) : null}
+
+      {pendingImageDeletes.length > 0 ? (
+        <div className="editor-banner" role="dialog" aria-label="移除图片">
+          <div>
+            <strong>图片已从笔记移除</strong>
+            <span>是否同时删除云端对象？其他页面若仍引用则不会删除。</span>
+          </div>
+          <div className="editor-banner-actions">
+            <button
+              type="button"
+              onClick={() => void finishImageRemoval(false)}
+            >
+              保留云端图片
+            </button>
+            <button
+              className="danger-text-button"
+              disabled={deletingImage}
+              type="button"
+              onClick={() => void finishImageRemoval(true)}
+            >
+              {deletingImage ? "正在删除…" : "删除云端图片"}
+            </button>
+          </div>
         </div>
       ) : null}
 

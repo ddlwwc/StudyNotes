@@ -1,9 +1,11 @@
 from contextlib import asynccontextmanager
 import hashlib
 import json
+import mimetypes
+import posixpath
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import fitz
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -99,6 +101,11 @@ class QiniuSettingsRequest(BaseModel):
 
 class DeleteImageRequest(BaseModel):
     url: str
+
+
+class LocalImageRequest(BaseModel):
+    path: str
+    src: str
 
 
 def require_active_workspace() -> Path:
@@ -402,6 +409,49 @@ def remove_image(request: DeleteImageRequest) -> dict[str, object]:
         return delete_image(workspace, request.url)
     except QiniuError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@app.get("/api/images/asset")
+def workspace_image(path: str) -> FileResponse:
+    file_path = resolve_workspace_file(
+        path,
+        {".png", ".jpg", ".jpeg", ".gif", ".webp"},
+    )
+    media_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+    return FileResponse(
+        file_path,
+        media_type=media_type,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/images/local")
+def upload_local_image(request: LocalImageRequest) -> dict[str, object]:
+    if request.src.startswith(("http://", "https://", "data:", "blob:")):
+        raise HTTPException(status_code=422, detail="这张图片已经是远程图片。")
+    parsed_src = unquote(request.src.split("?", 1)[0].split("#", 1)[0])
+    page_dir = posixpath.dirname(request.path)
+    if parsed_src.startswith("/"):
+        relative = parsed_src.lstrip("/")
+    else:
+        relative = posixpath.normpath(posixpath.join(page_dir, parsed_src))
+    if relative.startswith("../"):
+        raise HTTPException(status_code=400, detail="图片路径无效。")
+    file_path = resolve_workspace_file(
+        relative,
+        {".png", ".jpg", ".jpeg", ".gif", ".webp"},
+    )
+    content_type = mimetypes.guess_type(file_path.name)[0] or ""
+    try:
+        uploaded = upload_image(
+            require_active_workspace(),
+            file_path.name,
+            content_type,
+            file_path.read_bytes(),
+        )
+    except QiniuError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    return {"source": request.src, **uploaded}
 
 
 @app.get("/api/workspace")

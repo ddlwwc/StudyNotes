@@ -687,6 +687,15 @@ button:disabled {
   color: var(--blue);
 }
 
+.editor-inline-action {
+  padding: 3px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: white;
+  color: var(--blue-deep);
+  font-size: 10px;
+}
+
 .editor-notice,
 .editor-banner,
 .editor-conflict,

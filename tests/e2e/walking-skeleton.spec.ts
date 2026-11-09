@@ -26,7 +26,7 @@ type RunningApp = {
 
 type StartAppOptions = {
   dataDir?: string;
-  env?: NodeJS.ProcessEnv;
+  env?: Record<string, string | undefined>;
 };
 
 type MockQiniu = {
@@ -489,6 +489,69 @@ test("a failed image upload leaves Markdown unchanged and can be retried", async
     const markdown = await readFile(markdownPath, "utf8");
     expect(markdown).toContain("https://images.example.test/images/");
     expect(qiniu.mock.uploads).toHaveLength(1);
+  } finally {
+    await app.stop();
+    await qiniu.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(keychainDir, { recursive: true, force: true });
+  }
+});
+
+test("existing local images stay local until migration and removal offers cloud deletion", async ({
+  page
+}) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  const dataDir = await mkdtemp(path.join(tmpdir(), "studynotes-data-"));
+  const keychainDir = await mkdtemp(
+    path.join(tmpdir(), "studynotes-keychain-")
+  );
+  const markdownPath = path.join(workspaceDir, "本地图片.md");
+  const imagePath = path.join(workspaceDir, "local.png");
+  const imageData = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nJ8AAAAASUVORK5CYII=",
+    "base64"
+  );
+  const markdown = "# 本地图片\n\n![本地图](local.png)\n";
+  await writeFile(markdownPath, markdown, "utf8");
+  await writeFile(imagePath, imageData);
+  const qiniu = await startMockQiniu();
+  const app = await startApp({
+    dataDir,
+    env: {
+      STUDY_NOTES_QINIU_MANAGEMENT_URL: qiniu.mock.serverUrl,
+      STUDY_NOTES_QINIU_UPLOAD_URL: `${qiniu.mock.serverUrl}/upload`,
+      STUDY_NOTES_TEST_KEYCHAIN_DIR: keychainDir
+    }
+  });
+
+  try {
+    await page.goto(app.webUrl);
+    await configureQiniu(page);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await page.getByRole("button", { name: "本地图片.md", exact: true }).click();
+    await expect(page.getByRole("img", { name: "本地图" })).toBeVisible();
+    expect(await readFile(markdownPath, "utf8")).toBe(markdown);
+
+    await page.getByRole("button", { name: "迁移本地图片" }).click();
+    await expect(page.getByText("本地图片已迁移", { exact: true })).toBeVisible();
+    await expect(page.getByText("已保存", { exact: true })).toBeVisible();
+    expect(await readFile(markdownPath, "utf8")).toContain(
+      "https://images.example.test/images/"
+    );
+
+    await page.getByRole("img", { name: "本地图" }).click();
+    await page.keyboard.press("Backspace");
+    await expect(
+      page.getByRole("dialog", { name: "移除图片" })
+    ).toBeVisible();
+    await expect(page.getByText("已保存", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "删除云端图片" }).click();
+    await expect.poll(() => qiniu.mock.deletes.length).toBe(1);
+    expect(await readFile(markdownPath, "utf8")).not.toContain(
+      "https://images.example.test/images/"
+    );
   } finally {
     await app.stop();
     await qiniu.stop();
