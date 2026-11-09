@@ -243,11 +243,22 @@ export function PdfViewer({ path }: { path: string }) {
     }
 
     const boundedPage = Math.min(metadata.pageCount, Math.max(1, nextPage));
+    textLayerRef.current?.replaceChildren();
     setCurrentPage(boundedPage);
     setSelectedQuote("");
     setSavedCitation(null);
     setValidationMessage("");
     window.getSelection()?.removeAllRanges();
+  }
+
+  function changeScale(delta: number) {
+    textLayerRef.current?.replaceChildren();
+    setScale((current) =>
+      Math.min(
+        MAX_SCALE,
+        Math.max(MIN_SCALE, Math.round((current + delta) * 100) / 100)
+      )
+    );
   }
 
   async function saveCitation() {
@@ -362,14 +373,7 @@ export function PdfViewer({ path }: { path: string }) {
             type="button"
             aria-label="缩小"
             disabled={scale <= MIN_SCALE}
-            onClick={() =>
-              setScale((current) =>
-                Math.max(
-                  MIN_SCALE,
-                  Math.round((current - SCALE_STEP) * 100) / 100
-                )
-              )
-            }
+            onClick={() => changeScale(-SCALE_STEP)}
           >
             <ZoomOut aria-hidden="true" size={17} />
           </button>
@@ -379,14 +383,7 @@ export function PdfViewer({ path }: { path: string }) {
             type="button"
             aria-label="放大"
             disabled={scale >= MAX_SCALE}
-            onClick={() =>
-              setScale((current) =>
-                Math.min(
-                  MAX_SCALE,
-                  Math.round((current + SCALE_STEP) * 100) / 100
-                )
-              )
-            }
+            onClick={() => changeScale(SCALE_STEP)}
           >
             <ZoomIn aria-hidden="true" size={17} />
           </button>
