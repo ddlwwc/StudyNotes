@@ -21,6 +21,7 @@ import {
   type MarkdownDocument
 } from "./blocknote-editor";
 import { PdfViewer } from "./pdf-viewer";
+import { SearchDialog, type SearchResult } from "./search-dialog";
 
 type TreeNode = {
   name: string;
@@ -146,6 +147,9 @@ export default function HomePage() {
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [openFile, setOpenFile] = useState<OpenFile | null>(null);
   const [openPdfPath, setOpenPdfPath] = useState<string | null>(null);
+  const [pdfInitialPage, setPdfInitialPage] = useState(1);
+  const [markdownSearchTarget, setMarkdownSearchTarget] =
+    useState<SearchResult | null>(null);
   const [selectedNode, setSelectedNode] = useState<TreeNode | null>(null);
   const [workspacePath, setWorkspacePath] = useState("");
   const [canBrowse, setCanBrowse] = useState(false);
@@ -158,6 +162,7 @@ export default function HomePage() {
   const [moveDialogOpen, setMoveDialogOpen] = useState(false);
   const [movePath, setMovePath] = useState("");
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -242,6 +247,21 @@ export default function HomePage() {
     setCanBrowse(Boolean(window.studyNotes));
   }, []);
 
+  useEffect(() => {
+    function handleSearchShortcut(event: KeyboardEvent) {
+      if (
+        workspace &&
+        event.key.toLowerCase() === "k" &&
+        (event.metaKey || event.ctrlKey)
+      ) {
+        event.preventDefault();
+        setSearchOpen(true);
+      }
+    }
+    window.addEventListener("keydown", handleSearchShortcut);
+    return () => window.removeEventListener("keydown", handleSearchShortcut);
+  }, [workspace]);
+
   async function openWorkspace(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSubmitting(true);
@@ -280,12 +300,17 @@ export default function HomePage() {
     }
   }
 
-  async function openFileNode(node: TreeNode) {
+  async function openFileNode(
+    node: TreeNode,
+    searchTarget: SearchResult | null = null
+  ) {
     setOpeningFile(true);
     setError(null);
 
     if (node.kind === "pdf" || node.path.toLowerCase().endsWith(".pdf")) {
       setOpenFile(null);
+      setMarkdownSearchTarget(null);
+      setPdfInitialPage(searchTarget?.page ?? 1);
       setOpenPdfPath(node.path);
       setOpeningFile(false);
       return;
@@ -301,6 +326,8 @@ export default function HomePage() {
       }
 
       setOpenFile(data);
+      setMarkdownSearchTarget(searchTarget);
+      setPdfInitialPage(1);
       setOpenPdfPath(null);
     } catch (fileError) {
       setError(
@@ -311,6 +338,17 @@ export default function HomePage() {
     } finally {
       setOpeningFile(false);
     }
+  }
+
+  function openSearchResult(result: SearchResult) {
+    setSearchOpen(false);
+    const node = findTreeNode(tree, result.path);
+    if (!node) {
+      setError("搜索结果对应的资料已移动或删除。");
+      return;
+    }
+    setSelectedNode(node);
+    void openFileNode(node, result);
   }
 
   const handlePathAvailability = useCallback((available: boolean) => {
@@ -489,7 +527,12 @@ export default function HomePage() {
           {workspace?.name ?? "Notebook workspace"}
         </div>
         <div className="top-actions">
-          <button className="search-button" type="button" disabled>
+          <button
+            className="search-button"
+            type="button"
+            disabled={!workspace}
+            onClick={() => setSearchOpen(true)}
+          >
             <Search aria-hidden="true" size={16} />
             <span>搜索</span>
             <kbd>⌘ K</kbd>
@@ -585,7 +628,11 @@ export default function HomePage() {
               <span>正在打开页面…</span>
             </div>
           ) : openPdfPath ? (
-            <PdfViewer key={openPdfPath} path={openPdfPath} />
+            <PdfViewer
+              key={`${openPdfPath}:${pdfInitialPage}`}
+              initialPage={pdfInitialPage}
+              path={openPdfPath}
+            />
           ) : openFile ? (
             <article className="document">
               <header className="document-header">
@@ -593,8 +640,9 @@ export default function HomePage() {
                 <span className="blocknote-label">BlockNote</span>
               </header>
               <BlockNoteEditor
-                key={openFile.path}
+                key={`${openFile.path}:${markdownSearchTarget?.id ?? ""}`}
                 initialDocument={openFile}
+                initialSearchTarget={markdownSearchTarget}
                 onPathAvailability={handlePathAvailability}
               />
             </article>
@@ -810,6 +858,12 @@ export default function HomePage() {
           </div>
         </div>
       ) : null}
+
+      <SearchDialog
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        onSelect={openSearchResult}
+      />
     </main>
   );
 }
