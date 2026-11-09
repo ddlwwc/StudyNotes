@@ -13,4 +13,6 @@ out/
 dist/
 data/
 .playwright-cli/
+test-results/
+playwright-report/
 DeepTutor-main/
