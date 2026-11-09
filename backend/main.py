@@ -1,15 +1,26 @@
 from contextlib import asynccontextmanager
+import json
 from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from documents import (
+    DocumentConflictError,
+    load_document,
+    save_document,
+    sidecar_path_for,
+)
 from storage import (
+    delete_document_draft,
     initialize_database,
     load_active_workspace,
+    load_document_draft,
     load_saved_workspace_path,
+    move_document_draft,
     save_active_workspace,
+    save_document_draft,
 )
 
 
@@ -40,6 +51,20 @@ class CreatePageRequest(BaseModel):
 class MoveEntryRequest(BaseModel):
     path: str
     new_path: str
+
+
+class SaveDocumentRequest(BaseModel):
+    path: str
+    content: str
+    blocks: list[dict[str, object]]
+    expected_revision: str
+
+
+class SaveDraftRequest(BaseModel):
+    path: str
+    content: str
+    blocks: list[dict[str, object]]
+    base_revision: str
 
 
 def require_active_workspace() -> Path:
@@ -153,6 +178,42 @@ def resolve_workspace_file(relative_path: str) -> Path:
     return candidate
 
 
+def serialize_document(file_path: Path) -> dict[str, object]:
+    relative_path = file_path.relative_to(require_active_workspace()).as_posix()
+    try:
+        document = load_document(file_path)
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    draft = load_document_draft(require_active_workspace(), relative_path)
+    serialized_draft = None
+    if draft is not None:
+        try:
+            draft_blocks = json.loads(str(draft["blocks_json"]))
+        except json.JSONDecodeError:
+            draft_blocks = []
+        serialized_draft = {
+            "content": draft["markdown"],
+            "blocks": draft_blocks,
+            "baseRevision": draft["base_revision"],
+            "updatedAt": draft["updated_at"],
+        }
+
+    return {
+        "path": relative_path,
+        "title": file_path.stem,
+        **document,
+        "draft": serialized_draft,
+    }
+
+
+def conflict_payload(file_path: Path) -> dict[str, object]:
+    return {
+        "message": "Markdown 文件已在外部修改，当前草稿没有覆盖磁盘。",
+        "current": serialize_document(file_path),
+    }
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -230,6 +291,7 @@ def move_entry(request: MoveEntryRequest) -> dict[str, object]:
     root = require_active_workspace()
     source = resolve_workspace_entry(request.path)
     destination = resolve_workspace_destination(request.new_path)
+    old_relative_path = source.relative_to(root).as_posix()
 
     if source.is_dir():
         try:
@@ -244,10 +306,15 @@ def move_entry(request: MoveEntryRequest) -> dict[str, object]:
     if not destination.parent.is_dir():
         raise HTTPException(status_code=400, detail="目标目录不存在。")
 
+    source_sidecar = sidecar_path_for(source)
+    destination_sidecar = sidecar_path_for(destination)
     source.rename(destination)
+    if source_sidecar.exists():
+        source_sidecar.rename(destination_sidecar)
+    move_document_draft(root, old_relative_path, request.new_path)
     return {
         "newPath": destination.relative_to(root).as_posix(),
-        "oldPath": source.relative_to(root).as_posix(),
+        "oldPath": old_relative_path,
         "tree": workspace_tree(root, root),
     }
 
@@ -261,6 +328,8 @@ def delete_entry(path: str) -> dict[str, object]:
     if source.is_dir():
         raise HTTPException(status_code=400, detail="只能删除 Markdown 页面。")
     source.unlink()
+    sidecar_path_for(source).unlink(missing_ok=True)
+    delete_document_draft(root, deleted_path)
 
     return {
         "deletedPath": deleted_path,
@@ -269,17 +338,53 @@ def delete_entry(path: str) -> dict[str, object]:
 
 
 @app.get("/api/file")
-def read_file(path: str) -> dict[str, str]:
+def read_file(path: str) -> dict[str, object]:
     file_path = resolve_workspace_file(path)
+    return serialize_document(file_path)
+
+
+@app.post("/api/file")
+def write_file(request: SaveDocumentRequest) -> dict[str, object]:
+    file_path = resolve_workspace_file(request.path)
     try:
-        content = file_path.read_text(encoding="utf-8")
-    except UnicodeDecodeError as error:
-        raise HTTPException(
-            status_code=422, detail="这个 Markdown 文件不是 UTF-8 编码。"
-        ) from error
+        save_document(
+            file_path,
+            request.content,
+            request.blocks,
+            request.expected_revision,
+        )
+    except DocumentConflictError as error:
+        raise HTTPException(status_code=409, detail=conflict_payload(file_path)) from error
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    delete_document_draft(require_active_workspace(), request.path)
+    return serialize_document(file_path)
+
+
+@app.put("/api/drafts")
+def write_draft(request: SaveDraftRequest) -> dict[str, object]:
+    file_path = resolve_workspace_file(request.path)
+    try:
+        blocks_json = json.dumps(request.blocks, ensure_ascii=False)
+        draft = save_document_draft(
+            require_active_workspace(),
+            request.path,
+            request.content,
+            blocks_json,
+            request.base_revision,
+        )
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=422, detail="草稿无法保存。") from error
 
     return {
-        "path": file_path.relative_to(active_workspace).as_posix(),
-        "title": file_path.stem,
-        "content": content,
+        "path": file_path.relative_to(require_active_workspace()).as_posix(),
+        "updatedAt": draft["updated_at"],
     }
+
+
+@app.delete("/api/drafts")
+def discard_draft(path: str) -> dict[str, bool]:
+    resolve_workspace_file(path)
+    delete_document_draft(require_active_workspace(), path)
+    return {"deleted": True}

@@ -1,9 +1,11 @@
 import { expect, test } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rename,
   rm,
@@ -204,7 +206,7 @@ test("opening a Markdown page shows rendered content without changing the file",
     ).toBeVisible();
     await expect(page.getByText("筛选信息", { exact: true })).toBeVisible();
     await expect(page.getByText("工作记忆", { exact: true })).toBeVisible();
-    await expect(page.getByRole("textbox")).toHaveCount(0);
+    await expect(page.locator('[contenteditable="true"]')).toHaveCount(1);
     expect(await readFile(markdownPath, "utf8")).toBe(markdown);
   } finally {
     await app.stop();
@@ -236,6 +238,7 @@ test("the active Notebook workspace survives an application restart", async ({
   } finally {
     await firstApp.stop();
   }
+  await page.unroute("**/api/file");
 
   const secondApp = await startApp({ dataDir });
   try {
@@ -416,6 +419,401 @@ test("external Markdown changes refresh the page tree and open page", async ({
     await expect(
       page.getByRole("button", { name: "外部移动.md", exact: true })
     ).toHaveCount(0);
+  } finally {
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("an external edit conflicts with unsaved content without overwriting Markdown", async ({
+  page
+}) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  const courseDir = path.join(workspaceDir, "课程");
+  const markdownPath = path.join(courseDir, "冲突.md");
+  await mkdir(courseDir, { recursive: true });
+  await writeFile(
+    markdownPath,
+    "# 冲突\n\n磁盘初始内容。\n",
+    "utf8"
+  );
+  const app = await startApp();
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await page.getByRole("button", { name: "冲突.md", exact: true }).click();
+
+    const paragraph = page.getByText("磁盘初始内容。", { exact: true });
+    const paragraphBox = await paragraph.boundingBox();
+    expect(paragraphBox).not.toBeNull();
+    await page.mouse.click(
+      paragraphBox!.x + paragraphBox!.width - 1,
+      paragraphBox!.y + paragraphBox!.height / 2
+    );
+    await page.keyboard.press("End");
+    await page.keyboard.type(" 本地未保存内容。");
+
+    await writeFile(
+      markdownPath,
+      "# 冲突\n\n外部编辑器的新内容。\n",
+      "utf8"
+    );
+
+    const conflict = page.locator(".editor-conflict");
+    await expect(conflict).toContainText("外部修改");
+    await expect(page.getByText("本地未保存内容。", { exact: false })).toBeVisible();
+    expect(await readFile(markdownPath, "utf8")).toContain("外部编辑器的新内容。");
+    expect(await readFile(markdownPath, "utf8")).not.toContain(
+      "本地未保存内容。"
+    );
+
+    await page.getByRole("button", { name: "载入磁盘版本" }).click();
+    await expect(
+      page.getByText("外部编辑器的新内容。", { exact: true })
+    ).toBeVisible();
+    await expect(page.getByText("本地未保存内容。", { exact: false })).toHaveCount(
+      0
+    );
+  } finally {
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("an unsaved draft is recoverable after an abnormal app restart", async ({
+  page
+}) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  const dataDir = await mkdtemp(path.join(tmpdir(), "studynotes-data-"));
+  const courseDir = path.join(workspaceDir, "课程");
+  const markdownPath = path.join(courseDir, "崩溃恢复.md");
+  await mkdir(courseDir, { recursive: true });
+  await writeFile(
+    markdownPath,
+    "# 崩溃恢复\n\n已经保存的段落。\n",
+    "utf8"
+  );
+
+  const firstApp = await startApp({ dataDir });
+  let blockSaves = true;
+  try {
+    await page.route("**/api/file", async (route) => {
+      if (blockSaves && route.request().method() === "POST") {
+        await route.abort();
+      } else {
+        await route.continue();
+      }
+    });
+    await page.goto(firstApp.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await page.getByRole("button", { name: "崩溃恢复.md", exact: true }).click();
+
+    const paragraph = page.getByText("已经保存的段落。", { exact: true });
+    const paragraphBox = await paragraph.boundingBox();
+    expect(paragraphBox).not.toBeNull();
+    await page.mouse.click(
+      paragraphBox!.x + paragraphBox!.width - 1,
+      paragraphBox!.y + paragraphBox!.height / 2
+    );
+    await page.keyboard.press("End");
+    await page.keyboard.type(" 异常退出前的内容。");
+    await expect(page.getByText("草稿已保存", { exact: true })).toBeVisible();
+    expect(await readFile(markdownPath, "utf8")).not.toContain(
+      "异常退出前的内容。"
+    );
+  } finally {
+    await firstApp.stop();
+  }
+  blockSaves = false;
+
+  const secondApp = await startApp({ dataDir });
+  try {
+    await page.goto(secondApp.webUrl);
+    await page.getByRole("button", { name: "崩溃恢复.md", exact: true }).click();
+    await expect(page.getByText("发现未保存草稿", { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "恢复草稿", exact: true })
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: "恢复草稿", exact: true }).click();
+    await expect(
+      page.getByText("异常退出前的内容。", { exact: false })
+    ).toBeVisible();
+    await expect(page.getByText("已保存", { exact: true })).toBeVisible();
+    expect(await readFile(markdownPath, "utf8")).toContain(
+      "异常退出前的内容。"
+    );
+  } finally {
+    await secondApp.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("editing Markdown autosaves the canonical file and BlockNote sidecar", async ({
+  page
+}) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  const courseDir = path.join(workspaceDir, "课程");
+  const markdownPath = path.join(courseDir, "块编辑.md");
+  const sidecarPath = `${markdownPath}.note.json`;
+  await mkdir(courseDir, { recursive: true });
+  await writeFile(
+    markdownPath,
+    "# 块编辑\n\n初始段落。\n\n- 第一项\n- 第二项\n",
+    "utf8"
+  );
+  const app = await startApp();
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await page.getByRole("button", { name: "块编辑.md", exact: true }).click();
+
+    const editable = page.locator('[contenteditable="true"]');
+    await expect(editable).toBeVisible();
+    const paragraph = page.getByText("初始段落。", { exact: true });
+    const paragraphBox = await paragraph.boundingBox();
+    expect(paragraphBox).not.toBeNull();
+    await page.mouse.click(
+      paragraphBox!.x + paragraphBox!.width - 1,
+      paragraphBox!.y + paragraphBox!.height / 2
+    );
+    await page.keyboard.press("End");
+    await page.keyboard.type(" 自动保存内容。");
+
+    await expect(page.getByText("已保存", { exact: true })).toBeVisible();
+
+    const markdown = await readFile(markdownPath, "utf8");
+    expect(markdown).toContain("# 块编辑");
+    expect(markdown).toContain("初始段落。 自动保存内容。");
+
+    const sidecar = JSON.parse(await readFile(sidecarPath, "utf8")) as {
+      blocks: Array<{ id: string; type: string }>;
+      schemaVersion: number;
+      sourceMarkdownSha256: string;
+    };
+    expect(sidecar.schemaVersion).toBe(1);
+    expect(sidecar.sourceMarkdownSha256).toBe(
+      createHash("sha256").update(markdown).digest("hex")
+    );
+    expect(sidecar.blocks.length).toBeGreaterThan(0);
+    expect(sidecar.blocks[0].id).toEqual(expect.any(String));
+    expect(sidecar.blocks[0].type).toBe("heading");
+  } finally {
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("BlockNote renders the editable Markdown block types required by the ticket", async ({
+  page
+}) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  const courseDir = path.join(workspaceDir, "课程");
+  const markdownPath = path.join(courseDir, "块类型.md");
+  await mkdir(courseDir, { recursive: true });
+  await writeFile(
+    markdownPath,
+    [
+      "# 一级标题",
+      "",
+      "普通段落。",
+      "",
+      "- 无序列表",
+      "",
+      "1. 有序列表",
+      "",
+      "> 引用内容",
+      "",
+      "```ts",
+      "const answer = 42;",
+      "```",
+      "",
+      "| 列 A | 列 B |",
+      "| --- | --- |",
+      "| 内容 1 | 内容 2 |",
+      "",
+      "---",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  const app = await startApp();
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await page.getByRole("button", { name: "块类型.md", exact: true }).click();
+
+    await expect(page.locator('[contenteditable="true"]')).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "一级标题", exact: true })
+    ).toBeVisible();
+    await expect(page.getByText("普通段落。", { exact: true })).toBeVisible();
+    await expect(page.getByText("无序列表", { exact: true })).toBeVisible();
+    await expect(page.getByText("有序列表", { exact: true })).toBeVisible();
+    await expect(page.getByText("引用内容", { exact: true })).toBeVisible();
+    await expect(page.getByText("const answer = 42;", { exact: true })).toBeVisible();
+    await expect(page.getByRole("table")).toBeVisible();
+    await expect(page.getByText("内容 1", { exact: true })).toBeVisible();
+    await expect(page.locator("hr")).toBeVisible();
+  } finally {
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("a valid sidecar restores block ids, custom properties, and layout after editing", async ({
+  page
+}) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  const courseDir = path.join(workspaceDir, "课程");
+  const markdownPath = path.join(courseDir, "块元数据.md");
+  const sidecarPath = `${markdownPath}.note.json`;
+  const markdown = "# 元数据标题\n\n可编辑段落。\n";
+  await mkdir(courseDir, { recursive: true });
+  await writeFile(markdownPath, markdown, "utf8");
+  await writeFile(
+    sidecarPath,
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        sourceMarkdownSha256: createHash("sha256")
+          .update(markdown)
+          .digest("hex"),
+        blocks: [
+          {
+            id: "stable-heading",
+            type: "heading",
+            props: { level: 1, textAlignment: "center" },
+            layout: { width: "wide" },
+            custom: { tone: "focus" },
+            children: []
+          },
+          {
+            id: "stable-paragraph",
+            type: "paragraph",
+            props: { textAlignment: "right" },
+            children: []
+          }
+        ]
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  const app = await startApp();
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await page.getByRole("button", { name: "块元数据.md", exact: true }).click();
+
+    const headingBlock = page
+      .locator('[data-node-type="blockContainer"][data-id="stable-heading"]')
+      .first();
+    await expect(headingBlock).toBeVisible();
+    await expect
+      .poll(() =>
+        headingBlock
+          .locator("*")
+          .evaluateAll((elements) =>
+            elements.map((element) => getComputedStyle(element).textAlign)
+          )
+      )
+      .toContain("center");
+
+    const paragraph = page.getByText("可编辑段落。", { exact: true });
+    const paragraphBox = await paragraph.boundingBox();
+    expect(paragraphBox).not.toBeNull();
+    await page.mouse.click(
+      paragraphBox!.x + paragraphBox!.width - 1,
+      paragraphBox!.y + paragraphBox!.height / 2
+    );
+    await page.keyboard.press("End");
+    await page.keyboard.type(" 保留元数据。");
+    await expect(page.getByText("已保存", { exact: true })).toBeVisible();
+
+    const sidecar = JSON.parse(await readFile(sidecarPath, "utf8")) as {
+      blocks: Array<{
+        custom?: Record<string, unknown>;
+        id: string;
+        layout?: Record<string, unknown>;
+        props: Record<string, unknown>;
+      }>;
+    };
+    const savedHeading = sidecar.blocks.find(
+      (block) => block.id === "stable-heading"
+    );
+    expect(savedHeading).toMatchObject({
+      custom: { tone: "focus" },
+      layout: { width: "wide" },
+      props: { textAlignment: "center" }
+    });
+    expect(
+      sidecar.blocks.some((block) => block.id === "stable-paragraph")
+    ).toBe(true);
+  } finally {
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("a damaged sidecar is backed up and rebuilt from canonical Markdown", async ({
+  page
+}) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  const courseDir = path.join(workspaceDir, "课程");
+  const markdownPath = path.join(courseDir, "损坏恢复.md");
+  const sidecarPath = `${markdownPath}.note.json`;
+  const markdown = "# 损坏恢复\n\nMarkdown 仍然完整。\n";
+  await mkdir(courseDir, { recursive: true });
+  await writeFile(markdownPath, markdown, "utf8");
+  await writeFile(sidecarPath, "{this is not valid json", "utf8");
+  const app = await startApp();
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await page.getByRole("button", { name: "损坏恢复.md", exact: true }).click();
+
+    await expect(
+      page.getByText(/sidecar 已损坏或过期.*备份旧文件/)
+    ).toBeVisible();
+    await expect(page.getByText("Markdown 仍然完整。", { exact: true })).toBeVisible();
+
+    const backups = (await readdir(courseDir)).filter((name) =>
+      name.includes(".md.note.json.corrupt-")
+    );
+    expect(backups).toHaveLength(1);
+    expect(await readFile(path.join(courseDir, backups[0]), "utf8")).toBe(
+      "{this is not valid json"
+    );
+
+    const paragraph = page.getByText("Markdown 仍然完整。", { exact: true });
+    const paragraphBox = await paragraph.boundingBox();
+    expect(paragraphBox).not.toBeNull();
+    await page.mouse.click(
+      paragraphBox!.x + paragraphBox!.width - 1,
+      paragraphBox!.y + paragraphBox!.height / 2
+    );
+    await page.keyboard.press("End");
+    await page.keyboard.type(" 已重建。");
+    await expect(page.getByText("已保存", { exact: true })).toBeVisible();
+
+    const rebuiltSidecar = JSON.parse(
+      await readFile(sidecarPath, "utf8")
+    ) as { schemaVersion: number };
+    expect(rebuiltSidecar.schemaVersion).toBe(1);
   } finally {
     await app.stop();
     await rm(workspaceDir, { recursive: true, force: true });

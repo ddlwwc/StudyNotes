@@ -39,6 +39,16 @@ def initialize_database() -> None:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS document_drafts (
+                workspace_path TEXT NOT NULL,
+                path TEXT NOT NULL,
+                markdown TEXT NOT NULL,
+                blocks_json TEXT NOT NULL,
+                base_revision TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (workspace_path, path)
+            );
             """
         )
 
@@ -81,4 +91,93 @@ def save_active_workspace(workspace: Path) -> None:
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
             """,
             (str(workspace),),
+        )
+
+
+def save_document_draft(
+    workspace: Path,
+    relative_path: str,
+    markdown: str,
+    blocks_json: str,
+    base_revision: str,
+) -> dict[str, object]:
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO document_drafts (
+                workspace_path,
+                path,
+                markdown,
+                blocks_json,
+                base_revision
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(workspace_path, path) DO UPDATE SET
+                markdown = excluded.markdown,
+                blocks_json = excluded.blocks_json,
+                base_revision = excluded.base_revision,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                str(workspace.resolve()),
+                relative_path,
+                markdown,
+                blocks_json,
+                base_revision,
+            ),
+        )
+        row = connection.execute(
+            """
+            SELECT *
+            FROM document_drafts
+            WHERE workspace_path = ? AND path = ?
+            """,
+            (str(workspace.resolve()), relative_path),
+        ).fetchone()
+
+    if row is None:
+        raise RuntimeError("Document draft was not persisted.")
+    return dict(row)
+
+
+def load_document_draft(
+    workspace: Path,
+    relative_path: str,
+) -> Optional[dict[str, object]]:
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM document_drafts
+            WHERE workspace_path = ? AND path = ?
+            """,
+            (str(workspace.resolve()), relative_path),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def delete_document_draft(workspace: Path, relative_path: str) -> None:
+    with connect() as connection:
+        connection.execute(
+            """
+            DELETE FROM document_drafts
+            WHERE workspace_path = ? AND path = ?
+            """,
+            (str(workspace.resolve()), relative_path),
+        )
+
+
+def move_document_draft(
+    workspace: Path,
+    old_path: str,
+    new_path: str,
+) -> None:
+    with connect() as connection:
+        connection.execute(
+            """
+            UPDATE document_drafts
+            SET path = ?
+            WHERE workspace_path = ? AND path = ?
+            """,
+            (new_path, str(workspace.resolve()), old_path),
         )
