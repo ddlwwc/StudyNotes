@@ -4,7 +4,13 @@ import type { Block, PartialBlock } from "@blocknote/core";
 import { BlockNoteView } from "@blocknote/mantine";
 import { useCreateBlockNote } from "@blocknote/react";
 import "@blocknote/mantine/style.css";
-import { AlertTriangle, RotateCcw, X } from "lucide-react";
+import {
+  AlertTriangle,
+  ImageUp,
+  RotateCcw,
+  RotateCw,
+  X
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 export type BlockMetadata = {
@@ -46,8 +52,29 @@ type BlockLike = {
   type: string;
 };
 
+type ImageUploadState =
+  | { status: "idle" }
+  | { fileName: string; status: "uploading" }
+  | { fileName: string; file: File; message: string; status: "failed" };
+
 const AUTOSAVE_DELAY_MS = 700;
 const POLL_INTERVAL_MS = 800;
+
+function isIncompleteImageBlock(block: BlockLike): boolean {
+  if (block.type !== "image") {
+    return false;
+  }
+  const url = block.props?.url;
+  return typeof url !== "string" || url.trim().length === 0;
+}
+
+function hasIncompleteImageBlock(blocks: BlockLike[]): boolean {
+  return blocks.some(
+    (block) =>
+      isIncompleteImageBlock(block) ||
+      hasIncompleteImageBlock(block.children ?? [])
+  );
+}
 
 function hydrateBlocks(
   blocks: BlockLike[],
@@ -144,8 +171,14 @@ export function BlockNoteEditor({
   initialDocument: MarkdownDocument;
   onPathAvailability: (available: boolean) => void;
 }) {
+  const uploadHandlerRef = useRef<
+    (file: File, blockId?: string) => Promise<string>
+  >(async () => {
+    throw new Error("图片上传尚未就绪。");
+  });
   const editor = useCreateBlockNote({
-    initialContent: [{ type: "paragraph", content: "" }]
+    initialContent: [{ type: "paragraph", content: "" }],
+    uploadFile: (file, blockId) => uploadHandlerRef.current(file, blockId)
   });
   const [status, setStatus] = useState("正在加载…");
   const [draftStatus, setDraftStatus] = useState<string | null>(null);
@@ -159,6 +192,9 @@ export function BlockNoteEditor({
   const [sidecarBackupPath, setSidecarBackupPath] = useState(
     initialDocument.sidecarBackupPath
   );
+  const [uploadState, setUploadState] = useState<ImageUploadState>({
+    status: "idle"
+  });
 
   const revisionRef = useRef(initialDocument.revision);
   const dirtyRef = useRef(false);
@@ -171,6 +207,57 @@ export function BlockNoteEditor({
   const saveTimerRef = useRef<number | null>(null);
   const draftQueueRef = useRef<Promise<void>>(Promise.resolve());
   const hydratingRef = useRef(true);
+
+  async function postImage(file: File): Promise<{
+    cached: boolean;
+    objectKey: string;
+    url: string;
+  }> {
+    const formData = new FormData();
+    formData.append("file", file);
+    const response = await fetch("/api/images", {
+      method: "POST",
+      body: formData
+    });
+    const payload = (await response.json()) as {
+      cached?: boolean;
+      detail?: string;
+      objectKey?: string;
+      url?: string;
+    };
+    if (!response.ok || !payload.url || !payload.objectKey) {
+      throw new Error(payload.detail ?? "图片上传失败。");
+    }
+    return {
+      cached: Boolean(payload.cached),
+      objectKey: payload.objectKey,
+      url: payload.url
+    };
+  }
+
+  async function uploadFileForEditor(file: File, blockId?: string) {
+    setUploadState({ fileName: file.name, status: "uploading" });
+    try {
+      const uploaded = await postImage(file);
+      setUploadState({ status: "idle" });
+      return uploaded.url;
+    } catch (uploadError) {
+      if (blockId && editor.getBlock(blockId)) {
+        editor.removeBlocks([blockId]);
+      }
+      const message =
+        uploadError instanceof Error ? uploadError.message : "图片上传失败。";
+      setUploadState({
+        fileName: file.name,
+        file,
+        message,
+        status: "failed"
+      });
+      throw uploadError;
+    }
+  }
+
+  uploadHandlerRef.current = uploadFileForEditor;
 
   function updateDirtySnapshot() {
     const markdown = editor.blocksToMarkdownLossy();
@@ -381,6 +468,9 @@ export function BlockNoteEditor({
     }
 
     const snapshot = updateDirtySnapshot();
+    if (hasIncompleteImageBlock(snapshot.blocks)) {
+      return;
+    }
     if (snapshot.markdown === baselineMarkdownRef.current) {
       return;
     }
@@ -497,6 +587,40 @@ export function BlockNoteEditor({
     };
   }, []);
 
+  async function retryImageUpload() {
+    if (uploadState.status !== "failed") {
+      return;
+    }
+    const pending = uploadState;
+    setUploadState({ fileName: pending.fileName, status: "uploading" });
+    try {
+      const uploaded = await postImage(pending.file);
+      const lastBlock = editor.document.at(-1);
+      if (lastBlock) {
+        editor.insertBlocks(
+          [
+            {
+              type: "image",
+              props: {
+                name: pending.fileName,
+                url: uploaded.url
+              }
+            }
+          ],
+          lastBlock,
+          "after"
+        );
+      }
+      setUploadState({ status: "idle" });
+    } catch (uploadError) {
+      setUploadState({
+        ...pending,
+        message:
+          uploadError instanceof Error ? uploadError.message : "图片上传失败。"
+      });
+    }
+  }
+
   return (
     <div className="blocknote-page">
       <div className="editor-statusbar" aria-live="polite">
@@ -508,7 +632,33 @@ export function BlockNoteEditor({
           {status}
         </span>
         {draftStatus ? <span className="draft-state">{draftStatus}</span> : null}
+        {uploadState.status === "uploading" ? (
+          <span className="upload-state" role="status">
+            正在上传图片…
+          </span>
+        ) : null}
       </div>
+
+      {uploadState.status === "failed" ? (
+        <div className="editor-upload-error" role="alert">
+          <ImageUp aria-hidden="true" size={16} />
+          <div>
+            <strong>图片上传失败</strong>
+            <span>
+              {uploadState.fileName}：{uploadState.message}
+            </span>
+            <span>Markdown 未写入这张图片。</span>
+          </div>
+          <button
+            className="icon-text-button"
+            type="button"
+            onClick={() => void retryImageUpload()}
+          >
+            <RotateCw aria-hidden="true" size={14} />
+            重试
+          </button>
+        </div>
+      ) : null}
 
       {sidecarStatus !== "valid" ? (
         <div className="editor-notice">

@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
+import { createServer } from "node:http";
 import {
   mkdir,
   mkdtemp,
@@ -25,7 +26,95 @@ type RunningApp = {
 
 type StartAppOptions = {
   dataDir?: string;
+  env?: NodeJS.ProcessEnv;
 };
+
+type MockQiniu = {
+  deletes: Array<{ authorization: string; path: string }>;
+  failUploads: number;
+  serverUrl: string;
+  uploads: Array<{ key: string; token: string }>;
+};
+
+function multipartField(body: string, field: string): string | null {
+  const match = new RegExp(
+    `name="${field}"\\r\\n(?:[^\\r\\n]+\\r\\n)*\\r\\n([^\\r\\n]*)`
+  ).exec(body);
+  return match?.[1] ?? null;
+}
+
+async function startMockQiniu(): Promise<{
+  mock: MockQiniu;
+  stop: () => Promise<void>;
+}> {
+  const mock: MockQiniu = {
+    deletes: [],
+    failUploads: 0,
+    serverUrl: "",
+    uploads: []
+  };
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    const body = Buffer.concat(chunks).toString("latin1");
+
+    if (request.url === "/upload" && request.method === "POST") {
+      if (mock.failUploads > 0) {
+        mock.failUploads -= 1;
+        response.writeHead(500, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: "mock upload failure" }));
+        return;
+      }
+
+      const key = multipartField(body, "key") ?? "";
+      const token = multipartField(body, "token") ?? "";
+      mock.uploads.push({ key, token });
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ key, hash: "mock-etag" }));
+      return;
+    }
+
+    if (request.url?.startsWith("/delete/") && request.method === "POST") {
+      mock.deletes.push({
+        authorization: String(request.headers.authorization ?? ""),
+        path: request.url
+      });
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end("{}");
+      return;
+    }
+
+    response.writeHead(404, { "Content-Type": "application/json" });
+    response.end("{}");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Mock Qiniu did not expose a TCP address.");
+  }
+  mock.serverUrl = `http://127.0.0.1:${address.port}`;
+  return {
+    mock,
+    stop: () =>
+      new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      })
+  };
+}
+
+async function configureQiniu(page: Page) {
+  await page.getByRole("button", { name: "设置" }).click();
+  await page.getByLabel("七牛桶").fill("study-notes-public");
+  await page.getByLabel("访问域名").fill("https://images.example.test");
+  await page.getByLabel("Access Key").fill("mock-access-key");
+  await page.getByLabel("Secret Key").fill("mock-secret-key");
+  await page.getByRole("button", { name: "保存七牛配置" }).click();
+  await expect(page.getByText("七牛配置已保存")).toBeVisible();
+  await page.getByRole("button", { name: "关闭" }).click();
+}
 
 function createTextLayerPdf(
   secondPageText: string = "Second page evidence."
@@ -134,7 +223,8 @@ async function startApp(options: StartAppOptions = {}): Promise<RunningApp> {
       ...process.env,
       STUDY_NOTES_DATA_DIR: dataDir,
       STUDY_NOTES_BACKEND_PORT: String(backendPort),
-      STUDY_NOTES_WEB_PORT: String(webPort)
+      STUDY_NOTES_WEB_PORT: String(webPort),
+      ...options.env
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -206,6 +296,205 @@ test("first launch asks the user to open a Notebook workspace", async ({ page })
     await expect(page.getByRole("button", { name: "打开工作区" })).toBeEnabled();
   } finally {
     await app.stop();
+  }
+});
+
+test("Settings stores Qiniu credentials in secure storage without exposing them to the browser", async ({
+  page
+}) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "studynotes-data-"));
+  const keychainDir = await mkdtemp(
+    path.join(tmpdir(), "studynotes-keychain-")
+  );
+  const app = await startApp({
+    dataDir,
+    env: { STUDY_NOTES_TEST_KEYCHAIN_DIR: keychainDir }
+  });
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByRole("button", { name: "设置" }).click();
+    await expect(
+      page.getByRole("heading", { name: "七牛图片存储" })
+    ).toBeVisible();
+    await page.getByLabel("七牛桶").fill("study-notes-public");
+    await page.getByLabel("访问域名").fill("https://images.example.test");
+    await page.getByLabel("Access Key").fill("browser-test-access-key");
+    await page.getByLabel("Secret Key").fill("browser-test-secret-key");
+    await page.getByRole("button", { name: "保存七牛配置" }).click();
+    await expect(page.getByText("七牛配置已保存")).toBeVisible();
+
+    const settings = await page.evaluate(async () => {
+      const response = await fetch("/api/settings/qiniu");
+      return (await response.json()) as Record<string, unknown>;
+    });
+    expect(settings).toMatchObject({
+      bucket: "study-notes-public",
+      configured: true,
+      domain: "https://images.example.test",
+      hasAccessKey: true,
+      hasSecretKey: true
+    });
+    expect(JSON.stringify(settings)).not.toContain("browser-test-access-key");
+    expect(JSON.stringify(settings)).not.toContain("browser-test-secret-key");
+
+    const databaseBytes = await readFile(path.join(app.dataDir, "app.sqlite3"));
+    expect(databaseBytes.includes(Buffer.from("browser-test-access-key"))).toBe(
+      false
+    );
+    expect(databaseBytes.includes(Buffer.from("browser-test-secret-key"))).toBe(
+      false
+    );
+    expect(
+      (await readdir(keychainDir, { recursive: true })).join("\n")
+    ).not.toBe("");
+  } finally {
+    await app.stop();
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(keychainDir, { recursive: true, force: true });
+  }
+});
+
+test("pasting an image uploads it before writing an HTTPS Markdown reference", async ({
+  page
+}) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  const dataDir = await mkdtemp(path.join(tmpdir(), "studynotes-data-"));
+  const keychainDir = await mkdtemp(
+    path.join(tmpdir(), "studynotes-keychain-")
+  );
+  const markdownPath = path.join(workspaceDir, "图片.md");
+  await writeFile(markdownPath, "# 图片\n\n粘贴图片。\n", "utf8");
+  const qiniu = await startMockQiniu();
+  const app = await startApp({
+    dataDir,
+    env: {
+      STUDY_NOTES_QINIU_MANAGEMENT_URL: qiniu.mock.serverUrl,
+      STUDY_NOTES_QINIU_UPLOAD_URL: `${qiniu.mock.serverUrl}/upload`,
+      STUDY_NOTES_TEST_KEYCHAIN_DIR: keychainDir
+    }
+  });
+
+  try {
+    await page.goto(app.webUrl);
+    await configureQiniu(page);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await page.getByRole("button", { name: "图片.md", exact: true }).click();
+
+    const imageBytes =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nJ8AAAAASUVORK5CYII=";
+    await page
+      .locator('[contenteditable="true"]')
+      .evaluate((element, bytes) => {
+        const binary = atob(bytes);
+        const content = Uint8Array.from(binary, (character) =>
+          character.charCodeAt(0)
+        );
+        const dataTransfer = new DataTransfer();
+        dataTransfer.items.add(
+          new File([content], "注意力.png", { type: "image/png" })
+        );
+        element.dispatchEvent(
+          new ClipboardEvent("paste", {
+            bubbles: true,
+            cancelable: true,
+            clipboardData: dataTransfer
+          })
+        );
+      }, imageBytes);
+
+    await expect(page.getByText("正在上传图片…", { exact: true })).toBeVisible();
+    await expect(page.getByText("已保存", { exact: true })).toBeVisible();
+
+    const markdown = await readFile(markdownPath, "utf8");
+    expect(markdown).toMatch(
+      /!\[[^\]]*\]\(https:\/\/images\.example\.test\/images\/[a-f0-9]{16}\/[a-f0-9]{32}\.png\)/
+    );
+    expect(qiniu.mock.uploads).toHaveLength(1);
+    expect(qiniu.mock.uploads[0].key).toMatch(
+      /^images\/[a-f0-9]{16}\/[a-f0-9]{32}\.png$/
+    );
+    expect(qiniu.mock.uploads[0].token).toMatch(/^mock-access-key:/);
+    expect(
+      await readdir(path.join(dataDir, "image-cache"), { recursive: true })
+    ).not.toHaveLength(0);
+  } finally {
+    await app.stop();
+    await qiniu.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(keychainDir, { recursive: true, force: true });
+  }
+});
+
+test("a failed image upload leaves Markdown unchanged and can be retried", async ({
+  page
+}) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  const dataDir = await mkdtemp(path.join(tmpdir(), "studynotes-data-"));
+  const keychainDir = await mkdtemp(
+    path.join(tmpdir(), "studynotes-keychain-")
+  );
+  const markdownPath = path.join(workspaceDir, "上传失败.md");
+  const originalMarkdown = "# 上传失败\n\n这里不能写入半成品图片。\n";
+  await writeFile(markdownPath, originalMarkdown, "utf8");
+  const qiniu = await startMockQiniu();
+  qiniu.mock.failUploads = 1;
+  const app = await startApp({
+    dataDir,
+    env: {
+      STUDY_NOTES_QINIU_MANAGEMENT_URL: qiniu.mock.serverUrl,
+      STUDY_NOTES_QINIU_UPLOAD_URL: `${qiniu.mock.serverUrl}/upload`,
+      STUDY_NOTES_TEST_KEYCHAIN_DIR: keychainDir
+    }
+  });
+
+  try {
+    await page.goto(app.webUrl);
+    await configureQiniu(page);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await page.getByRole("button", { name: "上传失败.md", exact: true }).click();
+
+    const imageBytes =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nJ8AAAAASUVORK5CYII=";
+    await page
+      .locator('[contenteditable="true"]')
+      .evaluate((element, bytes) => {
+        const content = Uint8Array.from(atob(bytes), (character) =>
+          character.charCodeAt(0)
+        );
+        const dataTransfer = new DataTransfer();
+        dataTransfer.items.add(
+          new File([content], "等待重试.png", { type: "image/png" })
+        );
+        element.dispatchEvent(
+          new ClipboardEvent("paste", {
+            bubbles: true,
+            cancelable: true,
+            clipboardData: dataTransfer
+          })
+        );
+      }, imageBytes);
+
+    await expect(page.getByText("图片上传失败", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("Markdown 未写入这张图片。", { exact: true })
+    ).toBeVisible();
+    expect(await readFile(markdownPath, "utf8")).toBe(originalMarkdown);
+
+    await page.getByRole("button", { name: "重试" }).click();
+    await expect(page.getByText("已保存", { exact: true })).toBeVisible();
+    const markdown = await readFile(markdownPath, "utf8");
+    expect(markdown).toContain("https://images.example.test/images/");
+    expect(qiniu.mock.uploads).toHaveLength(1);
+  } finally {
+    await app.stop();
+    await qiniu.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(keychainDir, { recursive: true, force: true });
   }
 });
 

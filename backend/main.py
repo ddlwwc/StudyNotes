@@ -3,29 +3,39 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 import fitz
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from credentials import (
+    ACCESS_KEY_ACCOUNT,
+    SECRET_KEY_ACCOUNT,
+    credential_store,
+    save_qiniu_credentials,
+)
 from documents import (
     DocumentConflictError,
     load_document,
     save_document,
     sidecar_path_for,
 )
+from qiniu_images import MAX_IMAGE_BYTES, QiniuError, delete_image, upload_image
 from storage import (
     delete_document_draft,
     initialize_database,
     list_source_citations,
     load_active_workspace,
     load_document_draft,
+    load_qiniu_settings,
     load_source_citation,
     load_saved_workspace_path,
     move_document_draft,
     save_active_workspace,
     save_document_draft,
+    save_qiniu_settings,
     save_source_citation,
 )
 
@@ -78,6 +88,17 @@ class SaveDraftRequest(BaseModel):
     content: str
     blocks: list[dict[str, object]]
     base_revision: str
+
+
+class QiniuSettingsRequest(BaseModel):
+    bucket: str
+    domain: str
+    access_key: Optional[str] = None
+    secret_key: Optional[str] = None
+
+
+class DeleteImageRequest(BaseModel):
+    url: str
 
 
 def require_active_workspace() -> Path:
@@ -235,6 +256,54 @@ def normalize_quote(value: str) -> str:
     return " ".join(value.split())
 
 
+def normalize_qiniu_domain(value: str) -> str:
+    parsed = urlsplit(value.strip())
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="七牛访问域名必须是 HTTPS 域名，且不能包含路径或参数。",
+        )
+    return f"https://{parsed.netloc.lower()}"
+
+
+def normalize_qiniu_bucket(value: str) -> str:
+    bucket = value.strip().lower()
+    if (
+        len(bucket) < 3
+        or len(bucket) > 63
+        or not bucket[0].isalnum()
+        or not bucket[-1].isalnum()
+        or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-"
+               for character in bucket)
+    ):
+        raise HTTPException(status_code=422, detail="七牛桶名称无效。")
+    return bucket
+
+
+def serialize_qiniu_settings() -> dict[str, object]:
+    settings = load_qiniu_settings()
+    store = credential_store()
+    access_key = store.get(ACCESS_KEY_ACCOUNT)
+    secret_key = store.get(SECRET_KEY_ACCOUNT)
+    return {
+        "bucket": settings["bucket"] if settings else "",
+        "configured": bool(
+            settings and access_key is not None and secret_key is not None
+        ),
+        "domain": settings["domain"] if settings else "",
+        "hasAccessKey": access_key is not None,
+        "hasSecretKey": secret_key is not None,
+    }
+
+
 def open_pdf(file_path: Path) -> tuple[bytes, fitz.Document]:
     try:
         pdf_bytes = file_path.read_bytes()
@@ -285,6 +354,54 @@ def serialize_citation(citation: dict[str, object]) -> dict[str, object]:
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/settings/qiniu")
+def qiniu_settings() -> dict[str, object]:
+    return serialize_qiniu_settings()
+
+
+@app.put("/api/settings/qiniu")
+def update_qiniu_settings(request: QiniuSettingsRequest) -> dict[str, object]:
+    bucket = normalize_qiniu_bucket(request.bucket)
+    domain = normalize_qiniu_domain(request.domain)
+    store = credential_store()
+    current_access_key = store.get(ACCESS_KEY_ACCOUNT)
+    current_secret_key = store.get(SECRET_KEY_ACCOUNT)
+    access_key = (request.access_key or "").strip() or current_access_key
+    secret_key = (request.secret_key or "").strip() or current_secret_key
+    if not access_key or not secret_key:
+        raise HTTPException(
+            status_code=422,
+            detail="首次配置需要同时填写 Access Key 和 Secret Key。",
+        )
+
+    save_qiniu_credentials(access_key, secret_key)
+    save_qiniu_settings(bucket, domain)
+    return serialize_qiniu_settings()
+
+
+@app.post("/api/images", status_code=201)
+def create_image(file: UploadFile = File(...)) -> dict[str, object]:
+    workspace = require_active_workspace()
+    try:
+        return upload_image(
+            workspace,
+            file.filename or "image",
+            file.content_type or "",
+            file.file.read(MAX_IMAGE_BYTES + 1),
+        )
+    except QiniuError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@app.post("/api/images/delete")
+def remove_image(request: DeleteImageRequest) -> dict[str, object]:
+    workspace = require_active_workspace()
+    try:
+        return delete_image(workspace, request.url)
+    except QiniuError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
 
 
 @app.get("/api/workspace")

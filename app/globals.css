@@ -476,6 +476,10 @@ button:disabled {
   box-shadow: var(--shadow);
 }
 
+.settings-dialog {
+  width: min(100%, 560px);
+}
+
 .dialog h2 {
   margin: 0;
   color: var(--ink);
@@ -514,6 +518,28 @@ button:disabled {
 .dialog input:focus {
   border-color: var(--blue);
   box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.12);
+}
+
+.settings-form {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-form > label {
+  margin-top: 6px;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.settings-status {
+  margin: 10px 0 0;
+  color: #157347;
+  font-size: 12px;
 }
 
 .dialog-actions {
@@ -657,9 +683,14 @@ button:disabled {
   color: var(--faint);
 }
 
+.upload-state {
+  color: var(--blue);
+}
+
 .editor-notice,
 .editor-banner,
-.editor-conflict {
+.editor-conflict,
+.editor-upload-error {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
@@ -672,6 +703,28 @@ button:disabled {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.editor-upload-error {
+  border-color: #efc6c2;
+  background: #fff7f6;
+  color: #8c271e;
+}
+
+.editor-upload-error > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.editor-upload-error strong {
+  color: #7d2018;
+  font-size: 12px;
+}
+
+.editor-upload-error span {
+  overflow-wrap: anywhere;
 }
 
 .editor-notice code {

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import sqlite3
 from pathlib import Path
@@ -7,7 +9,7 @@ from typing import Optional
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def database_path() -> Path:
+def application_data_directory() -> Path:
     configured = os.environ.get("STUDY_NOTES_DATA_DIR")
     data_dir = (
         Path(configured).expanduser().resolve()
@@ -15,6 +17,11 @@ def database_path() -> Path:
         else PROJECT_ROOT / "data"
     )
     data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir
+
+
+def database_path() -> Path:
+    data_dir = application_data_directory()
     return data_dir / "app.sqlite3"
 
 
@@ -63,6 +70,24 @@ def initialize_database() -> None:
 
             CREATE INDEX IF NOT EXISTS source_citations_workspace_path
             ON source_citations (workspace_path, path, created_at);
+
+            CREATE TABLE IF NOT EXISTS qiniu_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                bucket TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS uploaded_images (
+                workspace_path TEXT NOT NULL,
+                object_key TEXT NOT NULL,
+                url TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                cached_path TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (workspace_path, url)
+            );
             """
         )
 
@@ -264,3 +289,82 @@ def load_source_citation(
             (str(workspace.resolve()), citation_id),
         ).fetchone()
     return dict(row) if row is not None else None
+
+
+def load_qiniu_settings() -> Optional[dict[str, object]]:
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM qiniu_settings WHERE id = 1"
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def save_qiniu_settings(bucket: str, domain: str) -> dict[str, object]:
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO qiniu_settings (id, bucket, domain)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                bucket = excluded.bucket,
+                domain = excluded.domain,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (bucket, domain),
+        )
+        row = connection.execute(
+            "SELECT * FROM qiniu_settings WHERE id = 1"
+        ).fetchone()
+
+    if row is None:
+        raise RuntimeError("Qiniu settings were not persisted.")
+    return dict(row)
+
+
+def save_uploaded_image(
+    workspace: Path,
+    object_key: str,
+    url: str,
+    mime_type: str,
+    size: int,
+    cached_path: str | None,
+) -> dict[str, object]:
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO uploaded_images (
+                workspace_path,
+                object_key,
+                url,
+                mime_type,
+                size,
+                cached_path
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(workspace_path, url) DO UPDATE SET
+                object_key = excluded.object_key,
+                mime_type = excluded.mime_type,
+                size = excluded.size,
+                cached_path = excluded.cached_path
+            """,
+            (
+                str(workspace.resolve()),
+                object_key,
+                url,
+                mime_type,
+                size,
+                cached_path,
+            ),
+        )
+        row = connection.execute(
+            """
+            SELECT *
+            FROM uploaded_images
+            WHERE workspace_path = ? AND url = ?
+            """,
+            (str(workspace.resolve()), url),
+        ).fetchone()
+
+    if row is None:
+        raise RuntimeError("Uploaded image was not persisted.")
+    return dict(row)

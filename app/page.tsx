@@ -43,6 +43,14 @@ type WorkspaceState = {
 
 type OpenFile = MarkdownDocument;
 
+type QiniuSettings = {
+  bucket: string;
+  configured: boolean;
+  domain: string;
+  hasAccessKey: boolean;
+  hasSecretKey: boolean;
+};
+
 function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
   for (const node of nodes) {
     if (node.path === path) {
@@ -158,6 +166,16 @@ export default function HomePage() {
   const [moveDialogOpen, setMoveDialogOpen] = useState(false);
   const [movePath, setMovePath] = useState("");
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [qiniuSettings, setQiniuSettings] = useState<QiniuSettings | null>(
+    null
+  );
+  const [qiniuBucket, setQiniuBucket] = useState("");
+  const [qiniuDomain, setQiniuDomain] = useState("");
+  const [qiniuAccessKey, setQiniuAccessKey] = useState("");
+  const [qiniuSecretKey, setQiniuSecretKey] = useState("");
+  const [settingsStatus, setSettingsStatus] = useState<string | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -480,6 +498,71 @@ export default function HomePage() {
     }
   }
 
+  async function openSettings() {
+    setSettingsOpen(true);
+    setSettingsError(null);
+    setSettingsStatus(null);
+
+    try {
+      const response = await fetch("/api/settings/qiniu", { cache: "no-store" });
+      const data = (await response.json()) as QiniuSettings & {
+        detail?: string;
+      };
+      if (!response.ok) {
+        throw new Error(data.detail ?? "无法读取七牛配置。");
+      }
+      setQiniuSettings(data);
+      setQiniuBucket(data.bucket);
+      setQiniuDomain(data.domain);
+      setQiniuAccessKey("");
+      setQiniuSecretKey("");
+    } catch (settingsLoadError) {
+      setSettingsError(
+        settingsLoadError instanceof Error
+          ? settingsLoadError.message
+          : "无法读取七牛配置。"
+      );
+    }
+  }
+
+  async function saveQiniuSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSettingsError(null);
+    setSettingsStatus(null);
+
+    try {
+      const response = await fetch("/api/settings/qiniu", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          bucket: qiniuBucket,
+          domain: qiniuDomain,
+          access_key: qiniuAccessKey || null,
+          secret_key: qiniuSecretKey || null
+        })
+      });
+      const data = (await response.json()) as QiniuSettings & {
+        detail?: string;
+      };
+      if (!response.ok) {
+        throw new Error(data.detail ?? "无法保存七牛配置。");
+      }
+
+      setQiniuSettings(data);
+      setQiniuBucket(data.bucket);
+      setQiniuDomain(data.domain);
+      setQiniuAccessKey("");
+      setQiniuSecretKey("");
+      setSettingsStatus("七牛配置已保存");
+    } catch (settingsSaveError) {
+      setSettingsError(
+        settingsSaveError instanceof Error
+          ? settingsSaveError.message
+          : "无法保存七牛配置。"
+      );
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -494,7 +577,12 @@ export default function HomePage() {
             <span>搜索</span>
             <kbd>⌘ K</kbd>
           </button>
-          <button className="icon-button" type="button" aria-label="设置" disabled>
+          <button
+            className="icon-button"
+            type="button"
+            aria-label="设置"
+            onClick={() => void openSettings()}
+          >
             <Settings2 aria-hidden="true" size={17} />
           </button>
         </div>
@@ -688,6 +776,101 @@ export default function HomePage() {
           )}
         </section>
       </div>
+
+      {settingsOpen ? (
+        <div className="modal-backdrop">
+          <div
+            aria-labelledby="settings-title"
+            aria-modal="true"
+            className="dialog settings-dialog"
+            role="dialog"
+          >
+            <h2 id="settings-title">七牛图片存储</h2>
+            <p className="dialog-copy">
+              新图片会上传到公开读桶。Access Key 与 Secret Key
+              只写入系统安全存储，不会进入页面或配置数据库。
+            </p>
+            <form className="settings-form" onSubmit={saveQiniuSettings}>
+              <label htmlFor="qiniu-bucket">七牛桶</label>
+              <input
+                autoFocus
+                id="qiniu-bucket"
+                name="qiniu-bucket"
+                autoComplete="off"
+                spellCheck={false}
+                value={qiniuBucket}
+                onChange={(event) => setQiniuBucket(event.target.value)}
+              />
+              <label htmlFor="qiniu-domain">访问域名</label>
+              <input
+                id="qiniu-domain"
+                name="qiniu-domain"
+                autoComplete="url"
+                placeholder="https://images.example.com"
+                spellCheck={false}
+                value={qiniuDomain}
+                onChange={(event) => setQiniuDomain(event.target.value)}
+              />
+              <div className="settings-grid">
+                <div>
+                  <label htmlFor="qiniu-access-key">Access Key</label>
+                  <input
+                    id="qiniu-access-key"
+                    name="qiniu-access-key"
+                    autoComplete="new-password"
+                    placeholder={
+                      qiniuSettings?.hasAccessKey ? "已保存在 Keychain" : ""
+                    }
+                    spellCheck={false}
+                    type="password"
+                    value={qiniuAccessKey}
+                    onChange={(event) => setQiniuAccessKey(event.target.value)}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="qiniu-secret-key">Secret Key</label>
+                  <input
+                    id="qiniu-secret-key"
+                    name="qiniu-secret-key"
+                    autoComplete="new-password"
+                    placeholder={
+                      qiniuSettings?.hasSecretKey ? "已保存在 Keychain" : ""
+                    }
+                    spellCheck={false}
+                    type="password"
+                    value={qiniuSecretKey}
+                    onChange={(event) => setQiniuSecretKey(event.target.value)}
+                  />
+                </div>
+              </div>
+              {settingsError ? (
+                <p className="error-message">{settingsError}</p>
+              ) : null}
+              {settingsStatus ? (
+                <p className="settings-status" role="status">
+                  {settingsStatus}
+                </p>
+              ) : null}
+              <div className="dialog-actions">
+                <button
+                  className="secondary-text-button"
+                  type="button"
+                  onClick={() => setSettingsOpen(false)}
+                >
+                  关闭
+                </button>
+                <button
+                  className="primary-button"
+                  type="submit"
+                  disabled={!qiniuBucket.trim() || !qiniuDomain.trim()}
+                >
+                  保存七牛配置
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
 
       {createDialogOpen ? (
         <div className="modal-backdrop">
