@@ -20,11 +20,13 @@ import {
   BlockNoteEditor,
   type MarkdownDocument
 } from "./blocknote-editor";
+import { PdfViewer } from "./pdf-viewer";
 
 type TreeNode = {
   name: string;
   path: string;
   type: "directory" | "file";
+  kind?: "markdown" | "pdf";
   children?: TreeNode[];
 };
 
@@ -143,6 +145,7 @@ export default function HomePage() {
     useState<WorkspaceState["staleWorkspace"]>(null);
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [openFile, setOpenFile] = useState<OpenFile | null>(null);
+  const [openPdfPath, setOpenPdfPath] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<TreeNode | null>(null);
   const [workspacePath, setWorkspacePath] = useState("");
   const [canBrowse, setCanBrowse] = useState(false);
@@ -261,6 +264,7 @@ export default function HomePage() {
       setStaleWorkspace(data.staleWorkspace);
       setTree(data.tree);
       setOpenFile(null);
+      setOpenPdfPath(null);
       setSelectedNode(null);
       if (data.workspace) {
         setWorkspacePath(data.workspace.path);
@@ -276,9 +280,16 @@ export default function HomePage() {
     }
   }
 
-  async function openMarkdown(node: TreeNode) {
+  async function openFileNode(node: TreeNode) {
     setOpeningFile(true);
     setError(null);
+
+    if (node.kind === "pdf" || node.path.toLowerCase().endsWith(".pdf")) {
+      setOpenFile(null);
+      setOpenPdfPath(node.path);
+      setOpeningFile(false);
+      return;
+    }
 
     try {
       const response = await fetch(
@@ -290,6 +301,7 @@ export default function HomePage() {
       }
 
       setOpenFile(data);
+      setOpenPdfPath(null);
     } catch (fileError) {
       setError(
         fileError instanceof Error
@@ -545,9 +557,9 @@ export default function HomePage() {
           </div>
           {tree.length > 0 ? (
             <TreeNodes
-              activePath={openFile?.path ?? null}
+              activePath={openFile?.path ?? openPdfPath}
               nodes={tree}
-              onOpenFile={(node) => void openMarkdown(node)}
+              onOpenFile={(node) => void openFileNode(node)}
               onSelect={setSelectedNode}
               selectedPath={selectedNode?.path ?? null}
             />
@@ -572,6 +584,8 @@ export default function HomePage() {
               <LoaderCircle className="spin" aria-hidden="true" size={22} />
               <span>正在打开页面…</span>
             </div>
+          ) : openPdfPath ? (
+            <PdfViewer key={openPdfPath} path={openPdfPath} />
           ) : openFile ? (
             <article className="document">
               <header className="document-header">
@@ -587,7 +601,7 @@ export default function HomePage() {
           ) : workspace ? (
             <div className="empty-document">
               <h1>{workspace.name}</h1>
-              <p>从左侧资料树选择一个 Markdown 页面。</p>
+              <p>从左侧资料树选择一个 Markdown 页面或 PDF。</p>
             </div>
           ) : staleWorkspace ? (
             <div className="workspace-picker">
