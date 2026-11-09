@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import {
   mkdir,
@@ -22,8 +23,72 @@ type StartAppOptions = {
   dataDir?: string;
 };
 
+function createTextLayerPdf(
+  secondPageText: string = "Second page evidence."
+): Buffer {
+  const firstPageStream =
+    "BT /F1 20 Tf 72 700 Td (Attention controls working memory.) Tj " +
+    "0 -28 Td (Select this sentence as evidence.) Tj ET";
+  const secondPageStream = `BT /F1 20 Tf 72 700 Td (${secondPageText}) Tj ET`;
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 6 0 R >> >> /Contents 7 0 R >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 6 0 R >> >> /Contents 8 0 R >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    `<< /Length ${Buffer.byteLength(firstPageStream, "ascii")} >>\nstream\n${firstPageStream}\nendstream`,
+    `<< /Length ${Buffer.byteLength(secondPageStream, "ascii")} >>\nstream\n${secondPageStream}\nendstream`
+  ];
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(pdf, "ascii"));
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+
+  const xrefOffset = Buffer.byteLength(pdf, "ascii");
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += "0000000000 65535 f \n";
+  offsets.slice(1).forEach((offset) => {
+    pdf += `${offset.toString().padStart(10, "0")} 00000 n \n`;
+  });
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\n`;
+  pdf += `startxref\n${xrefOffset}\n%%EOF\n`;
+
+  return Buffer.from(pdf, "ascii");
+}
+
 function reservePort(): number {
   return 35_000 + Math.floor(Math.random() * 10_000);
+}
+
+async function selectPdfEvidence(page: Page) {
+  const evidenceLine = page
+    .getByLabel("PDF 文本层")
+    .getByText("Attention controls working memory.", { exact: true });
+  await expect(evidenceLine).toBeVisible();
+
+  let evidenceBounds: Awaited<ReturnType<typeof evidenceLine.boundingBox>> = null;
+  await expect
+    .poll(async () => {
+      evidenceBounds = await evidenceLine.boundingBox().catch(() => null);
+      return evidenceBounds?.width ?? 0;
+    })
+    .toBeGreaterThan(20);
+
+  await page.mouse.move(
+    evidenceBounds!.x + 1,
+    evidenceBounds!.y + evidenceBounds!.height / 2
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    evidenceBounds!.x + evidenceBounds!.width - 1,
+    evidenceBounds!.y + evidenceBounds!.height / 2,
+    { steps: 12 }
+  );
+  await page.mouse.up();
 }
 
 async function waitForHttp(url: string, child: ChildProcess, output: () => string) {
@@ -204,6 +269,139 @@ test("opening a Markdown page shows rendered content without changing the file",
     await expect(page.getByText("工作记忆", { exact: true })).toBeVisible();
     await expect(page.getByRole("textbox")).toHaveCount(0);
     expect(await readFile(markdownPath, "utf8")).toBe(markdown);
+  } finally {
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("opening a PDF supports page navigation, zoom, text selection, and citation anchors", async ({
+  page
+}) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  await mkdir(path.join(workspaceDir, "课程"), { recursive: true });
+  const pdfRelativePath = "课程/注意力研究.pdf";
+  const pdfPath = path.join(workspaceDir, pdfRelativePath);
+  await writeFile(pdfPath, createTextLayerPdf());
+
+  const app = await startApp();
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await page
+      .getByRole("button", { name: "注意力研究.pdf", exact: true })
+      .click();
+
+    await expect(page.getByText("第 1 / 3 页", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "下一页" }).click();
+    await expect(page.getByText("第 2 / 3 页", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "上一页" }).click();
+    await expect(page.getByText("第 1 / 3 页", { exact: true })).toBeVisible();
+
+    const pdfPage = page.getByLabel("PDF 页面");
+    const beforeZoom = await pdfPage.boundingBox();
+    expect(beforeZoom).not.toBeNull();
+    await page.getByRole("button", { name: "放大" }).click();
+    await expect
+      .poll(async () => (await pdfPage.boundingBox())?.width ?? 0)
+      .toBeGreaterThan(beforeZoom?.width ?? 0);
+
+    await selectPdfEvidence(page);
+    const selectedFragment = page.getByRole("region", {
+      name: "选中片段"
+    });
+    await expect(selectedFragment).toContainText(
+      "Attention controls working memory."
+    );
+    await page.getByRole("button", { name: "保存引用" }).click();
+    await expect(page.getByText("引用已保存", { exact: true })).toBeVisible();
+
+    const citations = await page.evaluate(async (path) => {
+      const response = await fetch(
+        `/api/citations?path=${encodeURIComponent(path)}`
+      );
+      return (await response.json()) as Array<Record<string, unknown>>;
+    }, pdfRelativePath);
+
+    expect(citations).toHaveLength(1);
+    expect(citations[0]).toMatchObject({
+      page: 1,
+      path: pdfRelativePath
+    });
+    expect(citations[0].quote).toContain("Attention controls working memory.");
+    expect(citations[0].pdfSha256).toMatch(/^[a-f0-9]{64}$/);
+  } finally {
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("an externally changed PDF marks its saved citation as mismatched", async ({
+  page
+}) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  await mkdir(path.join(workspaceDir, "课程"), { recursive: true });
+  const pdfRelativePath = "课程/文献综述.pdf";
+  const pdfPath = path.join(workspaceDir, pdfRelativePath);
+  await writeFile(pdfPath, createTextLayerPdf());
+
+  const app = await startApp();
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await page
+      .getByRole("button", { name: "文献综述.pdf", exact: true })
+      .click();
+    await expect(page.getByText("第 1 / 3 页", { exact: true })).toBeVisible();
+
+    await selectPdfEvidence(page);
+    await page.getByRole("button", { name: "保存引用" }).click();
+    await expect(page.getByText("引用已保存", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "校验引用" }).click();
+    await expect(page.getByText("引用仍有效", { exact: true })).toBeVisible();
+
+    await writeFile(pdfPath, createTextLayerPdf("Second page revision."));
+    await page.getByRole("button", { name: "校验引用" }).click();
+    await expect(
+      page.getByText("引用已失配：PDF 内容已变更", { exact: true })
+    ).toBeVisible();
+  } finally {
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("a PDF page without a text layer explains that OCR is unsupported", async ({
+  page
+}) => {
+  const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
+  await mkdir(path.join(workspaceDir, "课程"), { recursive: true });
+  const pdfPath = path.join(workspaceDir, "课程", "扫描资料.pdf");
+  await writeFile(pdfPath, createTextLayerPdf());
+
+  const app = await startApp();
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await page
+      .getByRole("button", { name: "扫描资料.pdf", exact: true })
+      .click();
+    await expect(page.getByText("第 1 / 3 页", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "下一页" }).click();
+    await page.getByRole("button", { name: "下一页" }).click();
+    await expect(page.getByText("第 3 / 3 页", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("当前页没有可提取文本，首版不支持 OCR。", {
+        exact: true
+      })
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "保存引用" })).toBeDisabled();
   } finally {
     await app.stop();
     await rm(workspaceDir, { recursive: true, force: true });
