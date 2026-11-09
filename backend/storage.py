@@ -88,6 +88,33 @@ def initialize_database() -> None:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (workspace_path, url)
             );
+
+            CREATE TABLE IF NOT EXISTS search_sources (
+                workspace_path TEXT NOT NULL,
+                path TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                source_hash TEXT NOT NULL,
+                parser_version TEXT NOT NULL,
+                indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                error TEXT,
+                PRIMARY KEY (workspace_path, path)
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
+                workspace_path UNINDEXED,
+                path UNINDEXED,
+                kind UNINDEXED,
+                block_id UNINDEXED,
+                block_index UNINDEXED,
+                heading_path UNINDEXED,
+                page UNINDEXED,
+                title,
+                path_search,
+                tags,
+                heading_search,
+                body,
+                tokenize = 'trigram case_sensitive 0'
+            );
             """
         )
 

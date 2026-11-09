@@ -12,6 +12,7 @@ import {
   X
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import type { SearchResult } from "./search-dialog";
 
 export type BlockMetadata = {
   children?: BlockMetadata[];
@@ -200,9 +201,11 @@ async function readJson<T>(response: Response): Promise<T> {
 
 export function BlockNoteEditor({
   initialDocument,
+  initialSearchTarget,
   onPathAvailability
 }: {
   initialDocument: MarkdownDocument;
+  initialSearchTarget: SearchResult | null;
   onPathAvailability: (available: boolean) => void;
 }) {
   const uploadHandlerRef = useRef<
@@ -300,6 +303,7 @@ export function BlockNoteEditor({
   }
 
   uploadHandlerRef.current = uploadFileForEditor;
+  const pageRef = useRef<HTMLDivElement>(null);
 
   function updateDirtySnapshot() {
     const markdown = editor.blocksToMarkdownLossy();
@@ -370,6 +374,76 @@ export function BlockNoteEditor({
     loadDocumentIntoEditor(initialDocument);
     setStatus("已加载");
   }, []);
+
+  useEffect(() => {
+    if (!initialSearchTarget) {
+      return;
+    }
+
+    let attempts = 0;
+    let timer = 0;
+
+    const focusTarget = () => {
+      const surface = pageRef.current;
+      if (!surface) {
+        return false;
+      }
+
+      let target: Element | null = null;
+      if (initialSearchTarget.blockId) {
+        try {
+          target = surface.querySelector(
+            `[data-node-type="blockContainer"][data-id="${CSS.escape(
+              initialSearchTarget.blockId
+            )}"]`
+          );
+        } catch {
+          target = null;
+        }
+      }
+
+      if (!target && initialSearchTarget.snippet) {
+        const expected = initialSearchTarget.snippet
+          .replace(/…/g, "")
+          .replace(/\s+/g, " ")
+          .trim();
+        target =
+          [...surface.querySelectorAll('[data-node-type="blockContainer"]')].find(
+            (element) =>
+              (element.textContent ?? "").replace(/\s+/g, " ").includes(expected)
+          ) ?? null;
+      }
+
+      if (!target && initialSearchTarget.blockIndex !== null) {
+        target =
+          surface.querySelectorAll('[data-node-type="blockContainer"]')[
+            initialSearchTarget.blockIndex
+          ] ?? null;
+      }
+
+      if (!target) {
+        return false;
+      }
+      surface
+        .querySelectorAll(".search-target")
+        .forEach((element) => element.classList.remove("search-target"));
+      target?.classList.add("search-target");
+      target.scrollIntoView({ block: "center", behavior: "instant" });
+      return true;
+    };
+
+    const pollTarget = () => {
+      attempts += 1;
+      if (focusTarget() || attempts >= 25) {
+        window.clearInterval(timer);
+      }
+    };
+
+    timer = window.setInterval(pollTarget, 100);
+    pollTarget();
+
+    return () => window.clearInterval(timer);
+  }, [initialDocument.path, initialSearchTarget]);
 
   useEffect(() => {
     let active = true;
@@ -750,7 +824,7 @@ export function BlockNoteEditor({
   }
 
   return (
-    <div className="blocknote-page">
+    <div className="blocknote-page" ref={pageRef}>
       <div className="editor-statusbar" aria-live="polite">
         <span
           className={`save-state ${

@@ -45,7 +45,13 @@ const MIN_SCALE = 0.75;
 const MAX_SCALE = 2.5;
 const SCALE_STEP = 0.15;
 
-export function PdfViewer({ path }: { path: string }) {
+export function PdfViewer({
+  initialPage = 1,
+  path
+}: {
+  initialPage?: number;
+  path: string;
+}) {
   const [metadata, setMetadata] = useState<PdfMetadata | null>(null);
   const [pdfDocument, setPdfDocument] = useState<PDFDocumentProxy | null>(null);
   const [pdfjs, setPdfjs] = useState<typeof PdfJsModule | null>(null);
@@ -100,6 +106,9 @@ export function PdfViewer({ path }: { path: string }) {
           setMetadata(data);
           setPdfjs(pdfjsModule);
           setPdfDocument(loadedDocument);
+          setCurrentPage(
+            Math.min(data.pageCount, Math.max(1, Math.round(initialPage)))
+          );
         }
       } catch (loadError) {
         if (!cancelled) {
@@ -122,7 +131,7 @@ export function PdfViewer({ path }: { path: string }) {
       cancelled = true;
       void loadingTask?.destroy();
     };
-  }, [path]);
+  }, [initialPage, path]);
 
   useEffect(() => {
     if (!pdfDocument || !pdfjs) {

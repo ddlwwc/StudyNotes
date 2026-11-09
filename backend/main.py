@@ -25,6 +25,7 @@ from documents import (
     sidecar_path_for,
 )
 from qiniu_images import MAX_IMAGE_BYTES, QiniuError, delete_image, upload_image
+from search_index import rebuild_workspace_index, search_workspace
 from storage import (
     delete_document_draft,
     initialize_database,
@@ -479,6 +480,20 @@ def workspace() -> dict[str, object]:
         "workspace": serialize_workspace(active_workspace),
         "tree": workspace_tree(active_workspace, active_workspace),
     }
+
+
+@app.get("/api/search")
+def search(q: str = "") -> dict[str, object]:
+    root = require_active_workspace()
+    results, index = search_workspace(root, q)
+    return {"index": index, "results": results}
+
+
+@app.post("/api/search/reindex")
+def rebuild_search_index() -> dict[str, object]:
+    root = require_active_workspace()
+    index = rebuild_workspace_index(root)
+    return {"index": index}
 
 
 @app.post("/api/workspace")
