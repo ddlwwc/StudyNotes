@@ -11,10 +11,20 @@ from typing import Optional
 from urllib.parse import unquote, urlsplit
 
 import fitz
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from backups import (
+    MAX_PACKAGE_BYTES,
+    BackupError,
+    BackupPackageError,
+    BackupPreviewError,
+    BackupRestoreError,
+    create_backup,
+    preview_backup,
+    restore_backup,
+)
 from credentials import (
     ACCESS_KEY_ACCOUNT,
     SECRET_KEY_ACCOUNT,
@@ -679,6 +689,46 @@ def review_response(workspace: Path) -> dict[str, object]:
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/api/backups/export")
+def export_backup() -> dict[str, object]:
+    workspace = require_active_workspace()
+    try:
+        return create_backup(workspace)
+    except (BackupError, OSError) as backup_error:
+        raise HTTPException(status_code=500, detail=str(backup_error)) from backup_error
+
+
+@app.post("/api/backups/preview")
+def preview_backup_package(file: UploadFile = File(...)) -> dict[str, object]:
+    workspace = require_active_workspace()
+    package = file.file.read(MAX_PACKAGE_BYTES + 1)
+    try:
+        return preview_backup(package, workspace)
+    except BackupPackageError as package_error:
+        raise HTTPException(status_code=422, detail=str(package_error)) from package_error
+    except BackupError as backup_error:
+        raise HTTPException(status_code=409, detail=str(backup_error)) from backup_error
+
+
+@app.post("/api/backups/restore")
+def restore_backup_package(
+    preview_id: str = Form(...),
+    file: UploadFile = File(...),
+) -> dict[str, object]:
+    workspace = require_active_workspace()
+    package = file.file.read(MAX_PACKAGE_BYTES + 1)
+    try:
+        return restore_backup(package, preview_id, workspace)
+    except BackupPackageError as package_error:
+        raise HTTPException(status_code=422, detail=str(package_error)) from package_error
+    except BackupPreviewError as preview_error:
+        raise HTTPException(status_code=409, detail=str(preview_error)) from preview_error
+    except BackupRestoreError as restore_error:
+        raise HTTPException(status_code=409, detail=str(restore_error)) from restore_error
+    except BackupError as backup_error:
+        raise HTTPException(status_code=409, detail=str(backup_error)) from backup_error
 
 
 @app.get("/api/model-settings")

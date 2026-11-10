@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
+import { BackupSettings } from "./backup-settings";
 import {
   BlockNoteEditor,
   type MarkdownDocument,
@@ -1363,6 +1364,8 @@ export default function HomePage() {
                     </div>
                   </form>
                 </section>
+
+                <BackupSettings disabled={!workspace} />
               </>
             )}
           </div>
