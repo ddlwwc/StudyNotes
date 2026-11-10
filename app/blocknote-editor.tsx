@@ -42,7 +42,9 @@ export type MarkdownDocument = {
 };
 
 export type TutorSelection = {
-  blockId: string;
+  blockId: string | null;
+  kind: "markdown" | "pdf";
+  page: number | null;
   quote: string;
 };
 
@@ -786,7 +788,12 @@ export function BlockNoteEditor({
     const blockText = (block.textContent ?? "").replace(/\s+/g, " ").trim();
     const quote = selectedText || blockText;
     if (quote) {
-      onTutorSelectionChange({ blockId, quote });
+      onTutorSelectionChange({
+        blockId,
+        kind: "markdown",
+        page: null,
+        quote
+      });
     }
   }
 

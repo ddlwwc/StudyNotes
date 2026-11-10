@@ -145,6 +145,7 @@ def initialize_database() -> None:
                 workspace_path TEXT NOT NULL,
                 path TEXT NOT NULL,
                 block_id TEXT,
+                page INTEGER,
                 quote TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -167,6 +168,26 @@ def initialize_database() -> None:
 
             CREATE INDEX IF NOT EXISTS session_messages_session
             ON session_messages (workspace_path, session_id, id);
+
+            CREATE TABLE IF NOT EXISTS learning_session_sources (
+                id TEXT PRIMARY KEY,
+                workspace_path TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                path TEXT NOT NULL,
+                block_id TEXT,
+                block_index INTEGER,
+                page INTEGER,
+                heading_path_json TEXT NOT NULL DEFAULT '[]',
+                quote TEXT NOT NULL DEFAULT '',
+                source_key TEXT NOT NULL,
+                is_initial INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(workspace_path, session_id, source_key)
+            );
+
+            CREATE INDEX IF NOT EXISTS learning_session_sources_session
+            ON learning_session_sources (workspace_path, session_id, created_at, id);
 
             CREATE TABLE IF NOT EXISTS practice_sets (
                 id TEXT PRIMARY KEY,
@@ -222,6 +243,14 @@ def initialize_database() -> None:
             ON practice_attempts (workspace_path, session_id, practice_set_id);
             """
         )
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(learning_sessions)")
+        }
+        if "page" not in columns:
+            connection.execute(
+                "ALTER TABLE learning_sessions ADD COLUMN page INTEGER"
+            )
         _ensure_column(
             connection,
             "practice_items",
@@ -323,8 +352,9 @@ def save_app_setting(key: str, value: str) -> None:
 def create_learning_session(
     workspace: Path,
     relative_path: str,
-    block_id: str,
+    block_id: Optional[str],
     quote: str,
+    page: Optional[int] = None,
 ) -> dict[str, object]:
     session_id = str(uuid.uuid4())
     with connect() as connection:
@@ -335,15 +365,17 @@ def create_learning_session(
                 workspace_path,
                 path,
                 block_id,
+                page,
                 quote
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
                 str(workspace.resolve()),
                 relative_path,
                 block_id,
+                page,
                 quote,
             ),
         )
@@ -370,6 +402,115 @@ def load_learning_session(
             (str(workspace.resolve()), session_id),
         ).fetchone()
     return dict(row) if row is not None else None
+
+
+def save_learning_session_source(
+    workspace: Path,
+    session_id: str,
+    source: dict[str, object],
+    *,
+    is_initial: bool = False,
+) -> tuple[dict[str, object], bool]:
+    workspace_path = str(workspace.resolve())
+    source_key = str(source["sourceKey"])
+    with connect() as connection:
+        existing = connection.execute(
+            """
+            SELECT *
+            FROM learning_session_sources
+            WHERE workspace_path = ? AND session_id = ? AND source_key = ?
+            """,
+            (workspace_path, session_id, source_key),
+        ).fetchone()
+        if existing is not None:
+            return dict(existing), True
+
+        source_id = str(uuid.uuid4())
+        connection.execute(
+            """
+            INSERT INTO learning_session_sources (
+                id,
+                workspace_path,
+                session_id,
+                kind,
+                path,
+                block_id,
+                block_index,
+                page,
+                heading_path_json,
+                quote,
+                source_key,
+                is_initial
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_id,
+                workspace_path,
+                session_id,
+                source["kind"],
+                source["path"],
+                source.get("blockId"),
+                source.get("blockIndex"),
+                source.get("page"),
+                json.dumps(source.get("headingPath", []), ensure_ascii=False),
+                source.get("quote", ""),
+                source_key,
+                1 if is_initial else 0,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM learning_session_sources WHERE id = ?",
+            (source_id,),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("Learning source was not persisted.")
+    return dict(row), False
+
+
+def list_learning_session_sources(
+    workspace: Path,
+    session_id: str,
+) -> list[dict[str, object]]:
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM learning_session_sources
+            WHERE workspace_path = ? AND session_id = ?
+            ORDER BY is_initial DESC, created_at ASC, id ASC
+            """,
+            (str(workspace.resolve()), session_id),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def delete_learning_session_source(
+    workspace: Path,
+    session_id: str,
+    source_id: str,
+) -> bool:
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT is_initial
+            FROM learning_session_sources
+            WHERE workspace_path = ? AND session_id = ? AND id = ?
+            """,
+            (str(workspace.resolve()), session_id, source_id),
+        ).fetchone()
+        if row is None:
+            return False
+        if bool(row["is_initial"]):
+            raise ValueError("会话起点不可移除。")
+        connection.execute(
+            """
+            DELETE FROM learning_session_sources
+            WHERE workspace_path = ? AND session_id = ? AND id = ?
+            """,
+            (str(workspace.resolve()), session_id, source_id),
+        )
+    return True
 
 
 def save_session_message(

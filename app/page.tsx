@@ -23,7 +23,11 @@ import {
 } from "./blocknote-editor";
 import { PdfViewer } from "./pdf-viewer";
 import { SearchDialog, type SearchResult } from "./search-dialog";
-import { TutorPanel, type TutorCitation } from "./tutor-panel";
+import {
+  TutorPanel,
+  type TutorCitation,
+  type TutorSourceOption
+} from "./tutor-panel";
 
 type TreeNode = {
   name: string;
@@ -87,6 +91,21 @@ function mapMovedPath(path: string, oldPath: string, newPath: string): string {
     return `${newPath}${path.slice(oldPath.length)}`;
   }
   return path;
+}
+
+function flattenSourceOptions(nodes: TreeNode[]): TutorSourceOption[] {
+  return nodes.flatMap((node) => {
+    if (node.type === "directory") {
+      return flattenSourceOptions(node.children ?? []);
+    }
+    return [
+      {
+        kind: node.kind ?? "markdown",
+        name: node.name,
+        path: node.path
+      }
+    ];
+  });
 }
 
 function TreeNodes({
@@ -175,6 +194,10 @@ export default function HomePage() {
   } | null>(null);
   const [openPdfPath, setOpenPdfPath] = useState<string | null>(null);
   const [pdfInitialPage, setPdfInitialPage] = useState(1);
+  const [pdfCitationTarget, setPdfCitationTarget] = useState<{
+    page: number;
+    quote: string;
+  } | null>(null);
   const [markdownSearchTarget, setMarkdownSearchTarget] =
     useState<SearchResult | null>(null);
   const [selectedNode, setSelectedNode] = useState<TreeNode | null>(null);
@@ -213,6 +236,7 @@ export default function HomePage() {
   const [modelError, setModelError] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const sourceOptions = flattenSourceOptions(tree);
 
   useEffect(() => {
     let active = true;
@@ -358,8 +382,10 @@ export default function HomePage() {
 
     if (node.kind === "pdf" || node.path.toLowerCase().endsWith(".pdf")) {
       setOpenFile(null);
+      setTutorSelection(null);
       setMarkdownSearchTarget(null);
       setPdfInitialPage(searchTarget?.page ?? 1);
+      setPdfCitationTarget(null);
       setOpenPdfPath(node.path);
       setOpeningFile(false);
       return;
@@ -379,6 +405,7 @@ export default function HomePage() {
       setCitationTarget(null);
       setMarkdownSearchTarget(searchTarget);
       setPdfInitialPage(1);
+      setPdfCitationTarget(null);
       setOpenPdfPath(null);
     } catch (fileError) {
       setError(
@@ -409,12 +436,70 @@ export default function HomePage() {
     }
   }, []);
 
-  const handleCitationSelect = useCallback((citation: TutorCitation) => {
-    setCitationTarget({
-      blockId: citation.blockId,
-      quote: citation.quote
-    });
-  }, []);
+  const handleCitationSelect = useCallback(
+    (citation: TutorCitation) => {
+      const node = findTreeNode(tree, citation.path);
+      if (!node) {
+        setError("Source citation 对应的资料已移动或删除。");
+        return;
+      }
+      setSelectedNode(node);
+      setSearchOpen(false);
+      setMarkdownSearchTarget(null);
+      setError(null);
+      if (citation.kind === "pdf") {
+        setOpenFile(null);
+        setCitationTarget(null);
+        setPdfInitialPage(citation.page ?? 1);
+        setPdfCitationTarget({
+          page: citation.page ?? 1,
+          quote: citation.quote
+        });
+        setOpenPdfPath(citation.path);
+        return;
+      }
+
+      if (openFile?.path === citation.path) {
+        setCitationTarget({
+          blockId: citation.blockId,
+          quote: citation.quote
+        });
+        return;
+      }
+
+      setOpeningFile(true);
+      void (async () => {
+        try {
+          const response = await fetch(
+            `/api/file?path=${encodeURIComponent(citation.path)}`
+          );
+          const data = (await response.json()) as OpenFile & {
+            detail?: string;
+          };
+          if (!response.ok) {
+            throw new Error(data.detail ?? "无法打开 citation 对应的页面。");
+          }
+          setCitationTarget({
+            blockId: citation.blockId,
+            quote: citation.quote
+          });
+          setOpenFile(data);
+          setPdfInitialPage(1);
+          setPdfCitationTarget(null);
+          setOpenPdfPath(null);
+        } catch (citationError) {
+          setError(
+            citationError instanceof Error
+              ? citationError.message
+              : "无法打开 citation 对应的页面。"
+          );
+        } finally {
+          setOpeningFile(false);
+        }
+      })();
+    },
+    [openFile?.path, tree]
+  );
 
   function selectedDirectoryPath(): string {
     if (!selectedNode) {
@@ -864,7 +949,9 @@ export default function HomePage() {
         </aside>
 
         <section
-          className={`content ${openFile ? "has-reading-surface" : ""}`}
+          className={`content ${
+            openFile || openPdfPath ? "has-reading-surface" : ""
+          }`}
         >
           {loading ? (
             <div className="center-state" role="status">
@@ -877,11 +964,26 @@ export default function HomePage() {
               <span>正在打开页面…</span>
             </div>
           ) : openPdfPath ? (
-            <PdfViewer
-              key={`${openPdfPath}:${pdfInitialPage}`}
-              initialPage={pdfInitialPage}
-              path={openPdfPath}
-            />
+            <div className="reading-workspace is-pdf">
+              <PdfViewer
+                citationTargetQuote={pdfCitationTarget?.quote}
+                key={`${openPdfPath}:${pdfInitialPage}:${
+                  pdfCitationTarget?.quote ?? ""
+                }`}
+                initialPage={pdfInitialPage}
+                path={openPdfPath}
+                onTutorSelectionChange={(selection) => {
+                  setTutorSelection(selection);
+                  setPdfCitationTarget(null);
+                }}
+              />
+              <TutorPanel
+                onCitationSelect={handleCitationSelect}
+                path={openPdfPath}
+                selection={tutorSelection}
+                sourceOptions={sourceOptions}
+              />
+            </div>
           ) : openFile ? (
             <div className="reading-workspace">
               <article className="document">
@@ -906,6 +1008,7 @@ export default function HomePage() {
                 onCitationSelect={handleCitationSelect}
                 path={openFile.path}
                 selection={tutorSelection}
+                sourceOptions={sourceOptions}
               />
             </div>
           ) : workspace ? (

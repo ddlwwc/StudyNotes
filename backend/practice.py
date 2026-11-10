@@ -7,6 +7,7 @@ from model_client import ModelConfig, request_chat_completion
 from search_index import normalize_text
 from storage import (
     list_practice_attempts,
+    list_learning_session_sources,
     list_session_messages,
     save_practice_set,
 )
@@ -51,9 +52,8 @@ def _practice_context(
     )
     context = build_tutor_context(
         workspace,
-        str(session["path"]),
-        str(session["block_id"]),
-        str(session["quote"]),
+        session,
+        list_learning_session_sources(workspace, str(session["id"])),
         retrieval_query[:4_000],
     )
     return context, dialogue
@@ -159,9 +159,11 @@ def validate_questions(
 
         citation = {
             "sourceId": source_id,
+            "kind": chunk["kind"],
             "path": chunk["path"],
             "blockId": chunk.get("blockId"),
             "blockIndex": chunk.get("blockIndex"),
+            "page": chunk.get("page"),
             "headingPath": chunk["headingPath"],
             "quote": quote,
         }
@@ -345,9 +347,11 @@ def validate_short_answer_feedback(
         citations.append(
             {
                 "sourceId": source_id,
+                "kind": chunk["kind"],
                 "path": chunk["path"],
                 "blockId": chunk.get("blockId"),
                 "blockIndex": chunk.get("blockIndex"),
+                "page": chunk.get("page"),
                 "headingPath": chunk["headingPath"],
                 "quote": quote,
             }
@@ -372,9 +376,8 @@ def score_short_answer(
 ) -> dict[str, object]:
     context = build_tutor_context(
         workspace,
-        str(session["path"]),
-        str(session["block_id"]),
-        str(session["quote"]),
+        session,
+        list_learning_session_sources(workspace, str(session["id"])),
         f"{item['stem']}\n{answer_text}"[:4_000],
     )
     raw = request_chat_completion(

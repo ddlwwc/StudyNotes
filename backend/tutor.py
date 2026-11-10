@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import posixpath
 import re
 from pathlib import Path
 from typing import Iterator, Optional
+
+import fitz
 
 from embedding_index import retrieve_tutor_sources
 from documents import load_document
@@ -23,31 +27,86 @@ ALLOWED_ANSWER_TYPES = {
     "unsupported_supplement",
 }
 JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
+TOKEN_RE = re.compile(r"[\w\u3400-\u9fff-]+")
+MAX_CONTEXT_CHUNKS = 6
+MAX_CONTEXT_CHARACTERS = 12_000
 
 
 class TutorContextError(Exception):
     pass
 
 
-def bind_tutor_selection(
-    workspace: Path,
+def normalize_source_path(value: str) -> str:
+    normalized = posixpath.normpath(value.strip().replace("\\", "/"))
+    if (
+        not normalized
+        or normalized in {".", ".."}
+        or normalized.startswith("/")
+        or normalized.startswith("../")
+    ):
+        raise TutorContextError("Learning source 路径无效。")
+    return normalized
+
+
+def source_key(
+    kind: str,
     relative_path: str,
-    block_id: str,
+    *,
+    block_id: Optional[str],
+    block_index: Optional[int],
+    page: Optional[int],
     quote: str,
-) -> dict[str, object]:
-    return _load_block(workspace, relative_path, block_id, quote)
+) -> str:
+    position = (
+        f"block:{block_id or ''}:{block_index if block_index is not None else ''}"
+        if kind == "markdown"
+        else f"page:{page if page is not None else ''}"
+    )
+    value = "\x1f".join(
+        [
+            normalize_source_path(relative_path),
+            kind,
+            position,
+            normalize_text(quote),
+        ]
+    )
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _load_block(
+def _workspace_file(workspace: Path, relative_path: str) -> Path:
+    normalized = normalize_source_path(relative_path)
+    root = workspace.resolve()
+    candidate = (root / normalized).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as error:
+        raise TutorContextError("Learning source 路径无效。") from error
+    if not candidate.is_file() or candidate.suffix.lower() not in {".md", ".pdf"}:
+        raise TutorContextError("Learning source 不存在。")
+    return candidate
+
+
+def _heading_path(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    return [part for part in str(value or "").split("\x1f") if part]
+
+
+def _load_markdown_block(
     workspace: Path,
     relative_path: str,
-    block_id: str,
+    block_id: Optional[str],
     quote: str,
 ) -> dict[str, object]:
     sync_workspace_index(workspace)
+    parameters: list[object] = [str(workspace.resolve()), relative_path]
+    block_filter = ""
+    if block_id:
+        block_filter = " AND block_id = ?"
+        parameters.append(block_id)
     with connect() as connection:
-        row = connection.execute(
-            """
+        rows = connection.execute(
+            f"""
             SELECT
                 block_id,
                 block_index,
@@ -58,13 +117,13 @@ def _load_block(
             WHERE workspace_path = ?
               AND path = ?
               AND kind = 'markdown'
-              AND block_id = ?
-            LIMIT 1
+              {block_filter}
+            ORDER BY block_index ASC
             """,
-            (str(workspace.resolve()), relative_path, block_id),
-        ).fetchone()
-        if row is None:
-            row = connection.execute(
+            parameters,
+        ).fetchall()
+        if not rows and block_id:
+            rows = connection.execute(
                 """
                 SELECT
                     block_id,
@@ -80,139 +139,475 @@ def _load_block(
                 """,
                 (str(workspace.resolve()), relative_path),
             ).fetchall()
-            matching = next(
+
+    normalized_quote = normalize_text(quote)
+    matching = next(
+        (
+            candidate
+            for candidate in rows
+            if not normalized_quote
+            or normalized_quote in normalize_text(str(candidate["body"]))
+        ),
+        None,
+    )
+    if matching is None:
+        raise TutorContextError("选中的 Markdown 片段不属于当前页面。")
+
+    body = normalize_text(str(matching["body"]))
+    selected_quote = normalized_quote or body
+    if selected_quote not in body:
+        raise TutorContextError("选区内容已变化，请重新选择 Markdown 块。")
+    return {
+        "kind": "markdown",
+        "blockId": matching["block_id"],
+        "blockIndex": matching["block_index"],
+        "page": None,
+        "headingPath": _heading_path(matching["heading_path"]),
+        "path": relative_path,
+        "text": body,
+        "title": str(matching["title"]),
+        "quote": selected_quote,
+        "wholeFile": False,
+    }
+
+
+def _load_pdf_source(
+    file_path: Path,
+    relative_path: str,
+    page: Optional[int],
+    quote: str,
+) -> dict[str, object]:
+    try:
+        document = fitz.open(stream=file_path.read_bytes(), filetype="pdf")
+    except (OSError, RuntimeError, ValueError) as error:
+        raise TutorContextError("无法读取这个 PDF 文件。") from error
+
+    normalized_quote = normalize_text(quote)
+    try:
+        selected_page = page
+        if selected_page is None and normalized_quote:
+            selected_page = next(
                 (
-                    candidate
-                    for candidate in row
-                    if normalize_text(quote)
-                    and normalize_text(quote) in normalize_text(str(candidate["body"]))
+                    index + 1
+                    for index, candidate in enumerate(document)
+                    if normalized_quote
+                    in normalize_text(candidate.get_text("text", sort=True))
                 ),
                 None,
             )
-            if matching is None:
-                raise TutorContextError("选中的 Markdown 块不属于当前页面。")
-            row = matching
+        if selected_page is not None:
+            if selected_page < 1 or selected_page > document.page_count:
+                raise TutorContextError("PDF 页码超出范围。")
+            text = normalize_text(
+                document[selected_page - 1].get_text("text", sort=True)
+            )
+            if not text:
+                raise TutorContextError("当前页没有可提取文本。")
+            if not normalized_quote:
+                normalized_quote = text
+            if normalized_quote not in text:
+                raise TutorContextError("选中的文本不属于当前 PDF 页面。")
 
-    body = normalize_text(str(row["body"]))
-    normalized_quote = normalize_text(quote) or body
-    if normalized_quote not in body:
-        raise TutorContextError("选区内容已变化，请重新选择 Markdown 块。")
-    heading_path = [
-        heading
-        for heading in str(row["heading_path"]).split("\x1f")
-        if heading
-    ]
+        return {
+            "kind": "pdf",
+            "blockId": None,
+            "blockIndex": None,
+            "page": selected_page,
+            "headingPath": [],
+            "path": relative_path,
+            "text": text if selected_page is not None else "",
+            "title": file_path.stem,
+            "quote": normalized_quote,
+            "wholeFile": selected_page is None,
+        }
+    finally:
+        document.close()
+
+
+def resolve_tutor_source(
+    workspace: Path,
+    relative_path: str,
+    block_id: Optional[str] = None,
+    page: Optional[int] = None,
+    quote: str = "",
+) -> dict[str, object]:
+    normalized_path = normalize_source_path(relative_path)
+    file_path = _workspace_file(workspace, normalized_path)
+    if file_path.suffix.lower() == ".pdf":
+        source = _load_pdf_source(file_path, normalized_path, page, quote)
+    else:
+        if block_id or normalize_text(quote):
+            source = _load_markdown_block(
+                workspace,
+                normalized_path,
+                block_id,
+                quote,
+            )
+        else:
+            document = load_document(file_path)
+            source = {
+                "kind": "markdown",
+                "blockId": None,
+                "blockIndex": None,
+                "page": None,
+                "headingPath": [],
+                "path": normalized_path,
+                "text": "",
+                "title": str(document["title"]),
+                "quote": "",
+                "wholeFile": True,
+            }
+    source["sourceKey"] = source_key(
+        str(source["kind"]),
+        normalized_path,
+        block_id=source.get("blockId"),  # type: ignore[arg-type]
+        block_index=source.get("blockIndex"),  # type: ignore[arg-type]
+        page=source.get("page"),  # type: ignore[arg-type]
+        quote=str(source.get("quote", "")),
+    )
+    return source
+
+
+def bind_tutor_selection(
+    workspace: Path,
+    relative_path: str,
+    block_id: Optional[str],
+    quote: str,
+    page: Optional[int] = None,
+) -> dict[str, object]:
+    return resolve_tutor_source(
+        workspace,
+        relative_path,
+        block_id=block_id,
+        page=page,
+        quote=quote,
+    )
+
+
+def _row_source(row: dict[str, object]) -> dict[str, object]:
     return {
-        "blockId": row["block_id"],
-        "blockIndex": row["block_index"],
-        "headingPath": heading_path,
-        "path": relative_path,
-        "text": body,
-        "title": str(row["title"]),
-        "quote": normalized_quote,
+        "id": row.get("id"),
+        "kind": row["kind"],
+        "path": row["path"],
+        "blockId": row.get("block_id"),
+        "blockIndex": row.get("block_index"),
+        "page": row.get("page"),
+        "headingPath": _heading_path(row.get("heading_path_json")),
+        "quote": row.get("quote", ""),
+        "isInitial": bool(row.get("is_initial")),
     }
+
+
+def _query_rows_for_path(
+    workspace: Path,
+    relative_path: str,
+) -> list[dict[str, object]]:
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                path,
+                kind,
+                block_id,
+                block_index,
+                heading_path,
+                page,
+                title,
+                body
+            FROM search_fts
+            WHERE workspace_path = ? AND path = ?
+            ORDER BY
+                CASE WHEN page IS NULL THEN block_index ELSE page END ASC
+            """,
+            (str(workspace.resolve()), relative_path),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _row_chunk(
+    row: dict[str, object],
+    *,
+    origin: str,
+    priority: int,
+) -> Optional[dict[str, object]]:
+    text = normalize_text(str(row.get("body", "")))
+    if not text:
+        return None
+    kind = str(row["kind"])
+    return {
+        "kind": kind,
+        "path": str(row["path"]),
+        "blockId": row.get("block_id"),
+        "blockIndex": row.get("block_index"),
+        "page": row.get("page"),
+        "headingPath": _heading_path(row.get("heading_path")),
+        "title": str(row.get("title", "")),
+        "quote": text[:240],
+        "text": text,
+        "origin": origin,
+        "priority": priority,
+    }
+
+
+def _question_score(text: str, question: str) -> int:
+    normalized = text.casefold()
+    tokens = [
+        token.casefold()
+        for token in TOKEN_RE.findall(normalize_text(question))
+        if token.strip()
+    ]
+    return sum(normalized.count(token) for token in tokens)
+
+
+def _chunks_for_source(
+    workspace: Path,
+    source_row: dict[str, object],
+    question: str,
+    *,
+    priority: int,
+) -> list[dict[str, object]]:
+    stored = _row_source(source_row)
+    origin = "selected" if stored["isInitial"] else "pinned"
+    resolved = resolve_tutor_source(
+        workspace,
+        str(stored["path"]),
+        block_id=stored.get("blockId"),  # type: ignore[arg-type]
+        page=stored.get("page"),  # type: ignore[arg-type]
+        quote=str(stored.get("quote", "")),
+    )
+    if not resolved.get("wholeFile"):
+        return [
+            {
+                **resolved,
+                "origin": origin,
+                "priority": priority,
+            }
+        ]
+
+    sync_workspace_index(workspace)
+    rows = _query_rows_for_path(workspace, str(stored["path"]))
+    chunks = [
+        chunk
+        for row in rows
+        if (chunk := _row_chunk(row, origin=origin, priority=priority))
+        is not None
+    ]
+    chunks.sort(
+        key=lambda chunk: (
+            -_question_score(str(chunk["text"]), question),
+            int(chunk.get("page") or chunk.get("blockIndex") or 0),
+        )
+    )
+    return chunks
+
+
+def _chunk_key(chunk: dict[str, object]) -> str:
+    return source_key(
+        str(chunk["kind"]),
+        str(chunk["path"]),
+        block_id=chunk.get("blockId"),  # type: ignore[arg-type]
+        block_index=chunk.get("blockIndex"),  # type: ignore[arg-type]
+        page=chunk.get("page"),  # type: ignore[arg-type]
+        quote=str(chunk.get("quote", "")),
+    )
+
+
+def _chunk_identity(chunk: dict[str, object]) -> str:
+    return source_key(
+        str(chunk["kind"]),
+        str(chunk["path"]),
+        block_id=chunk.get("blockId"),  # type: ignore[arg-type]
+        block_index=chunk.get("blockIndex"),  # type: ignore[arg-type]
+        page=chunk.get("page"),  # type: ignore[arg-type]
+        quote="",
+    )
 
 
 def build_tutor_context(
     workspace: Path,
-    relative_path: str,
-    block_id: str,
-    quote: str,
+    session: dict[str, object],
+    sources: list[dict[str, object]],
     question: str,
     embedding_config: Optional[EmbeddingConfig] = None,
 ) -> dict[str, object]:
-    document = load_document(workspace / relative_path)
-    selected = _load_block(workspace, relative_path, block_id, quote)
-    chunks: list[dict[str, object]] = [
-        {
-            "sourceId": "S1",
-            "path": relative_path,
-            "blockId": selected["blockId"],
-            "blockIndex": selected["blockIndex"],
-            "headingPath": selected["headingPath"],
-            "title": selected["title"],
-            "quote": selected["quote"],
-            "text": selected["text"],
-            "selected": True,
-        }
-    ]
+    sync_workspace_index(workspace)
+    active_sources = sources
+    if not active_sources:
+        selected = resolve_tutor_source(
+            workspace,
+            str(session["path"]),
+            block_id=session.get("block_id"),  # type: ignore[arg-type]
+            page=session.get("page"),  # type: ignore[arg-type]
+            quote=str(session["quote"]),
+        )
+        active_sources = [
+            {
+                "id": "legacy",
+                "kind": selected["kind"],
+                "path": selected["path"],
+                "block_id": selected.get("blockId"),
+                "block_index": selected.get("blockIndex"),
+                "page": selected.get("page"),
+                "heading_path_json": json.dumps(
+                    selected.get("headingPath", []),
+                    ensure_ascii=False,
+                ),
+                "quote": selected.get("quote", ""),
+                "is_initial": 1,
+            }
+        ]
+
+    candidates: list[dict[str, object]] = []
+    for source_row in active_sources:
+        candidates.extend(
+            _chunks_for_source(
+                workspace,
+                source_row,
+                question,
+                priority=0 if source_row.get("is_initial") else 1,
+            )
+        )
 
     results, retrieval, _ = retrieve_tutor_sources(
         workspace,
         question,
         embedding_config,
-        limit=12,
+        limit=20,
     )
     for result in results:
-        if str(result["kind"]) != "markdown":
+        text = normalize_text(str(result.get("snippet", "")))
+        if not text:
             continue
-        result_path = str(result["path"])
-        result_block = result.get("blockId")
-        if (
-            result_path == relative_path
-            and result_block == selected["blockId"]
-            and result.get("blockIndex") == selected["blockIndex"]
-        ):
-            continue
-        if any(
-            item["path"] == result_path
-            and (
-                (
-                    result_block is not None
-                    and item.get("blockId") == result_block
-                )
-                or (
-                    result_block is None
-                    and item.get("blockIndex") == result.get("blockIndex")
-                )
-            )
-            for item in chunks
-        ):
-            continue
-        snippet = normalize_text(str(result["snippet"])).replace("…", "")
-        if not snippet:
-            continue
-        chunks.append(
+        candidates.append(
             {
-                "sourceId": f"S{len(chunks) + 1}",
-                "path": result_path,
-                "blockId": result_block,
+                "kind": result["kind"],
+                "path": result["path"],
+                "blockId": result.get("blockId"),
                 "blockIndex": result.get("blockIndex"),
+                "page": result.get("page"),
                 "headingPath": result.get("headingPath", []),
                 "title": result["title"],
-                "quote": snippet,
-                "text": snippet,
-                "selected": False,
+                "quote": text,
+                "text": text,
+                "origin": "retrieved",
+                "priority": 2,
             }
         )
-        if len(chunks) >= 5:
-            break
 
+    candidates.sort(key=lambda chunk: int(chunk.get("priority", 2)))
+    chunks: list[dict[str, object]] = []
+    omitted: list[dict[str, object]] = []
+    seen: set[str] = set()
+    character_count = 0
+    deduplicated_count = 0
+    truncated = False
+
+    for candidate in candidates:
+        key = _chunk_identity(candidate)
+        if key in seen:
+            deduplicated_count += 1
+            continue
+        seen.add(key)
+        text = str(candidate["text"])
+        if (
+            len(chunks) >= MAX_CONTEXT_CHUNKS
+            or character_count + len(text) > MAX_CONTEXT_CHARACTERS
+        ):
+            if not chunks and int(candidate.get("priority", 2)) == 0:
+                candidate = dict(candidate)
+                candidate["text"] = text[:MAX_CONTEXT_CHARACTERS]
+                candidate["quote"] = str(candidate["quote"])[:240]
+                truncated = True
+                text = str(candidate["text"])
+            else:
+                omitted.append(
+                    {
+                        "kind": candidate["kind"],
+                        "path": candidate["path"],
+                        "blockId": candidate.get("blockId"),
+                        "page": candidate.get("page"),
+                        "quote": str(candidate.get("quote", ""))[:240],
+                        "reason": (
+                            "fragment_limit"
+                            if len(chunks) >= MAX_CONTEXT_CHUNKS
+                            else "character_limit"
+                        ),
+                        "origin": candidate["origin"],
+                    }
+                )
+                continue
+        if not text:
+            continue
+        chunk = dict(candidate)
+        chunk["sourceId"] = f"S{len(chunks) + 1}"
+        chunk["text"] = text
+        chunks.append(chunk)
+        character_count += len(text)
+
+    initial_source = _row_source(active_sources[0])
+    selected_chunk = next(
+        (chunk for chunk in chunks if chunk["origin"] == "selected"),
+        chunks[0] if chunks else None,
+    )
+    selection = (
+        {
+            "kind": selected_chunk["kind"],
+            "path": initial_source["path"],
+            "blockId": initial_source.get("blockId"),
+            "blockIndex": initial_source.get("blockIndex"),
+            "page": initial_source.get("page"),
+            "headingPath": initial_source["headingPath"],
+            "quote": initial_source.get("quote", ""),
+        }
+        if selected_chunk
+        else {
+            "kind": initial_source["kind"],
+            "path": initial_source["path"],
+            "blockId": initial_source.get("blockId"),
+            "blockIndex": initial_source.get("blockIndex"),
+            "page": initial_source.get("page"),
+            "headingPath": initial_source["headingPath"],
+            "quote": initial_source.get("quote", ""),
+        }
+    )
+    first_chunk = chunks[0] if chunks else None
     return {
-        "selection": {
-            "path": relative_path,
-            "blockId": selected["blockId"],
-            "blockIndex": selected["blockIndex"],
-            "headingPath": selected["headingPath"],
-            "quote": selected["quote"],
-        },
+        "selection": selection,
+        "sources": [_row_source(source) for source in active_sources],
         "retrieved": [
             {
                 "sourceId": chunk["sourceId"],
+                "kind": chunk["kind"],
                 "path": chunk["path"],
                 "blockId": chunk.get("blockId"),
+                "page": chunk.get("page"),
                 "headingPath": chunk["headingPath"],
                 "quote": chunk["quote"],
+                "origin": chunk["origin"],
             }
-            for chunk in chunks[1:]
+            for chunk in chunks
+            if chunk is not first_chunk
         ],
         "sent": {
             "sourceCount": len(chunks),
-            "characterCount": sum(len(str(chunk["text"])) for chunk in chunks),
-            "revision": document["revision"],
+            "characterCount": character_count,
+            "revision": (
+                str(load_document(workspace / str(initial_source["path"])).get("revision"))
+                if initial_source["kind"] == "markdown"
+                else ""
+            ),
             "chunks": chunks,
         },
         "retrieval": retrieval,
+        "budget": {
+            "maxChunks": MAX_CONTEXT_CHUNKS,
+            "maxCharacters": MAX_CONTEXT_CHARACTERS,
+            "candidateCount": len(candidates),
+            "deduplicatedCount": deduplicated_count,
+            "omittedCount": len(omitted),
+            "truncated": truncated,
+        },
+        "omitted": omitted,
     }
 
 
@@ -312,11 +707,14 @@ def validate_answer(
         citations.append(
             {
                 "sourceId": source_id,
+                "kind": chunk["kind"],
                 "path": chunk["path"],
                 "blockId": chunk.get("blockId"),
                 "blockIndex": chunk.get("blockIndex"),
+                "page": chunk.get("page"),
                 "headingPath": chunk["headingPath"],
                 "quote": quote,
+                "key": _chunk_key({**chunk, "quote": quote}),
             }
         )
 
@@ -386,6 +784,7 @@ def generate_answer(
 def event_stream(
     workspace: Path,
     session: dict[str, object],
+    sources: list[dict[str, object]],
     config: ModelConfig,
     embedding_config: Optional[EmbeddingConfig],
     question: str,
@@ -395,9 +794,8 @@ def event_stream(
     try:
         context = build_tutor_context(
             workspace,
-            str(session["path"]),
-            str(session["block_id"]),
-            str(session["quote"]),
+            session,
+            sources,
             question,
             embedding_config,
         )
