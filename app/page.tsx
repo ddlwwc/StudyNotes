@@ -57,6 +57,9 @@ type QiniuSettings = {
 type ModelSettings = {
   baseUrl: string;
   configured: boolean;
+  embeddingConfigured: boolean;
+  embeddingEnabled: boolean;
+  embeddingModel: string;
   hasApiKey: boolean;
   model: string;
 };
@@ -200,8 +203,11 @@ export default function HomePage() {
   const [modelBaseUrl, setModelBaseUrl] = useState("");
   const [modelApiKey, setModelApiKey] = useState("");
   const [modelName, setModelName] = useState("");
+  const [embeddingModel, setEmbeddingModel] = useState("");
+  const [embeddingEnabled, setEmbeddingEnabled] = useState(false);
   const [hasModelApiKey, setHasModelApiKey] = useState(false);
   const [modelTesting, setModelTesting] = useState(false);
+  const [embeddingTesting, setEmbeddingTesting] = useState(false);
   const [modelSaving, setModelSaving] = useState(false);
   const [modelStatus, setModelStatus] = useState<string | null>(null);
   const [modelError, setModelError] = useState<string | null>(null);
@@ -602,6 +608,8 @@ export default function HomePage() {
       setQiniuSecretKey("");
       setModelBaseUrl(modelData.baseUrl);
       setModelName(modelData.model);
+      setEmbeddingModel(modelData.embeddingModel);
+      setEmbeddingEnabled(modelData.embeddingEnabled);
       setHasModelApiKey(modelData.hasApiKey);
       setModelApiKey("");
     } catch (settingsLoadError) {
@@ -619,7 +627,9 @@ export default function HomePage() {
     return {
       base_url: modelBaseUrl,
       model: modelName,
-      api_key: modelApiKey
+      api_key: modelApiKey,
+      embedding_model: embeddingModel,
+      embedding_enabled: embeddingEnabled
     };
   }
 
@@ -668,6 +678,8 @@ export default function HomePage() {
         throw new Error(data.detail ?? "无法保存模型设置。");
       }
       setHasModelApiKey(data.hasApiKey);
+      setEmbeddingModel(data.embeddingModel);
+      setEmbeddingEnabled(data.embeddingEnabled);
       setModelApiKey("");
       setSettingsOpen(false);
     } catch (modelSaveError) {
@@ -678,6 +690,35 @@ export default function HomePage() {
       );
     } finally {
       setModelSaving(false);
+    }
+  }
+
+  async function testEmbeddingConnection() {
+    setEmbeddingTesting(true);
+    setModelStatus(null);
+    setModelError(null);
+    try {
+      const response = await fetch("/api/model-settings/test-embedding", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(modelPayload())
+      });
+      const data = (await response.json()) as {
+        detail?: string;
+        ok?: boolean;
+      };
+      if (!response.ok || !data.ok) {
+        throw new Error(data.detail ?? "Embedding 连接失败。");
+      }
+      setModelStatus("Embedding 连接成功");
+    } catch (embeddingTestError) {
+      setModelError(
+        embeddingTestError instanceof Error
+          ? embeddingTestError.message
+          : "Embedding 连接失败。"
+      );
+    } finally {
+      setEmbeddingTesting(false);
     }
   }
 
@@ -1025,6 +1066,29 @@ export default function HomePage() {
                     value={modelName}
                     onChange={(event) => setModelName(event.target.value)}
                   />
+                  <div className="settings-toggle">
+                    <input
+                      checked={embeddingEnabled}
+                      id="embedding-enabled"
+                      name="embedding-enabled"
+                      type="checkbox"
+                      onChange={(event) =>
+                        setEmbeddingEnabled(event.target.checked)
+                      }
+                    />
+                    <label htmlFor="embedding-enabled">启用语义检索</label>
+                    <p>关闭后只使用本地全文检索，资料仍可正常提问。</p>
+                  </div>
+                  <label htmlFor="embedding-model">Embedding 模型</label>
+                  <input
+                    id="embedding-model"
+                    name="embedding-model"
+                    autoComplete="off"
+                    placeholder="text-embedding-3-small"
+                    spellCheck={false}
+                    value={embeddingModel}
+                    onChange={(event) => setEmbeddingModel(event.target.value)}
+                  />
                   {modelStatus ? (
                     <p className="settings-result is-success" role="status">
                       {modelStatus}
@@ -1038,11 +1102,25 @@ export default function HomePage() {
                   <div className="dialog-actions">
                     <button
                       className="secondary-text-button settings-test"
-                      disabled={modelTesting || modelSaving}
+                      disabled={
+                        modelTesting || embeddingTesting || modelSaving
+                      }
                       type="button"
                       onClick={() => void testModelConnection()}
                     >
                       {modelTesting ? "正在测试…" : "测试连接"}
+                    </button>
+                    <button
+                      className="secondary-text-button settings-test"
+                      disabled={
+                        modelTesting || embeddingTesting || modelSaving
+                      }
+                      type="button"
+                      onClick={() => void testEmbeddingConnection()}
+                    >
+                      {embeddingTesting
+                        ? "正在测试 Embedding…"
+                        : "测试 Embedding"}
                     </button>
                     <button
                       className="secondary-text-button"

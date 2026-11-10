@@ -20,6 +20,12 @@ export type TutorCitation = {
 };
 
 type TutorContext = {
+  retrieval: {
+    fallback: boolean;
+    label: string;
+    mode: "semantic" | "fulltext";
+    reason: string | null;
+  };
   retrieved: Array<{
     blockId: string | null;
     headingPath: string[];
@@ -84,6 +90,7 @@ export function TutorPanel({
   const [missing, setMissing] = useState<string[]>([]);
   const [context, setContext] = useState<TutorContext | null>(null);
   const [contextOpen, setContextOpen] = useState(false);
+  const [retrievalComplete, setRetrievalComplete] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastRequest, setLastRequest] = useState<LastRequest | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
@@ -99,6 +106,7 @@ export function TutorPanel({
     setMissing([]);
     setContext(null);
     setContextOpen(false);
+    setRetrievalComplete(false);
     setError(null);
     setLastRequest(null);
   }, [path, selection?.blockId, selection?.quote]);
@@ -133,6 +141,7 @@ export function TutorPanel({
   ) {
     if (eventName === "context") {
       setContext(payload as TutorContext);
+      setRetrievalComplete(true);
       return;
     }
     if (eventName === "start") {
@@ -182,6 +191,7 @@ export function TutorPanel({
     setCitations([]);
     setMissing([]);
     setContext(null);
+    setRetrievalComplete(false);
     setError(null);
     setLastRequest({
       question: prompt.trim(),
@@ -375,7 +385,9 @@ export function TutorPanel({
         {status === "idle" && selection
           ? "已绑定当前资料位置"
           : streaming
-            ? "正在生成…"
+            ? retrievalComplete
+              ? "正在生成…"
+              : "正在检索资料…"
             : status === "done"
               ? "已完成"
               : status === "stopped"
@@ -384,6 +396,20 @@ export function TutorPanel({
                   ? "回答失败"
                   : "等待选择资料"}
       </div>
+
+      {context ? (
+        <div
+          className={`tutor-retrieval-mode ${
+            context.retrieval.fallback ? "is-fallback" : ""
+          }`}
+          role="status"
+        >
+          <span>检索模式：{context.retrieval.label}</span>
+          {context.retrieval.reason ? (
+            <small>{context.retrieval.reason}</small>
+          ) : null}
+        </div>
+      ) : null}
 
       {error ? (
         <div className="tutor-error" role="alert">
@@ -499,6 +525,15 @@ export function TutorPanel({
             >
               ×
             </button>
+          </div>
+          <div className="tutor-context-section">
+            <strong>检索模式</strong>
+            <span>
+              检索模式：{context.retrieval.label}
+              {context.retrieval.reason
+                ? ` · ${context.retrieval.reason}`
+                : ""}
+            </span>
           </div>
           <div className="tutor-context-section">
             <strong>选中资料</strong>

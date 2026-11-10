@@ -5,13 +5,15 @@ import re
 from pathlib import Path
 from typing import Iterator, Optional
 
+from embedding_index import retrieve_tutor_sources
 from documents import load_document
 from model_client import (
+    EmbeddingConfig,
     ModelConfig,
     ModelRequestError,
     stream_chat_completion,
 )
-from search_index import normalize_text, search_workspace, sync_workspace_index
+from search_index import normalize_text, sync_workspace_index
 from storage import connect, save_session_message
 
 
@@ -117,6 +119,7 @@ def build_tutor_context(
     block_id: str,
     quote: str,
     question: str,
+    embedding_config: Optional[EmbeddingConfig] = None,
 ) -> dict[str, object]:
     document = load_document(workspace / relative_path)
     selected = _load_block(workspace, relative_path, block_id, quote)
@@ -134,7 +137,12 @@ def build_tutor_context(
         }
     ]
 
-    results, _ = search_workspace(workspace, question, limit=12)
+    results, retrieval, _ = retrieve_tutor_sources(
+        workspace,
+        question,
+        embedding_config,
+        limit=12,
+    )
     for result in results:
         if str(result["kind"]) != "markdown":
             continue
@@ -143,11 +151,21 @@ def build_tutor_context(
         if (
             result_path == relative_path
             and result_block == selected["blockId"]
+            and result.get("blockIndex") == selected["blockIndex"]
         ):
             continue
         if any(
             item["path"] == result_path
-            and item.get("blockId") == result_block
+            and (
+                (
+                    result_block is not None
+                    and item.get("blockId") == result_block
+                )
+                or (
+                    result_block is None
+                    and item.get("blockIndex") == result.get("blockIndex")
+                )
+            )
             for item in chunks
         ):
             continue
@@ -194,6 +212,7 @@ def build_tutor_context(
             "revision": document["revision"],
             "chunks": chunks,
         },
+        "retrieval": retrieval,
     }
 
 
@@ -368,6 +387,7 @@ def event_stream(
     workspace: Path,
     session: dict[str, object],
     config: ModelConfig,
+    embedding_config: Optional[EmbeddingConfig],
     question: str,
     mode: str,
     supplement_requested: bool,
@@ -379,6 +399,7 @@ def event_stream(
             str(session["block_id"]),
             str(session["quote"]),
             question,
+            embedding_config,
         )
         save_session_message(
             workspace,
