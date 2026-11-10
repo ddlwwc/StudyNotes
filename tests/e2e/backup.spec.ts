@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -572,6 +572,7 @@ test("a backup restores the current workspace learning relationships and keeps s
   let sourceStopped = false;
   let targetApp: RunningApp | null = null;
   let targetWorkspace: string | null = null;
+  let occupiedWorkspace: string | null = null;
 
   try {
     const seeded = await seedRestorableData(
@@ -628,11 +629,82 @@ test("a backup restores the current workspace learning relationships and keeps s
     sourceStopped = true;
 
     targetApp = await startApp();
+    occupiedWorkspace = await mkdtemp(
+      path.join(tmpdir(), "studynotes-occupied-workspace-")
+    );
+    await mkdir(path.join(occupiedWorkspace, "课程"), { recursive: true });
+    await writeFile(
+      path.join(occupiedWorkspace, "课程", "占位研究.pdf"),
+      createTextLayerPdf()
+    );
+    const occupiedOpenResponse = await page.request.post(
+      `${targetApp.webUrl}/api/workspace`,
+      { data: { path: occupiedWorkspace } }
+    );
+    expect(occupiedOpenResponse.ok()).toBe(true);
+    const occupiedSessionResponse = await page.request.post(
+      `${targetApp.webUrl}/api/tutor/sessions`,
+      {
+        data: {
+          path: "课程/占位研究.pdf",
+          page: 1,
+          quote: "PDF attention evidence."
+        }
+      }
+    );
+    expect(occupiedSessionResponse.ok()).toBe(true);
+    const occupiedSession = (await occupiedSessionResponse.json()) as {
+      id: string;
+    };
+    const backendDirectory = path.resolve(import.meta.dirname, "../../backend");
+    const backendPython = path.join(
+      backendDirectory,
+      ".venv",
+      process.platform === "win32" ? "Scripts/python.exe" : "bin/python"
+    );
+    const occupiedMessage = spawnSync(
+      backendPython,
+      [
+        "-c",
+        [
+          "from pathlib import Path",
+          "import sys",
+          "from storage import save_session_message",
+          "save_session_message(Path(sys.argv[1]), sys.argv[2], 'user', '占位会话消息')"
+        ].join("; "),
+        occupiedWorkspace,
+        occupiedSession.id
+      ],
+      {
+        cwd: backendDirectory,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          STUDY_NOTES_DATA_DIR: targetApp.dataDir
+        }
+      }
+    );
+    expect(
+      occupiedMessage.status,
+      occupiedMessage.stderr || occupiedMessage.stdout
+    ).toBe(0);
+    const occupiedCitationResponse = await page.request.post(
+      `${targetApp.webUrl}/api/citations`,
+      {
+        data: {
+          path: "课程/占位研究.pdf",
+          page: 1,
+          quote: "PDF attention evidence."
+        }
+      }
+    );
+    expect(occupiedCitationResponse.ok()).toBe(true);
+    const targetOpenResponse = await page.request.post(
+      `${targetApp.webUrl}/api/workspace`,
+      { data: { path: targetWorkspace } }
+    );
+    expect(targetOpenResponse.ok()).toBe(true);
     await page.goto(targetApp.webUrl);
-    await page
-      .getByLabel("Notebook workspace 路径")
-      .fill(targetWorkspace);
-    await page.getByRole("button", { name: "打开工作区" }).click();
 
     const targetSessionResponse = await page.request.post(
       `${targetApp.webUrl}/api/tutor/sessions`,
@@ -782,6 +854,9 @@ test("a backup restores the current workspace learning relationships and keeps s
     await rm(sourceWorkspace, { recursive: true, force: true });
     if (targetWorkspace) {
       await rm(targetWorkspace, { recursive: true, force: true });
+    }
+    if (occupiedWorkspace) {
+      await rm(occupiedWorkspace, { recursive: true, force: true });
     }
     await rm(archiveDir, { recursive: true, force: true });
   }

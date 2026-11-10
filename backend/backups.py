@@ -986,6 +986,8 @@ DELETE_ORDER = (
     "uploaded_images",
 )
 
+AUTOINCREMENT_TABLES = {"source_citations", "session_messages"}
+
 
 def _restore_transaction(
     payload: dict[str, object],
@@ -1014,8 +1016,13 @@ def _restore_transaction(
         for table, columns in TABLE_COLUMNS.items():
             field = DATA_FIELD_NAMES[table]
             rows = cast(list[object], data[field])
-            placeholders = ", ".join("?" for _ in columns)
-            selected = ", ".join(columns)
+            insert_columns = tuple(
+                column
+                for column in columns
+                if not (table in AUTOINCREMENT_TABLES and column == "id")
+            )
+            placeholders = ", ".join("?" for _ in insert_columns)
+            selected = ", ".join(insert_columns)
             for raw_row in rows:
                 row = dict(cast(dict[str, object], raw_row))
                 row["workspace_path"] = workspace_path
@@ -1024,7 +1031,7 @@ def _restore_transaction(
                     INSERT INTO {table} ({selected})
                     VALUES ({placeholders})
                     """,
-                    tuple(row[column] for column in columns),
+                    tuple(row[column] for column in insert_columns),
                 )
 
         connection.execute(
