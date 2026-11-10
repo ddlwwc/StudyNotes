@@ -185,10 +185,12 @@ def initialize_database() -> None:
                 workspace_path TEXT NOT NULL,
                 session_id TEXT NOT NULL,
                 ordinal INTEGER NOT NULL,
+                item_type TEXT NOT NULL DEFAULT 'single_choice',
                 stem TEXT NOT NULL,
                 options_json TEXT NOT NULL,
                 correct_index INTEGER NOT NULL,
                 explanation TEXT NOT NULL,
+                reference_answer TEXT,
                 citation_json TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE (practice_set_id, ordinal)
@@ -205,7 +207,14 @@ def initialize_database() -> None:
                 practice_item_id TEXT NOT NULL,
                 selected_index INTEGER NOT NULL,
                 correct INTEGER NOT NULL,
+                answer_text TEXT,
+                feedback_json TEXT,
+                ai_score INTEGER,
+                final_score INTEGER,
+                feedback_status TEXT NOT NULL DEFAULT 'graded',
+                feedback_error TEXT,
                 answered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                feedback_updated_at TEXT,
                 UNIQUE (workspace_path, practice_item_id)
             );
 
@@ -213,6 +222,44 @@ def initialize_database() -> None:
             ON practice_attempts (workspace_path, session_id, practice_set_id);
             """
         )
+        _ensure_column(
+            connection,
+            "practice_items",
+            "item_type",
+            "TEXT NOT NULL DEFAULT 'single_choice'",
+        )
+        _ensure_column(connection, "practice_items", "reference_answer", "TEXT")
+        _ensure_column(connection, "practice_attempts", "answer_text", "TEXT")
+        _ensure_column(connection, "practice_attempts", "feedback_json", "TEXT")
+        _ensure_column(connection, "practice_attempts", "ai_score", "INTEGER")
+        _ensure_column(connection, "practice_attempts", "final_score", "INTEGER")
+        _ensure_column(
+            connection,
+            "practice_attempts",
+            "feedback_status",
+            "TEXT NOT NULL DEFAULT 'graded'",
+        )
+        _ensure_column(connection, "practice_attempts", "feedback_error", "TEXT")
+        _ensure_column(
+            connection,
+            "practice_attempts",
+            "feedback_updated_at",
+            "TEXT",
+        )
+
+
+def _ensure_column(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    columns = {
+        str(row["name"])
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def load_saved_workspace_path() -> Optional[Path]:
@@ -440,13 +487,15 @@ def save_practice_set(
                     workspace_path,
                     session_id,
                     ordinal,
+                    item_type,
                     stem,
                     options_json,
                     correct_index,
                     explanation,
+                    reference_answer,
                     citation_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     item_id,
@@ -454,10 +503,12 @@ def save_practice_set(
                     workspace_path,
                     session_id,
                     ordinal,
+                    str(question.get("itemType", "single_choice")),
                     str(question["stem"]),
                     json.dumps(question["options"], ensure_ascii=False),
-                    int(question["correctIndex"]),
+                    int(question["correctIndex"] or 0),
                     str(question["explanation"]),
+                    question.get("referenceAnswer"),
                     json.dumps(question["citation"], ensure_ascii=False),
                 ),
             )
@@ -526,6 +577,44 @@ def list_practice_attempts(
             (str(workspace.resolve()), session_id, practice_set_id),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def load_practice_item(
+    workspace: Path,
+    session_id: str,
+    item_id: str,
+) -> Optional[dict[str, object]]:
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM practice_items
+            WHERE id = ?
+              AND workspace_path = ?
+              AND session_id = ?
+            """,
+            (item_id, str(workspace.resolve()), session_id),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def load_practice_attempt(
+    workspace: Path,
+    session_id: str,
+    item_id: str,
+) -> Optional[dict[str, object]]:
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM practice_attempts
+            WHERE workspace_path = ?
+              AND session_id = ?
+              AND practice_item_id = ?
+            """,
+            (str(workspace.resolve()), session_id, item_id),
+        ).fetchone()
+    return dict(row) if row is not None else None
 
 
 def save_practice_attempt(
@@ -607,6 +696,213 @@ def save_practice_attempt(
     if row is None:
         raise RuntimeError("Practice attempt was not persisted.")
     return dict(row)
+
+
+def save_short_answer_attempt(
+    workspace: Path,
+    session_id: str,
+    item_id: str,
+    answer_text: str,
+) -> Optional[dict[str, object]]:
+    workspace_path = str(workspace.resolve())
+    normalized_answer = answer_text.strip()
+    if not normalized_answer:
+        raise ValueError("短答题答案不能为空。")
+
+    with connect() as connection:
+        item = connection.execute(
+            """
+            SELECT *
+            FROM practice_items
+            WHERE id = ?
+              AND workspace_path = ?
+              AND session_id = ?
+            """,
+            (item_id, workspace_path, session_id),
+        ).fetchone()
+        if item is None:
+            return None
+        if str(item["item_type"]) != "short_answer":
+            raise ValueError("该 Practice item 不是短答题。")
+
+        attempt_id = str(uuid.uuid4())
+        connection.execute(
+            """
+            INSERT INTO practice_attempts (
+                id,
+                workspace_path,
+                session_id,
+                practice_set_id,
+                practice_item_id,
+                selected_index,
+                correct,
+                answer_text,
+                feedback_status
+            )
+            VALUES (?, ?, ?, ?, ?, -1, 0, ?, 'pending')
+            ON CONFLICT(workspace_path, practice_item_id) DO UPDATE SET
+                answer_text = excluded.answer_text,
+                selected_index = -1,
+                correct = 0,
+                feedback_json = NULL,
+                ai_score = NULL,
+                final_score = NULL,
+                feedback_status = 'pending',
+                feedback_error = NULL,
+                feedback_updated_at = NULL,
+                answered_at = CURRENT_TIMESTAMP
+            """,
+            (
+                attempt_id,
+                workspace_path,
+                session_id,
+                str(item["practice_set_id"]),
+                item_id,
+                normalized_answer,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE learning_sessions
+            SET updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (workspace_path, session_id),
+        )
+        row = connection.execute(
+            """
+            SELECT *
+            FROM practice_attempts
+            WHERE workspace_path = ? AND practice_item_id = ?
+            """,
+            (workspace_path, item_id),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("Short-answer attempt was not persisted.")
+    return dict(row)
+
+
+def save_short_answer_feedback(
+    workspace: Path,
+    session_id: str,
+    item_id: str,
+    *,
+    feedback: Optional[dict[str, object]],
+    ai_score: Optional[int],
+    feedback_error: Optional[str],
+) -> Optional[dict[str, object]]:
+    workspace_path = str(workspace.resolve())
+    status = "graded" if feedback is not None and ai_score is not None else "failed"
+    with connect() as connection:
+        attempt = connection.execute(
+            """
+            SELECT *
+            FROM practice_attempts
+            WHERE workspace_path = ?
+              AND session_id = ?
+              AND practice_item_id = ?
+            """,
+            (workspace_path, session_id, item_id),
+        ).fetchone()
+        if attempt is None:
+            return None
+        correct = int(ai_score is not None and int(ai_score) >= 60)
+        connection.execute(
+            """
+            UPDATE practice_attempts
+            SET feedback_json = ?,
+                ai_score = ?,
+                correct = ?,
+                feedback_status = ?,
+                feedback_error = ?,
+                feedback_updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ?
+              AND session_id = ?
+              AND practice_item_id = ?
+            """,
+            (
+                (
+                    json.dumps(feedback, ensure_ascii=False)
+                    if feedback is not None
+                    else None
+                ),
+                ai_score,
+                correct,
+                status,
+                feedback_error,
+                workspace_path,
+                session_id,
+                item_id,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE learning_sessions
+            SET updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (workspace_path, session_id),
+        )
+        row = connection.execute(
+            """
+            SELECT *
+            FROM practice_attempts
+            WHERE workspace_path = ? AND practice_item_id = ?
+            """,
+            (workspace_path, item_id),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def save_practice_self_assessment(
+    workspace: Path,
+    session_id: str,
+    item_id: str,
+    final_score: int,
+) -> Optional[dict[str, object]]:
+    workspace_path = str(workspace.resolve())
+    if final_score < 0 or final_score > 100:
+        raise ValueError("最终自评必须在 0 到 100 之间。")
+    with connect() as connection:
+        attempt = connection.execute(
+            """
+            SELECT *
+            FROM practice_attempts
+            WHERE workspace_path = ?
+              AND session_id = ?
+              AND practice_item_id = ?
+            """,
+            (workspace_path, session_id, item_id),
+        ).fetchone()
+        if attempt is None:
+            return None
+        connection.execute(
+            """
+            UPDATE practice_attempts
+            SET final_score = ?,
+                correct = ?,
+                feedback_updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ?
+              AND session_id = ?
+              AND practice_item_id = ?
+            """,
+            (
+                final_score,
+                int(final_score >= 60),
+                workspace_path,
+                session_id,
+                item_id,
+            ),
+        )
+        row = connection.execute(
+            """
+            SELECT *
+            FROM practice_attempts
+            WHERE workspace_path = ? AND practice_item_id = ?
+            """,
+            (workspace_path, item_id),
+        ).fetchone()
+    return dict(row) if row is not None else None
 
 
 def save_document_draft(

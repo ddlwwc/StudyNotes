@@ -33,7 +33,10 @@ from model_client import (
 )
 from practice import (
     PracticeGenerationError,
+    PracticeGradingError,
     generate_practice,
+    score_short_answer,
+    serialize_practice_attempt,
     serialize_practice,
 )
 from qiniu_images import MAX_IMAGE_BYTES, QiniuError, delete_image, upload_image
@@ -49,12 +52,17 @@ from storage import (
     load_active_workspace,
     load_document_draft,
     load_practice_set,
+    load_practice_attempt,
+    load_practice_item,
     load_qiniu_settings,
     load_source_citation,
     load_saved_workspace_path,
     list_practice_attempts,
     move_document_draft,
     save_practice_attempt,
+    save_practice_self_assessment,
+    save_short_answer_attempt,
+    save_short_answer_feedback,
     save_active_workspace,
     save_app_setting,
     save_document_draft,
@@ -115,6 +123,15 @@ class CreatePracticeRequest(BaseModel):
 class CreatePracticeAttemptRequest(BaseModel):
     practice_item_id: str
     selected_index: int = Field(ge=0)
+
+
+class CreateShortAnswerAttemptRequest(BaseModel):
+    practice_item_id: str
+    answer_text: str = Field(min_length=1, max_length=10_000)
+
+
+class SavePracticeSelfAssessmentRequest(BaseModel):
+    final_score: int = Field(ge=0, le=100)
 
 
 class CreateCitationRequest(BaseModel):
@@ -684,13 +701,122 @@ def create_practice_attempt(
         raise HTTPException(status_code=422, detail=str(selection_error)) from selection_error
     if attempt is None:
         raise HTTPException(status_code=404, detail="Practice item 不存在。")
-    return {
-        "id": attempt["id"],
-        "practiceItemId": attempt["practice_item_id"],
-        "selectedIndex": attempt["selected_index"],
-        "correct": bool(attempt["correct"]),
-        "answeredAt": attempt["answered_at"],
-    }
+    return serialize_practice_attempt(attempt)
+
+
+def grade_saved_short_answer(
+    root: Path,
+    session: dict[str, object],
+    item: dict[str, object],
+    config: Optional[ModelConfig] = None,
+) -> dict[str, object]:
+    attempt = load_practice_attempt(root, str(session["id"]), str(item["id"]))
+    if attempt is None or not str(attempt.get("answer_text") or "").strip():
+        raise HTTPException(status_code=404, detail="短答题作答记录不存在。")
+    try:
+        active_config = config or configured_model()
+        feedback = score_short_answer(
+            root,
+            session,
+            item,
+            str(attempt["answer_text"]),
+            active_config,
+        )
+        updated = save_short_answer_feedback(
+            root,
+            str(session["id"]),
+            str(item["id"]),
+            feedback=feedback,
+            ai_score=int(feedback["score"]),
+            feedback_error=None,
+        )
+    except (
+        ModelRequestError,
+        PracticeGradingError,
+        TutorContextError,
+        ValueError,
+        OSError,
+        HTTPException,
+    ) as grading_error:
+        grading_message = (
+            str(grading_error.detail)
+            if isinstance(grading_error, HTTPException)
+            else str(grading_error)
+        )
+        updated = save_short_answer_feedback(
+            root,
+            str(session["id"]),
+            str(item["id"]),
+            feedback=None,
+            ai_score=None,
+            feedback_error=grading_message,
+        )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="短答题作答记录不存在。")
+    return serialize_practice_attempt(updated)
+
+
+@app.post("/api/tutor/sessions/{session_id}/practice/short-answer-attempts")
+def create_short_answer_attempt(
+    session_id: str,
+    request: CreateShortAnswerAttemptRequest,
+) -> dict[str, object]:
+    root, session = require_learning_session(session_id)
+    item = load_practice_item(root, session_id, request.practice_item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Practice item 不存在。")
+    try:
+        attempt = save_short_answer_attempt(
+            root,
+            session_id,
+            request.practice_item_id,
+            request.answer_text,
+        )
+    except ValueError as answer_error:
+        raise HTTPException(status_code=422, detail=str(answer_error)) from answer_error
+    if attempt is None:
+        raise HTTPException(status_code=404, detail="Practice item 不存在。")
+    return grade_saved_short_answer(root, session, item)
+
+
+@app.post(
+    "/api/tutor/sessions/{session_id}/practice/items/{item_id}/retry-feedback"
+)
+def retry_short_answer_feedback(
+    session_id: str,
+    item_id: str,
+) -> dict[str, object]:
+    root, session = require_learning_session(session_id)
+    item = load_practice_item(root, session_id, item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Practice item 不存在。")
+    return grade_saved_short_answer(root, session, item)
+
+
+@app.patch(
+    "/api/tutor/sessions/{session_id}/practice/items/{item_id}/self-assessment"
+)
+def update_practice_self_assessment(
+    session_id: str,
+    item_id: str,
+    request: SavePracticeSelfAssessmentRequest,
+) -> dict[str, object]:
+    root, _session = require_learning_session(session_id)
+    try:
+        attempt = save_practice_self_assessment(
+            root,
+            session_id,
+            item_id,
+            request.final_score,
+        )
+    except ValueError as assessment_error:
+        raise HTTPException(
+            status_code=422,
+            detail=str(assessment_error),
+        ) from assessment_error
+    if attempt is None:
+        raise HTTPException(status_code=404, detail="该题尚未提交答案。")
+    return serialize_practice_attempt(attempt)
 
 
 @app.get("/api/settings/qiniu")

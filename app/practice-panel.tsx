@@ -5,7 +5,8 @@ import {
   Check,
   ChevronRight,
   LoaderCircle,
-  RotateCcw
+  RotateCcw,
+  Save
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { TutorCitation } from "./tutor-panel";
@@ -13,19 +14,37 @@ import type { TutorCitation } from "./tutor-panel";
 type PracticeItem = {
   id: string;
   ordinal: number;
+  itemType: "single_choice" | "short_answer";
   stem: string;
   options: string[];
-  correctIndex: number;
+  correctIndex: number | null;
   explanation: string;
+  referenceAnswer: string | null;
   citation: TutorCitation;
+};
+
+type ShortAnswerFeedback = {
+  score: number;
+  referencePoints: string[];
+  scoringBasis: string;
+  matchedPoints: string[];
+  missingPoints: string[];
+  citations: TutorCitation[];
 };
 
 type PracticeAttempt = {
   id: string;
   practiceItemId: string;
-  selectedIndex: number;
+  selectedIndex: number | null;
+  answerText: string | null;
   correct: boolean;
+  feedback: ShortAnswerFeedback | null;
+  aiScore: number | null;
+  finalScore: number | null;
+  feedbackStatus: "pending" | "graded" | "failed";
+  feedbackError: string | null;
   answeredAt: string;
+  feedbackUpdatedAt: string | null;
 };
 
 type Practice = {
@@ -73,8 +92,12 @@ export function PracticePanel({
   const [attempts, setAttempts] = useState<PracticeAttempt[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [shortAnswer, setShortAnswer] = useState("");
+  const [selfAssessmentScore, setSelfAssessmentScore] = useState(0);
   const [generating, setGenerating] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [savingAssessment, setSavingAssessment] = useState(false);
+  const [retryingFeedback, setRetryingFeedback] = useState(false);
   const [loadingSaved, setLoadingSaved] = useState(false);
   const [finished, setFinished] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -84,12 +107,32 @@ export function PracticePanel({
   const currentItem = practice?.questions[currentIndex] ?? null;
   const currentAttempt = currentItem ? byItem[currentItem.id] : undefined;
 
+  function replaceAttempt(attempt: PracticeAttempt) {
+    setAttempts((current) => [
+      ...current.filter(
+        (candidate) => candidate.practiceItemId !== attempt.practiceItemId
+      ),
+      attempt
+    ]);
+  }
+
+  useEffect(() => {
+    setSelfAssessmentScore(
+      currentAttempt?.finalScore ?? currentAttempt?.aiScore ?? 0
+    );
+  }, [
+    currentItem?.id,
+    currentAttempt?.aiScore,
+    currentAttempt?.finalScore
+  ]);
+
   function applyResponse(payload: PracticeResponse) {
     setAttempts(payload.attempts);
     setPractice(payload.practice);
     if (!payload.practice) {
       setCurrentIndex(0);
       setSelectedIndex(null);
+      setShortAnswer("");
       setFinished(false);
       return;
     }
@@ -106,6 +149,7 @@ export function PracticePanel({
       setFinished(false);
     }
     setSelectedIndex(null);
+    setShortAnswer("");
   }
 
   async function loadSavedPractice(activeId: string) {
@@ -165,6 +209,7 @@ export function PracticePanel({
       applyResponse(payload);
       setCurrentIndex(0);
       setSelectedIndex(null);
+      setShortAnswer("");
     } catch (generateError) {
       setError(
         generateError instanceof Error
@@ -199,18 +244,100 @@ export function PracticePanel({
         throw new Error(await readError(response));
       }
       const attempt = (await response.json()) as PracticeAttempt;
-      setAttempts((current) => [
-        ...current.filter(
-          (candidate) => candidate.practiceItemId !== attempt.practiceItemId
-        ),
-        attempt
-      ]);
+      replaceAttempt(attempt);
     } catch (submitError) {
       setError(
         submitError instanceof Error ? submitError.message : "无法保存答案。"
       );
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function submitShortAnswer() {
+    if (!activeSessionId || !currentItem || !shortAnswer.trim()) {
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/tutor/sessions/${activeSessionId}/practice/short-answer-attempts`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            practice_item_id: currentItem.id,
+            answer_text: shortAnswer
+          })
+        }
+      );
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+      replaceAttempt((await response.json()) as PracticeAttempt);
+    } catch (submitError) {
+      setError(
+        submitError instanceof Error
+          ? submitError.message
+          : "无法评分短答题。"
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function retryShortAnswerFeedback() {
+    if (!activeSessionId || !currentItem) {
+      return;
+    }
+    setRetryingFeedback(true);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/tutor/sessions/${activeSessionId}/practice/items/${currentItem.id}/retry-feedback`,
+        { method: "POST" }
+      );
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+      replaceAttempt((await response.json()) as PracticeAttempt);
+    } catch (retryError) {
+      setError(
+        retryError instanceof Error ? retryError.message : "无法重试评分。"
+      );
+    } finally {
+      setRetryingFeedback(false);
+    }
+  }
+
+  async function saveSelfAssessment() {
+    if (!activeSessionId || !currentItem || !currentAttempt) {
+      return;
+    }
+    setSavingAssessment(true);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/tutor/sessions/${activeSessionId}/practice/items/${currentItem.id}/self-assessment`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ final_score: selfAssessmentScore })
+        }
+      );
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+      replaceAttempt((await response.json()) as PracticeAttempt);
+    } catch (assessmentError) {
+      setError(
+        assessmentError instanceof Error
+          ? assessmentError.message
+          : "无法保存自评。"
+      );
+    } finally {
+      setSavingAssessment(false);
     }
   }
 
@@ -224,6 +351,7 @@ export function PracticePanel({
     }
     setCurrentIndex((index) => index + 1);
     setSelectedIndex(null);
+    setShortAnswer("");
   }
 
   function resetPractice() {
@@ -231,27 +359,31 @@ export function PracticePanel({
     setAttempts([]);
     setCurrentIndex(0);
     setSelectedIndex(null);
+    setShortAnswer("");
+    setSelfAssessmentScore(0);
     setFinished(false);
     setError(null);
     setQuestionCount(3);
   }
 
   const optionLetter = (index: number) => String.fromCharCode(65 + index);
-  const selectedOption = currentItem?.options[selectedIndex ?? -1];
   const correctOption = currentItem
-    ? currentItem.options[currentItem.correctIndex]
+    ? currentItem.correctIndex === null
+      ? null
+      : currentItem.options[currentItem.correctIndex]
     : null;
+  const isShortAnswer = currentItem?.itemType === "short_answer";
 
   return (
     <section
-      aria-label="单选题练习"
+      aria-label="练习题"
       className="practice-panel"
       data-session-id={activeSessionId ?? undefined}
     >
       <header className="practice-heading">
         <div>
           <span className="field-label">练习题</span>
-          <h3>单选题练习</h3>
+          <h3>练习题</h3>
         </div>
         <BookOpenCheck aria-hidden="true" size={17} />
       </header>
@@ -336,33 +468,52 @@ export function PracticePanel({
             <span>
               第 {currentIndex + 1} / {practice?.questionCount} 题
             </span>
-            <span>单选题</span>
+            <span>{isShortAnswer ? "短答题" : "单选题"}</span>
           </div>
           <h4>{currentItem.stem}</h4>
 
-          <fieldset
-            className="practice-options"
-            disabled={Boolean(currentAttempt) || submitting}
-          >
-            <legend className="sr-only">选择答案</legend>
-            {currentItem.options.map((option, index) => (
-              <label className="practice-option" key={`${currentItem.id}:${index}`}>
-                <input
-                  checked={selectedIndex === index}
-                  name={`practice-${currentItem.id}`}
-                  type="radio"
-                  value={index}
-                  onChange={() => setSelectedIndex(index)}
-                />
-                <span aria-hidden="true">{optionLetter(index)}</span>
-                <p>
-                  {optionLetter(index)}. {option}
-                </p>
+          {isShortAnswer ? (
+            <div className="practice-short-answer">
+              <label htmlFor={`short-answer-${currentItem.id}`}>
+                短答题答案
               </label>
-            ))}
-          </fieldset>
+              <textarea
+                aria-label="短答题答案"
+                disabled={Boolean(currentAttempt) || submitting}
+                id={`short-answer-${currentItem.id}`}
+                rows={4}
+                value={currentAttempt?.answerText ?? shortAnswer}
+                onChange={(event) => setShortAnswer(event.target.value)}
+              />
+            </div>
+          ) : (
+            <fieldset
+              className="practice-options"
+              disabled={Boolean(currentAttempt) || submitting}
+            >
+              <legend className="sr-only">选择答案</legend>
+              {currentItem.options.map((option, index) => (
+                <label
+                  className="practice-option"
+                  key={`${currentItem.id}:${index}`}
+                >
+                  <input
+                    checked={selectedIndex === index}
+                    name={`practice-${currentItem.id}`}
+                    type="radio"
+                    value={index}
+                    onChange={() => setSelectedIndex(index)}
+                  />
+                  <span aria-hidden="true">{optionLetter(index)}</span>
+                  <p>
+                    {optionLetter(index)}. {option}
+                  </p>
+                </label>
+              ))}
+            </fieldset>
+          )}
 
-          {currentAttempt ? (
+          {currentAttempt && !isShortAnswer ? (
             <div
               className={`practice-feedback ${
                 currentAttempt.correct ? "is-correct" : "is-incorrect"
@@ -373,7 +524,8 @@ export function PracticePanel({
                 {currentAttempt.correct ? "回答正确" : "回答错误"}
               </strong>
               <p>
-                正确答案：{optionLetter(currentItem.correctIndex)}.{" "}
+                正确答案：
+                {optionLetter(currentItem.correctIndex ?? 0)}.{" "}
                 {correctOption}
               </p>
               <p>{currentItem.explanation}</p>
@@ -392,7 +544,138 @@ export function PracticePanel({
                 <q>{currentItem.citation.quote}</q>
               </button>
             </div>
-          ) : (
+          ) : null}
+
+          {isShortAnswer && currentAttempt?.feedback ? (
+            <div
+              className={`practice-feedback practice-feedback-detail ${
+                currentAttempt.finalScore !== null &&
+                currentAttempt.finalScore >= 60
+                  ? "is-correct"
+                  : "is-incorrect"
+              }`}
+              role="status"
+            >
+              <p className="practice-score-summary">
+                AI 初评 · <strong>{currentAttempt.aiScore} 分</strong>
+                <span aria-hidden="true"> · </span>
+                最终自评 ·{" "}
+                <strong>
+                  {currentAttempt.finalScore === null
+                    ? "未保存"
+                    : `${currentAttempt.finalScore} 分`}
+                </strong>
+              </p>
+              <section className="practice-feedback-section">
+                <h5>参考要点</h5>
+                <ul>
+                  {currentAttempt.feedback.referencePoints.map((point) => (
+                    <li key={point}>{point}</li>
+                  ))}
+                </ul>
+              </section>
+              <section className="practice-feedback-section">
+                <h5>评分依据</h5>
+                <p>{currentAttempt.feedback.scoringBasis}</p>
+              </section>
+              <section className="practice-feedback-section">
+                <h5>已命中</h5>
+                {currentAttempt.feedback.matchedPoints.length ? (
+                  <ul>
+                    {currentAttempt.feedback.matchedPoints.map((point) => (
+                      <li key={point}>{point}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p>暂未命中明确要点。</p>
+                )}
+              </section>
+              <section className="practice-feedback-section">
+                <h5>遗漏项</h5>
+                {currentAttempt.feedback.missingPoints.length ? (
+                  <ul>
+                    {currentAttempt.feedback.missingPoints.map((point) => (
+                      <li key={point}>{point}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p>没有明显遗漏。</p>
+                )}
+              </section>
+              {currentAttempt.feedback.citations.map((citation) => (
+                <button
+                  aria-label={`资料引用 ${citation.path}: ${citation.quote}`}
+                  className="practice-citation"
+                  key={`${citation.sourceId}:${citation.blockId}:${citation.quote}`}
+                  type="button"
+                  onClick={() => onCitationSelect(citation)}
+                >
+                  <span>
+                    资料引用 · {citation.path}
+                    {citation.headingPath.length > 0
+                      ? ` / ${citation.headingPath.at(-1)}`
+                      : ""}
+                  </span>
+                  <q>{citation.quote}</q>
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          {isShortAnswer && currentAttempt?.feedbackStatus === "failed" ? (
+            <div className="practice-feedback is-incorrect" role="status">
+              <strong>AI 评分暂不可用，答案已保存</strong>
+              <p>{currentAttempt.feedbackError}</p>
+              <p className="practice-score-summary">
+                AI 初评 · 未完成 · 最终自评 ·{" "}
+                {currentAttempt.finalScore === null
+                  ? "未保存"
+                  : `${currentAttempt.finalScore} 分`}
+              </p>
+              <button
+                className="practice-retry-feedback"
+                disabled={retryingFeedback}
+                type="button"
+                onClick={() => void retryShortAnswerFeedback()}
+              >
+                <RotateCcw aria-hidden="true" size={12} />
+                {retryingFeedback ? "正在重试…" : "重试评分"}
+              </button>
+            </div>
+          ) : null}
+
+          {isShortAnswer && currentAttempt ? (
+            <div className="practice-self-assessment">
+              <label htmlFor={`self-assessment-${currentItem.id}`}>
+                最终自评
+              </label>
+              <div>
+                <input
+                  aria-label="最终自评"
+                  id={`self-assessment-${currentItem.id}`}
+                  max="100"
+                  min="0"
+                  step="10"
+                  type="range"
+                  value={selfAssessmentScore}
+                  onChange={(event) =>
+                    setSelfAssessmentScore(Number(event.target.value))
+                  }
+                />
+                <output>{selfAssessmentScore} 分</output>
+                <button
+                  disabled={savingAssessment}
+                  type="button"
+                  onClick={() => void saveSelfAssessment()}
+                >
+                  <Save aria-hidden="true" size={12} />
+                  {savingAssessment ? "正在保存…" : "保存自评"}
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {!currentAttempt && !isShortAnswer ? (
             <button
               className="practice-submit"
               disabled={selectedIndex === null || submitting}
@@ -401,9 +684,21 @@ export function PracticePanel({
             >
               {submitting ? "正在保存…" : "提交答案"}
             </button>
-          )}
+          ) : null}
 
-          {currentAttempt ? (
+          {!currentAttempt && isShortAnswer ? (
+            <button
+              className="practice-submit"
+              disabled={!shortAnswer.trim() || submitting}
+              type="button"
+              onClick={() => void submitShortAnswer()}
+            >
+              {submitting ? "正在评分…" : "提交回答"}
+            </button>
+          ) : null}
+
+          {currentAttempt &&
+          (isShortAnswer ? currentAttempt.finalScore !== null : true) ? (
             <button
               className="practice-next"
               type="button"

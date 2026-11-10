@@ -30,10 +30,12 @@ type ModelResponder = (
 ) => Promise<void> | void;
 
 type PracticeQuestion = {
+  itemType?: "single_choice" | "short_answer";
   stem: string;
   options: string[];
   correctIndex: number;
   explanation: string;
+  referenceAnswer?: string | null;
   citation: {
     sourceId: string;
     path: string;
@@ -42,6 +44,15 @@ type PracticeQuestion = {
     headingPath: string[];
     quote: string;
   };
+};
+
+type PracticeFeedback = {
+  score: number;
+  referencePoints: string[];
+  scoringBasis: string;
+  matchedPoints: string[];
+  missingPoints: string[];
+  citations: PracticeQuestion["citation"][];
 };
 
 function reservePort(): Promise<number> {
@@ -127,6 +138,43 @@ function practicePayload(questionCount: number) {
         quote: "注意力帮助学习者筛选当前任务相关的信息。"
       }
     }))
+  };
+}
+
+function shortAnswerPracticePayload() {
+  return {
+    questions: [
+      {
+        type: "short_answer",
+        stem: "用自己的话解释注意力如何影响学习。",
+        reference_answer:
+          "注意力帮助学习者筛选当前任务相关的信息，并因为工作记忆容量有限而影响理解。",
+        citation: {
+          source_id: "S1",
+          quote: "注意力帮助学习者筛选当前任务相关的信息。"
+        }
+      }
+    ]
+  };
+}
+
+function shortAnswerFeedbackPayload() {
+  return {
+    score: 80,
+    reference_points: [
+      "注意力帮助筛选当前任务相关的信息。",
+      "工作记忆容量有限，因此注意力控制会影响理解。"
+    ],
+    scoring_basis:
+      "回答解释了注意力对相关信息筛选的作用；没有说明工作记忆容量限制。",
+    matched_points: ["注意力帮助筛选当前任务相关的信息。"],
+    missing_points: ["工作记忆容量有限，因此注意力控制会影响理解。"],
+    citations: [
+      {
+        source_id: "S1",
+        quote: "注意力帮助学习者筛选当前任务相关的信息。"
+      }
+    ]
   };
 }
 
@@ -351,7 +399,7 @@ test("a Learning session generates, answers, cites, and persists single-choice P
     await expect(tutor.getByText("已完成")).toBeVisible();
 
     const requestCountBeforePractice = model.requests.length;
-    const practice = page.getByRole("region", { name: "单选题练习" });
+    const practice = page.getByRole("region", { name: "练习题" });
     const questionCount = practice.getByLabel("练习题数量");
     await expect(questionCount).toHaveValue("3");
     await expect(questionCount.locator("option")).toHaveCount(10);
@@ -456,6 +504,270 @@ test("a Learning session generates, answers, cites, and persists single-choice P
     ).toMatchObject({
       practice_count: 1,
       study_notes_mode: "practice"
+    });
+  } finally {
+    await model.close();
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("a short-answer Practice item shows grounded feedback and saves a corrected self-assessment", async ({
+  page
+}) => {
+  const app = await startApp();
+  const model = await startMockModel(async (body, _requestIndex, response) => {
+    const metadata = (body.metadata ?? {}) as Record<string, unknown>;
+    if (metadata.study_notes_mode === "practice") {
+      sendChatCompletion(response, JSON.stringify(shortAnswerPracticePayload()));
+      return;
+    }
+    if (metadata.study_notes_mode === "practice_grade") {
+      sendChatCompletion(
+        response,
+        JSON.stringify(shortAnswerFeedbackPayload())
+      );
+      return;
+    }
+    if (body.stream === true) {
+      await sendStreamingCompletion(
+        response,
+        JSON.stringify({
+          type: "grounded",
+          answer: "注意力会帮助学习者筛选当前任务相关信息。[S1]",
+          citations: [
+            {
+              source_id: "S1",
+              quote: "注意力帮助学习者筛选当前任务相关的信息。"
+            }
+          ],
+          missing: []
+        })
+      );
+      return;
+    }
+    sendChatCompletion(response, "OK");
+  });
+  const workspaceDir = await openStudyPage(page);
+
+  try {
+    const tutor = await prepareTutor(
+      page,
+      app.webUrl,
+      workspaceDir,
+      model.baseUrl
+    );
+    await page.getByLabel("向当前资料提问").fill("注意力为什么重要？");
+    await tutor.getByRole("button", { name: "发送" }).click();
+    await expect(tutor.getByText("已完成")).toBeVisible();
+
+    const practice = page.getByRole("region", { name: "练习题" });
+    await practice.getByLabel("练习题数量").selectOption("1");
+    await practice.getByRole("button", { name: "考考我" }).click();
+    await expect(practice.getByText("短答题", { exact: true })).toBeVisible();
+    await expect(
+      practice.getByText("用自己的话解释注意力如何影响学习。")
+    ).toBeVisible();
+
+    const answer = "注意力帮助我选择当前任务需要的信息。";
+    await practice.getByLabel("短答题答案").fill(answer);
+    await practice.getByRole("button", { name: "提交回答" }).click();
+
+    await expect(practice.getByText("参考要点")).toBeVisible();
+    await expect(practice.getByText("评分依据")).toBeVisible();
+    await expect(practice.getByText("已命中")).toBeVisible();
+    await expect(practice.getByText("遗漏项")).toBeVisible();
+    await expect(
+      practice.getByText("AI 初评 · 80 分")
+    ).toBeVisible();
+    const citation = practice.getByRole("button", { name: /资料引用/ });
+    await expect(citation).toContainText(
+      "注意力帮助学习者筛选当前任务相关的信息。"
+    );
+    await citation.click();
+    await expect(page.locator('[aria-current="citation"]')).toContainText(
+      "注意力帮助学习者筛选当前任务相关的信息。"
+    );
+
+    const gradeRequest = model.requests.find(
+      (request) =>
+        (request.body.metadata as Record<string, unknown> | undefined)
+          ?.study_notes_mode === "practice_grade"
+    );
+    expect(gradeRequest?.body.metadata).toMatchObject({
+      study_notes_mode: "practice_grade"
+    });
+    const gradePrompt = JSON.stringify(gradeRequest?.body.messages);
+    expect(gradePrompt).toContain(answer);
+    expect(gradePrompt).toContain(
+      "注意力帮助学习者筛选当前任务相关的信息。"
+    );
+
+    const selfAssessment = practice.getByLabel("最终自评");
+    await expect(selfAssessment).toHaveValue("80");
+    await selfAssessment.fill("60");
+    await practice.getByRole("button", { name: "保存自评" }).click();
+    await expect(
+      practice.getByText("AI 初评 · 80 分 · 最终自评 · 60 分")
+    ).toBeVisible();
+    await expect(
+      practice.getByRole("button", { name: "完成练习" })
+    ).toBeVisible();
+
+    const sessionId = await practice.getAttribute("data-session-id");
+    const savedResponse = await page.request.get(
+      `${app.webUrl}/api/tutor/sessions/${sessionId}/practice`
+    );
+    expect(savedResponse.ok()).toBe(true);
+    const saved = (await savedResponse.json()) as {
+      attempts: Array<{
+        aiScore: number | null;
+        answerText: string | null;
+        feedback: PracticeFeedback | null;
+        feedbackStatus: string;
+        finalScore: number | null;
+      }>;
+      practice: {
+        questions: PracticeQuestion[];
+      };
+    };
+    expect(saved.practice.questions[0]).toMatchObject({
+      itemType: "short_answer",
+      stem: "用自己的话解释注意力如何影响学习。",
+      referenceAnswer:
+        "注意力帮助学习者筛选当前任务相关的信息，并因为工作记忆容量有限而影响理解。"
+    });
+    expect(saved.attempts[0]).toMatchObject({
+      aiScore: 80,
+      answerText: answer,
+      feedbackStatus: "graded",
+      finalScore: 60
+    });
+    expect(saved.attempts[0].feedback).toMatchObject({
+      score: 80,
+      scoringBasis:
+        "回答解释了注意力对相关信息筛选的作用；没有说明工作记忆容量限制。",
+      matchedPoints: ["注意力帮助筛选当前任务相关的信息。"],
+      missingPoints: ["工作记忆容量有限，因此注意力控制会影响理解。"]
+    });
+    expect(saved.attempts[0].feedback?.citations).toHaveLength(1);
+  } finally {
+    await model.close();
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("a failed short-answer grading keeps the answer and supports manual assessment plus retry", async ({
+  page
+}) => {
+  const app = await startApp();
+  let gradingRequests = 0;
+  const model = await startMockModel(async (body, _requestIndex, response) => {
+    const metadata = (body.metadata ?? {}) as Record<string, unknown>;
+    if (metadata.study_notes_mode === "practice") {
+      sendChatCompletion(response, JSON.stringify(shortAnswerPracticePayload()));
+      return;
+    }
+    if (metadata.study_notes_mode === "practice_grade") {
+      gradingRequests += 1;
+      if (gradingRequests === 1) {
+        response.writeHead(500, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: "temporary grading failure" }));
+        return;
+      }
+      sendChatCompletion(
+        response,
+        JSON.stringify(shortAnswerFeedbackPayload())
+      );
+      return;
+    }
+    if (body.stream === true) {
+      await sendStreamingCompletion(
+        response,
+        JSON.stringify({
+          type: "grounded",
+          answer: "注意力会帮助学习者筛选当前任务相关信息。[S1]",
+          citations: [
+            {
+              source_id: "S1",
+              quote: "注意力帮助学习者筛选当前任务相关的信息。"
+            }
+          ],
+          missing: []
+        })
+      );
+      return;
+    }
+    sendChatCompletion(response, "OK");
+  });
+  const workspaceDir = await openStudyPage(page);
+
+  try {
+    const tutor = await prepareTutor(
+      page,
+      app.webUrl,
+      workspaceDir,
+      model.baseUrl
+    );
+    await page.getByLabel("向当前资料提问").fill("注意力为什么重要？");
+    await tutor.getByRole("button", { name: "发送" }).click();
+    await expect(tutor.getByText("已完成")).toBeVisible();
+
+    const practice = page.getByRole("region", { name: "练习题" });
+    await practice.getByLabel("练习题数量").selectOption("1");
+    await practice.getByRole("button", { name: "考考我" }).click();
+    const answer = "注意力帮助我筛选任务需要的信息。";
+    await practice.getByLabel("短答题答案").fill(answer);
+    await practice.getByRole("button", { name: "提交回答" }).click();
+
+    await expect(
+      practice.getByText("AI 评分暂不可用，答案已保存")
+    ).toBeVisible();
+    await expect(practice.getByLabel("短答题答案")).toHaveValue(answer);
+    await expect(
+      practice.getByRole("button", { name: "重试评分" })
+    ).toBeVisible();
+    await expect(
+      practice.getByRole("button", { name: "保存自评" })
+    ).toBeVisible();
+    await expect(
+      practice.getByRole("button", { name: "完成练习" })
+    ).toBeHidden();
+
+    await practice.getByLabel("最终自评").fill("40");
+    await practice.getByRole("button", { name: "保存自评" }).click();
+    await expect(
+      practice.getByText("AI 初评 · 未完成 · 最终自评 · 40 分")
+    ).toBeVisible();
+    await expect(
+      practice.getByRole("button", { name: "完成练习" })
+    ).toBeVisible();
+
+    await practice.getByRole("button", { name: "重试评分" }).click();
+    await expect(practice.getByText("参考要点")).toBeVisible();
+    await expect(
+      practice.getByText("AI 初评 · 80 分 · 最终自评 · 40 分")
+    ).toBeVisible();
+
+    const sessionId = await practice.getAttribute("data-session-id");
+    const savedResponse = await page.request.get(
+      `${app.webUrl}/api/tutor/sessions/${sessionId}/practice`
+    );
+    expect(savedResponse.ok()).toBe(true);
+    const saved = (await savedResponse.json()) as {
+      attempts: Array<{
+        aiScore: number | null;
+        answerText: string | null;
+        feedbackStatus: string;
+        finalScore: number | null;
+      }>;
+    };
+    expect(saved.attempts[0]).toMatchObject({
+      aiScore: 80,
+      answerText: answer,
+      feedbackStatus: "graded",
+      finalScore: 40
     });
   } finally {
     await model.close();
