@@ -9,13 +9,15 @@ from typing import Iterator, Optional
 
 import fitz
 
+from embedding_index import retrieve_tutor_sources
 from documents import load_document
 from model_client import (
+    EmbeddingConfig,
     ModelConfig,
     ModelRequestError,
     stream_chat_completion,
 )
-from search_index import normalize_text, search_workspace, sync_workspace_index
+from search_index import normalize_text, sync_workspace_index
 from storage import connect, save_session_message
 
 
@@ -415,6 +417,7 @@ def build_tutor_context(
     session: dict[str, object],
     sources: list[dict[str, object]],
     question: str,
+    embedding_config: Optional[EmbeddingConfig] = None,
 ) -> dict[str, object]:
     sync_workspace_index(workspace)
     active_sources = sources
@@ -454,7 +457,12 @@ def build_tutor_context(
             )
         )
 
-    results, _ = search_workspace(workspace, question, limit=20)
+    results, retrieval, _ = retrieve_tutor_sources(
+        workspace,
+        question,
+        embedding_config,
+        limit=20,
+    )
     for result in results:
         text = normalize_text(str(result.get("snippet", "")))
         if not text:
@@ -579,6 +587,7 @@ def build_tutor_context(
             ),
             "chunks": chunks,
         },
+        "retrieval": retrieval,
         "budget": {
             "maxChunks": MAX_CONTEXT_CHUNKS,
             "maxCharacters": MAX_CONTEXT_CHARACTERS,
@@ -766,12 +775,19 @@ def event_stream(
     session: dict[str, object],
     sources: list[dict[str, object]],
     config: ModelConfig,
+    embedding_config: Optional[EmbeddingConfig],
     question: str,
     mode: str,
     supplement_requested: bool,
 ) -> Iterator[str]:
     try:
-        context = build_tutor_context(workspace, session, sources, question)
+        context = build_tutor_context(
+            workspace,
+            session,
+            sources,
+            question,
+            embedding_config,
+        )
         save_session_message(
             workspace,
             str(session["id"]),

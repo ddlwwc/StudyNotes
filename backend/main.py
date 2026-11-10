@@ -12,7 +12,7 @@ from urllib.parse import unquote, urlsplit
 import fitz
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from credentials import (
     ACCESS_KEY_ACCOUNT,
@@ -27,9 +27,16 @@ from documents import (
     sidecar_path_for,
 )
 from model_client import (
+    EmbeddingConfig,
     ModelConfig,
     ModelRequestError,
+    test_embedding_connection,
     test_model_connection,
+)
+from practice import (
+    PracticeGenerationError,
+    generate_practice,
+    serialize_practice,
 )
 from qiniu_images import MAX_IMAGE_BYTES, QiniuError, delete_image, upload_image
 from search_index import rebuild_workspace_index, search_workspace
@@ -45,10 +52,13 @@ from storage import (
     load_app_setting,
     load_active_workspace,
     load_document_draft,
+    load_practice_set,
     load_qiniu_settings,
     load_source_citation,
     load_saved_workspace_path,
+    list_practice_attempts,
     move_document_draft,
+    save_practice_attempt,
     save_active_workspace,
     save_app_setting,
     save_document_draft,
@@ -88,6 +98,8 @@ class ModelSettingsRequest(BaseModel):
     base_url: str = ""
     model: str = ""
     api_key: str = ""
+    embedding_model: str = ""
+    embedding_enabled: bool = False
 
 
 class CreateTutorSessionRequest(BaseModel):
@@ -108,6 +120,15 @@ class CreateTutorTurnRequest(BaseModel):
     question: str
     mode: str = "guided"
     supplement_requested: bool = False
+
+
+class CreatePracticeRequest(BaseModel):
+    question_count: int = Field(default=3, ge=1, le=10)
+
+
+class CreatePracticeAttemptRequest(BaseModel):
+    practice_item_id: str
+    selected_index: int = Field(ge=0)
 
 
 class CreateCitationRequest(BaseModel):
@@ -314,12 +335,22 @@ def normalize_quote(value: str) -> str:
 def serialize_model_settings() -> dict[str, object]:
     base_url = load_app_setting("model_base_url")
     model = load_app_setting("model_name")
-    configured = bool(base_url and model and has_api_key())
+    embedding_model = load_app_setting("embedding_model")
+    embedding_enabled = load_app_setting("embedding_enabled") == "true"
+    api_key_available = has_api_key()
     return {
         "baseUrl": base_url,
         "model": model,
-        "hasApiKey": has_api_key(),
-        "configured": configured,
+        "hasApiKey": api_key_available,
+        "configured": bool(base_url and model and api_key_available),
+        "embeddingModel": embedding_model,
+        "embeddingEnabled": embedding_enabled,
+        "embeddingConfigured": bool(
+            embedding_enabled
+            and embedding_model
+            and base_url
+            and api_key_available
+        ),
     }
 
 
@@ -338,6 +369,23 @@ def model_config_from_request(request: ModelSettingsRequest) -> ModelConfig:
     return ModelConfig(base_url=base_url, api_key=api_key, model=model)
 
 
+def embedding_config_from_request(
+    request: ModelSettingsRequest,
+) -> EmbeddingConfig:
+    base_url = request.base_url.strip()
+    model = request.embedding_model.strip()
+    api_key = request.api_key.strip() or load_api_key()
+    if not base_url:
+        raise HTTPException(status_code=422, detail="请填写 Base URL。")
+    if not base_url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=422, detail="Base URL 必须使用 HTTP 或 HTTPS。")
+    if not model:
+        raise HTTPException(status_code=422, detail="请填写 Embedding 模型。")
+    if not api_key:
+        raise HTTPException(status_code=422, detail="请填写 API Key。")
+    return EmbeddingConfig(base_url=base_url, api_key=api_key, model=model)
+
+
 def configured_model() -> ModelConfig:
     base_url = load_app_setting("model_base_url")
     model = load_app_setting("model_name")
@@ -345,6 +393,17 @@ def configured_model() -> ModelConfig:
     if not base_url or not model or not api_key:
         raise HTTPException(status_code=409, detail="请先配置模型服务。")
     return ModelConfig(base_url=base_url, api_key=api_key, model=model)
+
+
+def configured_embedding() -> Optional[EmbeddingConfig]:
+    if load_app_setting("embedding_enabled") != "true":
+        return None
+    base_url = load_app_setting("model_base_url")
+    model = load_app_setting("embedding_model")
+    api_key = load_api_key()
+    if not base_url or not model or not api_key:
+        return None
+    return EmbeddingConfig(base_url=base_url, api_key=api_key, model=model)
 
 
 def normalize_qiniu_domain(value: str) -> str:
@@ -474,6 +533,12 @@ def model_settings() -> dict[str, object]:
 @app.put("/api/model-settings")
 def update_model_settings(request: ModelSettingsRequest) -> dict[str, object]:
     config = model_config_from_request(request)
+    embedding_model = request.embedding_model.strip()
+    if request.embedding_enabled and not embedding_model:
+        raise HTTPException(
+            status_code=422,
+            detail="启用语义检索前请填写 Embedding 模型。",
+        )
     try:
         if request.api_key.strip():
             save_api_key(config.api_key)
@@ -481,6 +546,11 @@ def update_model_settings(request: ModelSettingsRequest) -> dict[str, object]:
         raise HTTPException(status_code=500, detail=str(secret_error)) from secret_error
     save_app_setting("model_base_url", config.base_url)
     save_app_setting("model_name", config.model)
+    save_app_setting("embedding_model", embedding_model)
+    save_app_setting(
+        "embedding_enabled",
+        "true" if request.embedding_enabled else "false",
+    )
     return serialize_model_settings()
 
 
@@ -489,6 +559,19 @@ def test_model_settings(request: ModelSettingsRequest) -> dict[str, bool]:
     config = model_config_from_request(request)
     try:
         test_model_connection(config)
+    except ModelRequestError as model_error:
+        raise HTTPException(
+            status_code=model_error.status,
+            detail=str(model_error),
+        ) from model_error
+    return {"ok": True}
+
+
+@app.post("/api/model-settings/test-embedding")
+def test_embedding_settings(request: ModelSettingsRequest) -> dict[str, bool]:
+    config = embedding_config_from_request(request)
+    try:
+        test_embedding_connection(config)
     except ModelRequestError as model_error:
         raise HTTPException(
             status_code=model_error.status,
@@ -557,12 +640,14 @@ def create_tutor_turn(
     resolve_workspace_file(str(session["path"]), {".md", ".pdf"})
     session_sources = list_learning_session_sources(root, session_id)
     config = configured_model()
+    embedding_config = configured_embedding()
     return StreamingResponse(
         event_stream(
             root,
             session,
             session_sources,
             config,
+            embedding_config,
             question,
             request.mode,
             request.supplement_requested,
@@ -575,12 +660,18 @@ def create_tutor_turn(
     )
 
 
-@app.get("/api/tutor/sessions/{session_id}/sources")
-def tutor_sources(session_id: str) -> dict[str, object]:
+def require_learning_session(session_id: str) -> tuple[Path, dict[str, object]]:
     root = require_active_workspace()
     session = load_learning_session(root, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Learning session 不存在。")
+    resolve_workspace_file(str(session["path"]), {".md", ".pdf"})
+    return root, session
+
+
+@app.get("/api/tutor/sessions/{session_id}/sources")
+def tutor_sources(session_id: str) -> dict[str, object]:
+    root, _session = require_learning_session(session_id)
     return {
         "sources": [
             serialize_tutor_source(source)
@@ -594,10 +685,7 @@ def add_tutor_source(
     session_id: str,
     request: AddTutorSourceRequest,
 ) -> dict[str, object]:
-    root = require_active_workspace()
-    session = load_learning_session(root, session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="Learning session 不存在。")
+    root, _session = require_learning_session(session_id)
     try:
         resolved = resolve_tutor_source(
             root,
@@ -624,10 +712,7 @@ def remove_tutor_source(
     session_id: str,
     source_id: str,
 ) -> dict[str, bool]:
-    root = require_active_workspace()
-    session = load_learning_session(root, session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="Learning session 不存在。")
+    root, _session = require_learning_session(session_id)
     try:
         deleted = delete_learning_session_source(root, session_id, source_id)
     except ValueError as source_error:
@@ -635,6 +720,78 @@ def remove_tutor_source(
     if not deleted:
         raise HTTPException(status_code=404, detail="Learning source 不存在。")
     return {"deleted": True}
+
+
+def saved_practice_response(
+    workspace: Path,
+    session_id: str,
+) -> dict[str, object]:
+    loaded = load_practice_set(workspace, session_id)
+    if loaded is None:
+        return serialize_practice(None, [])
+    attempts = list_practice_attempts(
+        workspace,
+        session_id,
+        str(loaded["practice"]["id"]),  # type: ignore[index]
+    )
+    return serialize_practice(loaded, attempts)
+
+
+@app.get("/api/tutor/sessions/{session_id}/practice")
+def get_practice(session_id: str) -> dict[str, object]:
+    root, _session = require_learning_session(session_id)
+    return saved_practice_response(root, session_id)
+
+
+@app.post("/api/tutor/sessions/{session_id}/practice")
+def create_practice(
+    session_id: str,
+    request: CreatePracticeRequest,
+) -> dict[str, object]:
+    root, session = require_learning_session(session_id)
+    config = configured_model()
+    try:
+        return generate_practice(
+            root,
+            session,
+            config,
+            request.question_count,
+        )
+    except PracticeGenerationError as practice_error:
+        raise HTTPException(status_code=502, detail=str(practice_error)) from practice_error
+    except TutorContextError as context_error:
+        raise HTTPException(status_code=422, detail=str(context_error)) from context_error
+    except ModelRequestError as model_error:
+        raise HTTPException(
+            status_code=model_error.status,
+            detail=str(model_error),
+        ) from model_error
+
+
+@app.post("/api/tutor/sessions/{session_id}/practice/attempts")
+def create_practice_attempt(
+    session_id: str,
+    request: CreatePracticeAttemptRequest,
+) -> dict[str, object]:
+    root, _session = require_learning_session(session_id)
+    try:
+        attempt = save_practice_attempt(
+            root,
+            session_id,
+            request.practice_item_id,
+            request.selected_index,
+        )
+    except ValueError as selection_error:
+        raise HTTPException(status_code=422, detail=str(selection_error)) from selection_error
+    if attempt is None:
+        raise HTTPException(status_code=404, detail="Practice item 不存在。")
+    return {
+        "id": attempt["id"],
+        "practiceItemId": attempt["practice_item_id"],
+        "selectedIndex": attempt["selected_index"],
+        "correct": bool(attempt["correct"]),
+        "answeredAt": attempt["answered_at"],
+    }
 
 
 @app.get("/api/settings/qiniu")
