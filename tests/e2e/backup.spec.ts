@@ -905,9 +905,27 @@ test("a failed restore transaction rolls back to the current learning data", asy
       gunzipSync(await readFile(exportedPath)).toString("utf8")
     ) as {
       data: {
+        practiceSets: Array<{ session_id: string }>;
         reviewResults: Array<{ result: string }>;
       };
     };
+    const relationalTamper = structuredClone(tampered);
+    relationalTamper.data.practiceSets[0].session_id = "missing-session";
+    const relationalTamperPath = path.join(
+      archiveDir,
+      "relationship-failure.studynotes.gz"
+    );
+    await writeFile(
+      relationalTamperPath,
+      gzipSync(JSON.stringify(relationalTamper))
+    );
+    await backupSection
+      .getByLabel("选择备份包")
+      .setInputFiles(relationalTamperPath);
+    await expect(backupSection.getByRole("alert")).toContainText(
+      "备份包练习集合会话关系无效。"
+    );
+
     tampered.data.reviewResults[0].result = "invalid-transaction-value";
     const tamperedPath = path.join(
       archiveDir,

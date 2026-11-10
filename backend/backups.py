@@ -639,26 +639,50 @@ def _validate_payload(payload: dict[str, object]) -> None:
             raise BackupPackageError("备份包会话来源关系无效。")
 
     practice_sets = {
-        str(row["id"]) for row in rows_by_table["practice_sets"]
+        str(row["id"]): row for row in rows_by_table["practice_sets"]
     }
     practice_items = {
         str(row["id"]): row for row in rows_by_table["practice_items"]
     }
+    for practice_set in practice_sets.values():
+        if str(practice_set["session_id"]) not in sessions:
+            raise BackupPackageError("备份包练习集合会话关系无效。")
     for item in practice_items.values():
         if str(item["practice_set_id"]) not in practice_sets:
             raise BackupPackageError("备份包练习题目关系无效。")
+        practice_set = practice_sets[str(item["practice_set_id"])]
+        if str(item["session_id"]) not in sessions:
+            raise BackupPackageError("备份包练习题目会话关系无效。")
+        if str(item["session_id"]) != str(practice_set["session_id"]):
+            raise BackupPackageError("备份包练习题目会话关系不一致。")
     for attempt in rows_by_table["practice_attempts"]:
         item_id = str(attempt["practice_item_id"])
         if item_id not in practice_items:
             raise BackupPackageError("备份包练习作答关系无效。")
-        if str(practice_items[item_id]["practice_set_id"]) != str(
+        item = practice_items[item_id]
+        if str(item["practice_set_id"]) != str(
             attempt["practice_set_id"]
         ):
             raise BackupPackageError("备份包练习集合关系无效。")
+        if str(attempt["session_id"]) not in sessions:
+            raise BackupPackageError("备份包练习作答会话关系无效。")
+        if str(attempt["session_id"]) != str(item["session_id"]):
+            raise BackupPackageError("备份包练习作答会话关系不一致。")
     for gap in rows_by_table["gap_records"]:
+        if str(gap["session_id"]) not in sessions:
+            raise BackupPackageError("备份包知识缺口会话关系无效。")
         practice_item_id = gap.get("practice_item_id")
-        if practice_item_id is not None and str(practice_item_id) not in practice_items:
+        if (
+            practice_item_id is not None
+            and str(practice_item_id) not in practice_items
+        ):
             raise BackupPackageError("备份包知识缺口关系无效。")
+        if (
+            practice_item_id is not None
+            and str(gap["session_id"])
+            != str(practice_items[str(practice_item_id)]["session_id"])
+        ):
+            raise BackupPackageError("备份包知识缺口会话关系不一致。")
     gaps = {str(row["id"]) for row in rows_by_table["gap_records"]}
     for review in rows_by_table["review_results"]:
         if str(review["gap_id"]) not in gaps:
