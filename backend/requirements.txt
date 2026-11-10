@@ -1,0 +1,5 @@
+fastapi==0.115.6
+keyring==25.7.0
+PyMuPDF==1.26.5
+python-multipart==0.0.20
+uvicorn[standard]==0.34.0

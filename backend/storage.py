@@ -1,0 +1,2103 @@
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Optional
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def application_data_directory() -> Path:
+    configured = os.environ.get("STUDY_NOTES_DATA_DIR")
+    data_dir = (
+        Path(configured).expanduser().resolve()
+        if configured
+        else PROJECT_ROOT / "data"
+    )
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir
+
+
+def database_path() -> Path:
+    data_dir = application_data_directory()
+    return data_dir / "app.sqlite3"
+
+
+def connect() -> sqlite3.Connection:
+    connection = sqlite3.connect(database_path(), timeout=5)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def initialize_database() -> None:
+    with connect() as connection:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS workspaces (
+                path TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS app_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS document_drafts (
+                workspace_path TEXT NOT NULL,
+                path TEXT NOT NULL,
+                markdown TEXT NOT NULL,
+                blocks_json TEXT NOT NULL,
+                base_revision TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (workspace_path, path)
+            );
+
+            CREATE TABLE IF NOT EXISTS source_citations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_path TEXT NOT NULL,
+                path TEXT NOT NULL,
+                page INTEGER NOT NULL,
+                quote TEXT NOT NULL,
+                pdf_sha256 TEXT NOT NULL,
+                extractor_version TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS source_citations_workspace_path
+            ON source_citations (workspace_path, path, created_at);
+
+            CREATE TABLE IF NOT EXISTS qiniu_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                bucket TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS uploaded_images (
+                workspace_path TEXT NOT NULL,
+                object_key TEXT NOT NULL,
+                url TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                cached_path TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (workspace_path, url)
+            );
+
+            CREATE TABLE IF NOT EXISTS search_sources (
+                workspace_path TEXT NOT NULL,
+                path TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                source_hash TEXT NOT NULL,
+                parser_version TEXT NOT NULL,
+                indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                error TEXT,
+                PRIMARY KEY (workspace_path, path)
+            );
+
+            CREATE TABLE IF NOT EXISTS embedding_entries (
+                workspace_path TEXT NOT NULL,
+                entry_key TEXT NOT NULL,
+                path TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                block_id TEXT,
+                block_index INTEGER,
+                heading_path TEXT NOT NULL,
+                page INTEGER,
+                title TEXT NOT NULL,
+                tags TEXT NOT NULL,
+                body TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                embedding_model TEXT NOT NULL,
+                embedding_json TEXT NOT NULL,
+                indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (workspace_path, entry_key)
+            );
+
+            CREATE INDEX IF NOT EXISTS embedding_entries_workspace_model
+            ON embedding_entries (workspace_path, embedding_model, path);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
+                workspace_path UNINDEXED,
+                path UNINDEXED,
+                kind UNINDEXED,
+                block_id UNINDEXED,
+                block_index UNINDEXED,
+                heading_path UNINDEXED,
+                page UNINDEXED,
+                title,
+                path_search,
+                tags,
+                heading_search,
+                body,
+                tokenize = 'trigram case_sensitive 0'
+            );
+
+            CREATE TABLE IF NOT EXISTS learning_sessions (
+                id TEXT PRIMARY KEY,
+                workspace_path TEXT NOT NULL,
+                path TEXT NOT NULL,
+                block_id TEXT,
+                page INTEGER,
+                quote TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                archived INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS learning_sessions_workspace
+            ON learning_sessions (workspace_path, updated_at);
+
+            CREATE TABLE IF NOT EXISTS session_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_path TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                answer_type TEXT,
+                citations_json TEXT,
+                context_json TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS session_messages_session
+            ON session_messages (workspace_path, session_id, id);
+
+            CREATE TABLE IF NOT EXISTS learning_session_sources (
+                id TEXT PRIMARY KEY,
+                workspace_path TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                path TEXT NOT NULL,
+                block_id TEXT,
+                block_index INTEGER,
+                page INTEGER,
+                heading_path_json TEXT NOT NULL DEFAULT '[]',
+                quote TEXT NOT NULL DEFAULT '',
+                source_key TEXT NOT NULL,
+                is_initial INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(workspace_path, session_id, source_key)
+            );
+
+            CREATE INDEX IF NOT EXISTS learning_session_sources_session
+            ON learning_session_sources (workspace_path, session_id, created_at, id);
+
+            CREATE TABLE IF NOT EXISTS practice_sets (
+                id TEXT PRIMARY KEY,
+                workspace_path TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                question_count INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS practice_sets_session
+            ON practice_sets (workspace_path, session_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS practice_items (
+                id TEXT PRIMARY KEY,
+                practice_set_id TEXT NOT NULL,
+                workspace_path TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                item_type TEXT NOT NULL DEFAULT 'single_choice',
+                stem TEXT NOT NULL,
+                options_json TEXT NOT NULL,
+                correct_index INTEGER NOT NULL,
+                explanation TEXT NOT NULL,
+                reference_answer TEXT,
+                citation_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (practice_set_id, ordinal)
+            );
+
+            CREATE INDEX IF NOT EXISTS practice_items_session
+            ON practice_items (workspace_path, session_id, practice_set_id, ordinal);
+
+            CREATE TABLE IF NOT EXISTS practice_attempts (
+                id TEXT PRIMARY KEY,
+                workspace_path TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                practice_set_id TEXT NOT NULL,
+                practice_item_id TEXT NOT NULL,
+                selected_index INTEGER NOT NULL,
+                correct INTEGER NOT NULL,
+                answer_text TEXT,
+                feedback_json TEXT,
+                ai_score INTEGER,
+                final_score INTEGER,
+                feedback_status TEXT NOT NULL DEFAULT 'graded',
+                feedback_error TEXT,
+                answered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                feedback_updated_at TEXT,
+                UNIQUE (workspace_path, practice_item_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS practice_attempts_session
+            ON practice_attempts (workspace_path, session_id, practice_set_id);
+
+            CREATE TABLE IF NOT EXISTS gap_records (
+                id TEXT PRIMARY KEY,
+                workspace_path TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                practice_item_id TEXT,
+                title TEXT NOT NULL,
+                citation_json TEXT NOT NULL,
+                schedule_step INTEGER NOT NULL DEFAULT 0,
+                next_review_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS gap_records_workspace_due
+            ON gap_records (workspace_path, next_review_at, created_at);
+
+            CREATE TABLE IF NOT EXISTS review_results (
+                id TEXT PRIMARY KEY,
+                workspace_path TEXT NOT NULL,
+                gap_id TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                feedback TEXT NOT NULL,
+                result TEXT NOT NULL CHECK (result IN ('again', 'pass')),
+                reviewed_at TEXT NOT NULL,
+                next_review_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS review_results_gap
+            ON review_results (workspace_path, gap_id, reviewed_at);
+            """
+        )
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(learning_sessions)")
+        }
+        if "page" not in columns:
+            connection.execute(
+                "ALTER TABLE learning_sessions ADD COLUMN page INTEGER"
+            )
+        _ensure_column(
+            connection,
+            "learning_sessions",
+            "title",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        _ensure_column(
+            connection,
+            "learning_sessions",
+            "archived",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        _ensure_column(
+            connection,
+            "practice_items",
+            "item_type",
+            "TEXT NOT NULL DEFAULT 'single_choice'",
+        )
+        _ensure_column(connection, "practice_items", "reference_answer", "TEXT")
+        _ensure_column(connection, "practice_attempts", "answer_text", "TEXT")
+        _ensure_column(connection, "practice_attempts", "feedback_json", "TEXT")
+        _ensure_column(connection, "practice_attempts", "ai_score", "INTEGER")
+        _ensure_column(connection, "practice_attempts", "final_score", "INTEGER")
+        _ensure_column(
+            connection,
+            "practice_attempts",
+            "feedback_status",
+            "TEXT NOT NULL DEFAULT 'graded'",
+        )
+        _ensure_column(connection, "practice_attempts", "feedback_error", "TEXT")
+        _ensure_column(
+            connection,
+            "practice_attempts",
+            "feedback_updated_at",
+            "TEXT",
+        )
+
+
+def _ensure_column(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    columns = {
+        str(row["name"])
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def load_saved_workspace_path() -> Optional[Path]:
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT value FROM app_state WHERE key = 'active_workspace_path'"
+        ).fetchone()
+    return Path(row["value"]) if row is not None else None
+
+
+def load_active_workspace() -> Optional[Path]:
+    workspace = load_saved_workspace_path()
+    if workspace is None:
+        return None
+    return workspace if workspace.is_dir() else None
+
+
+def save_active_workspace(workspace: Path) -> None:
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO workspaces (path, name)
+            VALUES (?, ?)
+            ON CONFLICT(path) DO UPDATE SET
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (str(workspace), workspace.name or str(workspace)),
+        )
+        connection.execute(
+            """
+            INSERT INTO app_state (key, value)
+            VALUES ('active_workspace_path', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (str(workspace),),
+        )
+
+
+def list_registered_workspaces() -> list[dict[str, object]]:
+    active = load_saved_workspace_path()
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT path, name, created_at, updated_at
+            FROM workspaces
+            ORDER BY updated_at DESC, name ASC
+            """
+        ).fetchall()
+    return [
+        {
+            **dict(row),
+            "active": active is not None and Path(str(row["path"])) == active,
+        }
+        for row in rows
+    ]
+
+
+def rename_registered_workspace(workspace: Path, name: str) -> Optional[dict[str, object]]:
+    normalized_name = " ".join(name.split())
+    if not normalized_name:
+        raise ValueError("工作区名称不能为空。")
+    with connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE workspaces
+            SET name = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE path = ?
+            """,
+            (normalized_name[:120], str(workspace.resolve())),
+        )
+        if cursor.rowcount == 0:
+            return None
+        row = connection.execute(
+            "SELECT path, name, created_at, updated_at FROM workspaces WHERE path = ?",
+            (str(workspace.resolve()),),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def remove_registered_workspace(workspace: Path) -> bool:
+    workspace_path = str(workspace.resolve())
+    with connect() as connection:
+        cursor = connection.execute(
+            "DELETE FROM workspaces WHERE path = ?",
+            (workspace_path,),
+        )
+        if cursor.rowcount == 0:
+            return False
+        active = connection.execute(
+            "SELECT value FROM app_state WHERE key = 'active_workspace_path'"
+        ).fetchone()
+        if active is not None and str(active["value"]) == workspace_path:
+            connection.execute(
+                "DELETE FROM app_state WHERE key = 'active_workspace_path'"
+            )
+    return True
+
+
+def load_app_setting(key: str, default: str = "") -> str:
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT value FROM app_state WHERE key = ?",
+            (key,),
+        ).fetchone()
+    return str(row["value"]) if row is not None else default
+
+
+def save_app_setting(key: str, value: str) -> None:
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO app_state (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, value),
+        )
+
+
+def create_learning_session(
+    workspace: Path,
+    relative_path: str,
+    block_id: Optional[str],
+    quote: str,
+    page: Optional[int] = None,
+) -> dict[str, object]:
+    session_id = str(uuid.uuid4())
+    normalized_quote = " ".join(quote.split())
+    title = normalized_quote[:80] or Path(relative_path).stem
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO learning_sessions (
+                id,
+                workspace_path,
+                path,
+                block_id,
+                page,
+                quote,
+                title
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                str(workspace.resolve()),
+                relative_path,
+                block_id,
+                page,
+                quote,
+                title,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM learning_sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("学习会话 was not persisted.")
+    return dict(row)
+
+
+def load_learning_session(
+    workspace: Path,
+    session_id: str,
+) -> Optional[dict[str, object]]:
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM learning_sessions
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (str(workspace.resolve()), session_id),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_learning_sessions(
+    workspace: Path,
+    *,
+    query: str = "",
+    archived: Optional[bool] = None,
+) -> list[dict[str, object]]:
+    clauses = ["workspace_path = ?"]
+    parameters: list[object] = [str(workspace.resolve())]
+    normalized_query = " ".join(query.split())
+    if normalized_query:
+        clauses.append("(title LIKE ? COLLATE NOCASE OR quote LIKE ? COLLATE NOCASE)")
+        pattern = f"%{normalized_query}%"
+        parameters.extend([pattern, pattern])
+    if archived is not None:
+        clauses.append("archived = ?")
+        parameters.append(1 if archived else 0)
+    with connect() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT *
+            FROM learning_sessions
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at ASC, rowid ASC
+            """,
+            parameters,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def search_learning_records(
+    workspace: Path,
+    query: str,
+    *,
+    limit: int = 20,
+) -> dict[str, list[dict[str, object]]]:
+    workspace_path = str(workspace.resolve())
+    pattern = f"%{' '.join(query.split())}%"
+    with connect() as connection:
+        sessions = connection.execute(
+            """
+            SELECT *
+            FROM learning_sessions
+            WHERE workspace_path = ?
+              AND (title LIKE ? COLLATE NOCASE OR quote LIKE ? COLLATE NOCASE)
+            ORDER BY updated_at DESC, rowid DESC
+            LIMIT ?
+            """,
+            (workspace_path, pattern, pattern, limit),
+        ).fetchall()
+        practice_items = connection.execute(
+            """
+            SELECT practice_items.*, practice_sets.created_at AS practice_created_at
+            FROM practice_items
+            JOIN practice_sets ON practice_sets.id = practice_items.practice_set_id
+            WHERE practice_items.workspace_path = ?
+              AND (
+                practice_items.stem LIKE ? COLLATE NOCASE
+                OR practice_items.explanation LIKE ? COLLATE NOCASE
+              )
+            ORDER BY practice_items.created_at DESC, practice_items.rowid DESC
+            LIMIT ?
+            """,
+            (workspace_path, pattern, pattern, limit),
+        ).fetchall()
+        gaps = connection.execute(
+            """
+            SELECT *
+            FROM gap_records
+            WHERE workspace_path = ?
+              AND title LIKE ? COLLATE NOCASE
+            ORDER BY updated_at DESC, rowid DESC
+            LIMIT ?
+            """,
+            (workspace_path, pattern, limit),
+        ).fetchall()
+    return {
+        "sessions": [dict(row) for row in sessions],
+        "practice": [dict(row) for row in practice_items],
+        "gaps": [dict(row) for row in gaps],
+    }
+
+
+def update_learning_session(
+    workspace: Path,
+    session_id: str,
+    *,
+    title: Optional[str] = None,
+    archived: Optional[bool] = None,
+) -> Optional[dict[str, object]]:
+    assignments = ["updated_at = CURRENT_TIMESTAMP"]
+    parameters: list[object] = []
+    if title is not None:
+        normalized_title = " ".join(title.split())
+        if not normalized_title:
+            raise ValueError("学习会话标题不能为空。")
+        assignments.append("title = ?")
+        parameters.append(normalized_title[:120])
+    if archived is not None:
+        assignments.append("archived = ?")
+        parameters.append(1 if archived else 0)
+    parameters.extend([str(workspace.resolve()), session_id])
+    with connect() as connection:
+        cursor = connection.execute(
+            f"""
+            UPDATE learning_sessions
+            SET {', '.join(assignments)}
+            WHERE workspace_path = ? AND id = ?
+            """,
+            parameters,
+        )
+        if cursor.rowcount == 0:
+            return None
+        row = connection.execute(
+            """
+            SELECT *
+            FROM learning_sessions
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (str(workspace.resolve()), session_id),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def delete_learning_session(workspace: Path, session_id: str) -> bool:
+    """Delete session context while retaining Practice, Gap and Review records."""
+    workspace_path = str(workspace.resolve())
+    with connect() as connection:
+        session = connection.execute(
+            """
+            SELECT id
+            FROM learning_sessions
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (workspace_path, session_id),
+        ).fetchone()
+        if session is None:
+            return False
+        connection.execute(
+            "DELETE FROM session_messages WHERE workspace_path = ? AND session_id = ?",
+            (workspace_path, session_id),
+        )
+        connection.execute(
+            """
+            DELETE FROM learning_session_sources
+            WHERE workspace_path = ? AND session_id = ?
+            """,
+            (workspace_path, session_id),
+        )
+        connection.execute(
+            "DELETE FROM learning_sessions WHERE workspace_path = ? AND id = ?",
+            (workspace_path, session_id),
+        )
+    return True
+
+
+def save_learning_session_source(
+    workspace: Path,
+    session_id: str,
+    source: dict[str, object],
+    *,
+    is_initial: bool = False,
+) -> tuple[dict[str, object], bool]:
+    workspace_path = str(workspace.resolve())
+    source_key = str(source["sourceKey"])
+    with connect() as connection:
+        existing = connection.execute(
+            """
+            SELECT *
+            FROM learning_session_sources
+            WHERE workspace_path = ? AND session_id = ? AND source_key = ?
+            """,
+            (workspace_path, session_id, source_key),
+        ).fetchone()
+        if existing is not None:
+            return dict(existing), True
+
+        source_id = str(uuid.uuid4())
+        connection.execute(
+            """
+            INSERT INTO learning_session_sources (
+                id,
+                workspace_path,
+                session_id,
+                kind,
+                path,
+                block_id,
+                block_index,
+                page,
+                heading_path_json,
+                quote,
+                source_key,
+                is_initial
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_id,
+                workspace_path,
+                session_id,
+                source["kind"],
+                source["path"],
+                source.get("blockId"),
+                source.get("blockIndex"),
+                source.get("page"),
+                json.dumps(source.get("headingPath", []), ensure_ascii=False),
+                source.get("quote", ""),
+                source_key,
+                1 if is_initial else 0,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM learning_session_sources WHERE id = ?",
+            (source_id,),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("学习资料 was not persisted.")
+    return dict(row), False
+
+
+def list_learning_session_sources(
+    workspace: Path,
+    session_id: str,
+) -> list[dict[str, object]]:
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM learning_session_sources
+            WHERE workspace_path = ? AND session_id = ?
+            ORDER BY is_initial DESC, created_at ASC, id ASC
+            """,
+            (str(workspace.resolve()), session_id),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def delete_learning_session_source(
+    workspace: Path,
+    session_id: str,
+    source_id: str,
+) -> bool:
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT is_initial
+            FROM learning_session_sources
+            WHERE workspace_path = ? AND session_id = ? AND id = ?
+            """,
+            (str(workspace.resolve()), session_id, source_id),
+        ).fetchone()
+        if row is None:
+            return False
+        if bool(row["is_initial"]):
+            raise ValueError("会话起点不可移除。")
+        connection.execute(
+            """
+            DELETE FROM learning_session_sources
+            WHERE workspace_path = ? AND session_id = ? AND id = ?
+            """,
+            (str(workspace.resolve()), session_id, source_id),
+        )
+    return True
+
+
+def save_session_message(
+    workspace: Path,
+    session_id: str,
+    role: str,
+    content: str,
+    *,
+    answer_type: Optional[str] = None,
+    citations: object = None,
+    context: object = None,
+) -> dict[str, object]:
+    citations_json = (
+        json.dumps(citations, ensure_ascii=False)
+        if citations is not None
+        else None
+    )
+    context_json = (
+        json.dumps(context, ensure_ascii=False)
+        if context is not None
+        else None
+    )
+    with connect() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO session_messages (
+                workspace_path,
+                session_id,
+                role,
+                content,
+                answer_type,
+                citations_json,
+                context_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(workspace.resolve()),
+                session_id,
+                role,
+                content,
+                answer_type,
+                citations_json,
+                context_json,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE learning_sessions
+            SET updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (str(workspace.resolve()), session_id),
+        )
+        row = connection.execute(
+            "SELECT * FROM session_messages WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("Session message was not persisted.")
+    return dict(row)
+
+
+def list_session_messages(
+    workspace: Path,
+    session_id: str,
+    *,
+    limit: int = 8,
+) -> list[dict[str, object]]:
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM (
+                SELECT *
+                FROM session_messages
+                WHERE workspace_path = ? AND session_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+            )
+            ORDER BY id ASC
+            """,
+            (str(workspace.resolve()), session_id, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def save_practice_set(
+    workspace: Path,
+    session_id: str,
+    questions: list[dict[str, object]],
+) -> dict[str, object]:
+    practice_set_id = str(uuid.uuid4())
+    workspace_path = str(workspace.resolve())
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO practice_sets (
+                id,
+                workspace_path,
+                session_id,
+                question_count
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (practice_set_id, workspace_path, session_id, len(questions)),
+        )
+        for ordinal, question in enumerate(questions, start=1):
+            item_id = str(uuid.uuid4())
+            connection.execute(
+                """
+                INSERT INTO practice_items (
+                    id,
+                    practice_set_id,
+                    workspace_path,
+                    session_id,
+                    ordinal,
+                    item_type,
+                    stem,
+                    options_json,
+                    correct_index,
+                    explanation,
+                    reference_answer,
+                    citation_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item_id,
+                    practice_set_id,
+                    workspace_path,
+                    session_id,
+                    ordinal,
+                    str(question.get("itemType", "single_choice")),
+                    str(question["stem"]),
+                    json.dumps(question["options"], ensure_ascii=False),
+                    int(question["correctIndex"] or 0),
+                    str(question["explanation"]),
+                    question.get("referenceAnswer"),
+                    json.dumps(question["citation"], ensure_ascii=False),
+                ),
+            )
+        connection.execute(
+            """
+            UPDATE learning_sessions
+            SET updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (workspace_path, session_id),
+        )
+
+    loaded = load_practice_set(workspace, session_id)
+    if loaded is None or loaded["practice"]["id"] != practice_set_id:
+        raise RuntimeError("Practice set was not persisted.")
+    return loaded
+
+
+def load_practice_set(
+    workspace: Path,
+    session_id: str,
+) -> Optional[dict[str, object]]:
+    workspace_path = str(workspace.resolve())
+    with connect() as connection:
+        practice = connection.execute(
+            """
+            SELECT *
+            FROM practice_sets
+            WHERE workspace_path = ? AND session_id = ?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            (workspace_path, session_id),
+        ).fetchone()
+        if practice is None:
+            return None
+        items = connection.execute(
+            """
+            SELECT *
+            FROM practice_items
+            WHERE workspace_path = ?
+              AND session_id = ?
+              AND practice_set_id = ?
+            ORDER BY ordinal ASC
+            """,
+            (workspace_path, session_id, practice["id"]),
+        ).fetchall()
+    return {"practice": dict(practice), "items": [dict(row) for row in items]}
+
+
+def list_practice_attempts(
+    workspace: Path,
+    session_id: str,
+    practice_set_id: str,
+) -> list[dict[str, object]]:
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM practice_attempts
+            WHERE workspace_path = ?
+              AND session_id = ?
+              AND practice_set_id = ?
+            ORDER BY answered_at ASC, rowid ASC
+            """,
+            (str(workspace.resolve()), session_id, practice_set_id),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def load_practice_item(
+    workspace: Path,
+    session_id: str,
+    item_id: str,
+) -> Optional[dict[str, object]]:
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM practice_items
+            WHERE id = ?
+              AND workspace_path = ?
+              AND session_id = ?
+            """,
+            (item_id, str(workspace.resolve()), session_id),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def load_practice_item_by_id(
+    workspace: Path,
+    item_id: str,
+) -> Optional[dict[str, object]]:
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM practice_items
+            WHERE id = ? AND workspace_path = ?
+            """,
+            (item_id, str(workspace.resolve())),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def delete_practice_item(
+    workspace: Path,
+    session_id: str,
+    item_id: str,
+) -> bool:
+    workspace_path = str(workspace.resolve())
+    with connect() as connection:
+        item = connection.execute(
+            """
+            SELECT id, practice_set_id
+            FROM practice_items
+            WHERE workspace_path = ? AND session_id = ? AND id = ?
+            """,
+            (workspace_path, session_id, item_id),
+        ).fetchone()
+        if item is None:
+            return False
+        connection.execute(
+            """
+            UPDATE gap_records
+            SET practice_item_id = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ? AND practice_item_id = ?
+            """,
+            (workspace_path, item_id),
+        )
+        connection.execute(
+            """
+            DELETE FROM practice_attempts
+            WHERE workspace_path = ? AND session_id = ? AND practice_item_id = ?
+            """,
+            (workspace_path, session_id, item_id),
+        )
+        connection.execute(
+            """
+            DELETE FROM practice_items
+            WHERE workspace_path = ? AND session_id = ? AND id = ?
+            """,
+            (workspace_path, session_id, item_id),
+        )
+        connection.execute(
+            """
+            UPDATE practice_sets
+            SET question_count = (
+                SELECT COUNT(*)
+                FROM practice_items
+                WHERE practice_items.practice_set_id = practice_sets.id
+            )
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (workspace_path, str(item["practice_set_id"])),
+        )
+    return True
+
+
+def load_practice_attempt(
+    workspace: Path,
+    session_id: str,
+    item_id: str,
+) -> Optional[dict[str, object]]:
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM practice_attempts
+            WHERE workspace_path = ?
+              AND session_id = ?
+              AND practice_item_id = ?
+            """,
+            (str(workspace.resolve()), session_id, item_id),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def save_practice_attempt(
+    workspace: Path,
+    session_id: str,
+    item_id: str,
+    selected_index: int,
+) -> Optional[dict[str, object]]:
+    workspace_path = str(workspace.resolve())
+    with connect() as connection:
+        item = connection.execute(
+            """
+            SELECT *
+            FROM practice_items
+            WHERE id = ?
+              AND workspace_path = ?
+              AND session_id = ?
+            """,
+            (item_id, workspace_path, session_id),
+        ).fetchone()
+        if item is None:
+            return None
+        try:
+            options = json.loads(str(item["options_json"]))
+        except json.JSONDecodeError as error:
+            raise ValueError("Practice item options are invalid.") from error
+        if (
+            not isinstance(options, list)
+            or selected_index < 0
+            or selected_index >= len(options)
+        ):
+            raise ValueError("请选择有效答案。")
+
+        attempt_id = str(uuid.uuid4())
+        correct = int(selected_index == int(item["correct_index"]))
+        connection.execute(
+            """
+            INSERT INTO practice_attempts (
+                id,
+                workspace_path,
+                session_id,
+                practice_set_id,
+                practice_item_id,
+                selected_index,
+                correct
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(workspace_path, practice_item_id) DO UPDATE SET
+                selected_index = excluded.selected_index,
+                correct = excluded.correct,
+                answered_at = CURRENT_TIMESTAMP
+            """,
+            (
+                attempt_id,
+                workspace_path,
+                session_id,
+                str(item["practice_set_id"]),
+                item_id,
+                selected_index,
+                correct,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE learning_sessions
+            SET updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (workspace_path, session_id),
+        )
+        row = connection.execute(
+            """
+            SELECT *
+            FROM practice_attempts
+            WHERE workspace_path = ? AND practice_item_id = ?
+            """,
+            (workspace_path, item_id),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("Practice attempt was not persisted.")
+    return dict(row)
+
+
+def save_short_answer_attempt(
+    workspace: Path,
+    session_id: str,
+    item_id: str,
+    answer_text: str,
+) -> Optional[dict[str, object]]:
+    workspace_path = str(workspace.resolve())
+    normalized_answer = answer_text.strip()
+    if not normalized_answer:
+        raise ValueError("短答题答案不能为空。")
+
+    with connect() as connection:
+        item = connection.execute(
+            """
+            SELECT *
+            FROM practice_items
+            WHERE id = ?
+              AND workspace_path = ?
+              AND session_id = ?
+            """,
+            (item_id, workspace_path, session_id),
+        ).fetchone()
+        if item is None:
+            return None
+        if str(item["item_type"]) != "short_answer":
+            raise ValueError("该 Practice item 不是短答题。")
+
+        attempt_id = str(uuid.uuid4())
+        connection.execute(
+            """
+            INSERT INTO practice_attempts (
+                id,
+                workspace_path,
+                session_id,
+                practice_set_id,
+                practice_item_id,
+                selected_index,
+                correct,
+                answer_text,
+                feedback_status
+            )
+            VALUES (?, ?, ?, ?, ?, -1, 0, ?, 'pending')
+            ON CONFLICT(workspace_path, practice_item_id) DO UPDATE SET
+                answer_text = excluded.answer_text,
+                selected_index = -1,
+                correct = 0,
+                feedback_json = NULL,
+                ai_score = NULL,
+                final_score = NULL,
+                feedback_status = 'pending',
+                feedback_error = NULL,
+                feedback_updated_at = NULL,
+                answered_at = CURRENT_TIMESTAMP
+            """,
+            (
+                attempt_id,
+                workspace_path,
+                session_id,
+                str(item["practice_set_id"]),
+                item_id,
+                normalized_answer,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE learning_sessions
+            SET updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (workspace_path, session_id),
+        )
+        row = connection.execute(
+            """
+            SELECT *
+            FROM practice_attempts
+            WHERE workspace_path = ? AND practice_item_id = ?
+            """,
+            (workspace_path, item_id),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("Short-answer attempt was not persisted.")
+    return dict(row)
+
+
+def save_short_answer_feedback(
+    workspace: Path,
+    session_id: str,
+    item_id: str,
+    *,
+    feedback: Optional[dict[str, object]],
+    ai_score: Optional[int],
+    feedback_error: Optional[str],
+) -> Optional[dict[str, object]]:
+    workspace_path = str(workspace.resolve())
+    status = "graded" if feedback is not None and ai_score is not None else "failed"
+    with connect() as connection:
+        attempt = connection.execute(
+            """
+            SELECT *
+            FROM practice_attempts
+            WHERE workspace_path = ?
+              AND session_id = ?
+              AND practice_item_id = ?
+            """,
+            (workspace_path, session_id, item_id),
+        ).fetchone()
+        if attempt is None:
+            return None
+        correct = int(ai_score is not None and int(ai_score) >= 60)
+        connection.execute(
+            """
+            UPDATE practice_attempts
+            SET feedback_json = ?,
+                ai_score = ?,
+                correct = ?,
+                feedback_status = ?,
+                feedback_error = ?,
+                feedback_updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ?
+              AND session_id = ?
+              AND practice_item_id = ?
+            """,
+            (
+                (
+                    json.dumps(feedback, ensure_ascii=False)
+                    if feedback is not None
+                    else None
+                ),
+                ai_score,
+                correct,
+                status,
+                feedback_error,
+                workspace_path,
+                session_id,
+                item_id,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE learning_sessions
+            SET updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (workspace_path, session_id),
+        )
+        row = connection.execute(
+            """
+            SELECT *
+            FROM practice_attempts
+            WHERE workspace_path = ? AND practice_item_id = ?
+            """,
+            (workspace_path, item_id),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def save_practice_self_assessment(
+    workspace: Path,
+    session_id: str,
+    item_id: str,
+    final_score: int,
+) -> Optional[dict[str, object]]:
+    workspace_path = str(workspace.resolve())
+    if final_score < 0 or final_score > 100:
+        raise ValueError("最终自评必须在 0 到 100 之间。")
+    with connect() as connection:
+        attempt = connection.execute(
+            """
+            SELECT *
+            FROM practice_attempts
+            WHERE workspace_path = ?
+              AND session_id = ?
+              AND practice_item_id = ?
+            """,
+            (workspace_path, session_id, item_id),
+        ).fetchone()
+        if attempt is None:
+            return None
+        connection.execute(
+            """
+            UPDATE practice_attempts
+            SET final_score = ?,
+                correct = ?,
+                feedback_updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ?
+              AND session_id = ?
+              AND practice_item_id = ?
+            """,
+            (
+                final_score,
+                int(final_score >= 60),
+                workspace_path,
+                session_id,
+                item_id,
+            ),
+        )
+        row = connection.execute(
+            """
+            SELECT *
+            FROM practice_attempts
+            WHERE workspace_path = ? AND practice_item_id = ?
+            """,
+            (workspace_path, item_id),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def create_gap_record(
+    workspace: Path,
+    session_id: str,
+    title: str,
+    citation: dict[str, object],
+    *,
+    practice_item_id: Optional[str] = None,
+    next_review_at: Optional[datetime] = None,
+) -> dict[str, object]:
+    gap_id = str(uuid.uuid4())
+    workspace_path = str(workspace.resolve())
+    due_at = _timestamp(next_review_at or datetime.now(timezone.utc))
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO gap_records (
+                id,
+                workspace_path,
+                session_id,
+                practice_item_id,
+                title,
+                citation_json,
+                next_review_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                gap_id,
+                workspace_path,
+                session_id,
+                practice_item_id,
+                title,
+                json.dumps(citation, ensure_ascii=False),
+                due_at,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM gap_records WHERE id = ?",
+            (gap_id,),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("Gap record was not persisted.")
+    return dict(row)
+
+
+def load_gap_record(
+    workspace: Path,
+    gap_id: str,
+) -> Optional[dict[str, object]]:
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM gap_records
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (str(workspace.resolve()), gap_id),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_gap_records(
+    workspace: Path,
+    *,
+    limit: int = 200,
+) -> list[dict[str, object]]:
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM gap_records
+            WHERE workspace_path = ?
+            ORDER BY
+                CASE WHEN next_review_at IS NULL THEN 1 ELSE 0 END,
+                next_review_at ASC,
+                created_at ASC,
+                rowid ASC
+            LIMIT ?
+            """,
+            (str(workspace.resolve()), limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_due_gap_records(
+    workspace: Path,
+    *,
+    limit: int = 20,
+    now: Optional[datetime] = None,
+) -> list[dict[str, object]]:
+    due_at = _timestamp(now or datetime.now(timezone.utc))
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM gap_records
+            WHERE workspace_path = ?
+              AND next_review_at IS NOT NULL
+              AND datetime(next_review_at) <= datetime(?)
+            ORDER BY next_review_at ASC, created_at ASC, rowid ASC
+            LIMIT ?
+            """,
+            (str(workspace.resolve()), due_at, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_review_results(
+    workspace: Path,
+    gap_id: str,
+) -> list[dict[str, object]]:
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM review_results
+            WHERE workspace_path = ? AND gap_id = ?
+            ORDER BY reviewed_at ASC, rowid ASC
+            """,
+            (str(workspace.resolve()), gap_id),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def save_review_result(
+    workspace: Path,
+    gap_id: str,
+    *,
+    answer: str,
+    feedback: str,
+    result: str,
+    reviewed_at: Optional[datetime] = None,
+) -> Optional[dict[str, object]]:
+    if result not in {"again", "pass"}:
+        raise ValueError("复习结果无效。")
+    normalized_answer = answer.strip()
+    if not normalized_answer:
+        raise ValueError("请填写复习答案。")
+
+    workspace_path = str(workspace.resolve())
+    reviewed = reviewed_at or datetime.now(timezone.utc)
+    with connect() as connection:
+        gap = connection.execute(
+            """
+            SELECT *
+            FROM gap_records
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (workspace_path, gap_id),
+        ).fetchone()
+        if gap is None:
+            return None
+
+        step = int(gap["schedule_step"])
+        if result == "pass":
+            intervals = (1, 3, 7, 14)
+            days = intervals[min(step, len(intervals) - 1)]
+            next_step = min(step + 1, len(intervals) - 1)
+        else:
+            days = 1
+            next_step = 0
+        next_review = reviewed + timedelta(days=days)
+        reviewed_value = _timestamp(reviewed)
+        next_review_value = _timestamp(next_review)
+
+        connection.execute(
+            """
+            UPDATE gap_records
+            SET schedule_step = ?,
+                next_review_at = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (next_step, next_review_value, workspace_path, gap_id),
+        )
+        review_id = str(uuid.uuid4())
+        connection.execute(
+            """
+            INSERT INTO review_results (
+                id,
+                workspace_path,
+                gap_id,
+                answer,
+                feedback,
+                result,
+                reviewed_at,
+                next_review_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                review_id,
+                workspace_path,
+                gap_id,
+                normalized_answer,
+                feedback.strip(),
+                result,
+                reviewed_value,
+                next_review_value,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM review_results WHERE id = ?",
+            (review_id,),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def update_gap_review_date(
+    workspace: Path,
+    gap_id: str,
+    next_review_at: Optional[datetime],
+) -> Optional[dict[str, object]]:
+    with connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE gap_records
+            SET next_review_at = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (
+                _timestamp(next_review_at) if next_review_at else None,
+                str(workspace.resolve()),
+                gap_id,
+            ),
+        )
+        if cursor.rowcount == 0:
+            return None
+        row = connection.execute(
+            """
+            SELECT *
+            FROM gap_records
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (str(workspace.resolve()), gap_id),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def delete_gap_record(workspace: Path, gap_id: str) -> bool:
+    workspace_path = str(workspace.resolve())
+    with connect() as connection:
+        record = connection.execute(
+            """
+            SELECT id
+            FROM gap_records
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (workspace_path, gap_id),
+        ).fetchone()
+        if record is None:
+            return False
+        connection.execute(
+            "DELETE FROM review_results WHERE workspace_path = ? AND gap_id = ?",
+            (workspace_path, gap_id),
+        )
+        connection.execute(
+            "DELETE FROM gap_records WHERE workspace_path = ? AND id = ?",
+            (workspace_path, gap_id),
+        )
+    return True
+
+
+def save_document_draft(
+    workspace: Path,
+    relative_path: str,
+    markdown: str,
+    blocks_json: str,
+    base_revision: str,
+) -> dict[str, object]:
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO document_drafts (
+                workspace_path,
+                path,
+                markdown,
+                blocks_json,
+                base_revision
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(workspace_path, path) DO UPDATE SET
+                markdown = excluded.markdown,
+                blocks_json = excluded.blocks_json,
+                base_revision = excluded.base_revision,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                str(workspace.resolve()),
+                relative_path,
+                markdown,
+                blocks_json,
+                base_revision,
+            ),
+        )
+        row = connection.execute(
+            """
+            SELECT *
+            FROM document_drafts
+            WHERE workspace_path = ? AND path = ?
+            """,
+            (str(workspace.resolve()), relative_path),
+        ).fetchone()
+
+    if row is None:
+        raise RuntimeError("Document draft was not persisted.")
+    return dict(row)
+
+
+def load_document_draft(
+    workspace: Path,
+    relative_path: str,
+) -> Optional[dict[str, object]]:
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM document_drafts
+            WHERE workspace_path = ? AND path = ?
+            """,
+            (str(workspace.resolve()), relative_path),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def delete_document_draft(workspace: Path, relative_path: str) -> None:
+    with connect() as connection:
+        connection.execute(
+            """
+            DELETE FROM document_drafts
+            WHERE workspace_path = ? AND path = ?
+            """,
+            (str(workspace.resolve()), relative_path),
+        )
+
+
+def move_document_draft(
+    workspace: Path,
+    old_path: str,
+    new_path: str,
+) -> None:
+    with connect() as connection:
+        connection.execute(
+            """
+            UPDATE document_drafts
+            SET path = ?
+            WHERE workspace_path = ? AND path = ?
+            """,
+            (new_path, str(workspace.resolve()), old_path),
+        )
+
+
+PATH_TABLES = (
+    ("document_drafts", "path"),
+    ("source_citations", "path"),
+    ("learning_sessions", "path"),
+    ("learning_session_sources", "path"),
+    ("search_sources", "path"),
+    ("embedding_entries", "path"),
+)
+JSON_TABLES = (
+    ("session_messages", "context_json"),
+    ("session_messages", "citations_json"),
+    ("practice_items", "citation_json"),
+    ("practice_attempts", "feedback_json"),
+    ("gap_records", "citation_json"),
+)
+
+
+def _mapped_relative_path(
+    value: object,
+    old_path: str,
+    new_path: str,
+    *,
+    directory: bool,
+) -> object:
+    if not isinstance(value, str):
+        return value
+    if value == old_path:
+        return new_path
+    if directory and value.startswith(f"{old_path}/"):
+        return f"{new_path}{value[len(old_path):]}"
+    return value
+
+
+def _rewrite_json_paths(
+    value: object,
+    old_path: str,
+    new_path: str,
+    *,
+    directory: bool,
+) -> tuple[object, bool]:
+    changed = False
+    if isinstance(value, dict):
+        rewritten: dict[str, object] = {}
+        for key, item in value.items():
+            if key == "path":
+                mapped = _mapped_relative_path(
+                    item,
+                    old_path,
+                    new_path,
+                    directory=directory,
+                )
+                changed = changed or mapped != item
+                rewritten[key] = mapped
+            else:
+                rewritten_item, item_changed = _rewrite_json_paths(
+                    item,
+                    old_path,
+                    new_path,
+                    directory=directory,
+                )
+                rewritten[key] = rewritten_item
+                changed = changed or item_changed
+        return rewritten, changed
+    if isinstance(value, list):
+        rewritten_list: list[object] = []
+        for item in value:
+            rewritten_item, item_changed = _rewrite_json_paths(
+                item,
+                old_path,
+                new_path,
+                directory=directory,
+            )
+            rewritten_list.append(rewritten_item)
+            changed = changed or item_changed
+        return rewritten_list, changed
+    return value, False
+
+
+def remap_relative_paths(
+    workspace: Path,
+    old_path: str,
+    new_path: str,
+    *,
+    directory: bool = False,
+) -> None:
+    """Migrate every local reference that points at a moved page or directory."""
+    workspace_path = str(workspace.resolve())
+    old_path = old_path.strip("/")
+    new_path = new_path.strip("/")
+    with connect() as connection:
+        for table, column in PATH_TABLES:
+            if directory:
+                connection.execute(
+                    f"""
+                    UPDATE {table}
+                    SET {column} = ? || substr({column}, length(?) + 1)
+                    WHERE workspace_path = ?
+                      AND ({column} = ? OR {column} LIKE ?)
+                    """,
+                    (
+                        new_path,
+                        old_path,
+                        workspace_path,
+                        old_path,
+                        f"{old_path}/%",
+                    ),
+                )
+            else:
+                connection.execute(
+                    f"""
+                    UPDATE {table}
+                    SET {column} = ?
+                    WHERE workspace_path = ? AND {column} = ?
+                    """,
+                    (new_path, workspace_path, old_path),
+                )
+
+        if directory:
+            connection.execute(
+                """
+                UPDATE search_fts
+                SET path = ? || substr(path, length(?) + 1)
+                WHERE workspace_path = ?
+                  AND (path = ? OR path LIKE ?)
+                """,
+                (new_path, old_path, workspace_path, old_path, f"{old_path}/%"),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE search_fts
+                SET path = ?
+                WHERE workspace_path = ? AND path = ?
+                """,
+                (new_path, workspace_path, old_path),
+            )
+
+        for table, column in JSON_TABLES:
+            rows = connection.execute(
+                f"""
+                SELECT rowid AS row_id, {column}
+                FROM {table}
+                WHERE workspace_path = ? AND {column} IS NOT NULL
+                """,
+                (workspace_path,),
+            ).fetchall()
+            for row in rows:
+                try:
+                    parsed = json.loads(str(row[column]))
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                rewritten, changed = _rewrite_json_paths(
+                    parsed,
+                    old_path,
+                    new_path,
+                    directory=directory,
+                )
+                if changed:
+                    connection.execute(
+                        f"UPDATE {table} SET {column} = ? WHERE rowid = ?",
+                        (json.dumps(rewritten, ensure_ascii=False), row["row_id"]),
+                    )
+
+
+WORKSPACE_TABLES = (
+    "document_drafts",
+    "source_citations",
+    "uploaded_images",
+    "search_sources",
+    "embedding_entries",
+    "search_fts",
+    "learning_sessions",
+    "session_messages",
+    "learning_session_sources",
+    "practice_sets",
+    "practice_items",
+    "practice_attempts",
+    "gap_records",
+    "review_results",
+)
+
+
+def relocate_workspace_data(old_workspace: Path, new_workspace: Path) -> None:
+    old_path = str(old_workspace.resolve())
+    new_path = str(new_workspace.resolve())
+    if old_path == new_path:
+        return
+    with connect() as connection:
+        for table in WORKSPACE_TABLES:
+            connection.execute(
+                f"UPDATE {table} SET workspace_path = ? WHERE workspace_path = ?",
+                (new_path, old_path),
+            )
+        existing = connection.execute(
+            "SELECT path FROM workspaces WHERE path = ?",
+            (new_path,),
+        ).fetchone()
+        if existing is None:
+            connection.execute(
+                "UPDATE workspaces SET path = ?, updated_at = CURRENT_TIMESTAMP WHERE path = ?",
+                (new_path, old_path),
+            )
+        else:
+            connection.execute("DELETE FROM workspaces WHERE path = ?", (old_path,))
+        connection.execute(
+            """
+            INSERT INTO app_state (key, value)
+            VALUES ('active_workspace_path', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (new_path,),
+        )
+
+
+def save_source_citation(
+    workspace: Path,
+    relative_path: str,
+    page: int,
+    quote: str,
+    pdf_sha256: str,
+    extractor_version: str,
+) -> dict[str, object]:
+    with connect() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO source_citations (
+                workspace_path,
+                path,
+                page,
+                quote,
+                pdf_sha256,
+                extractor_version
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(workspace.resolve()),
+                relative_path,
+                page,
+                quote,
+                pdf_sha256,
+                extractor_version,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM source_citations WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+
+    if row is None:
+        raise RuntimeError("Citation was not persisted.")
+    return dict(row)
+
+
+def list_source_citations(
+    workspace: Path,
+    relative_path: str,
+) -> list[dict[str, object]]:
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM source_citations
+            WHERE workspace_path = ? AND path = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (str(workspace.resolve()), relative_path),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def load_source_citation(
+    workspace: Path,
+    citation_id: int,
+) -> Optional[dict[str, object]]:
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM source_citations
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (str(workspace.resolve()), citation_id),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def load_qiniu_settings() -> Optional[dict[str, object]]:
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM qiniu_settings WHERE id = 1"
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def save_qiniu_settings(bucket: str, domain: str) -> dict[str, object]:
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO qiniu_settings (id, bucket, domain)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                bucket = excluded.bucket,
+                domain = excluded.domain,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (bucket, domain),
+        )
+        row = connection.execute(
+            "SELECT * FROM qiniu_settings WHERE id = 1"
+        ).fetchone()
+
+    if row is None:
+        raise RuntimeError("Qiniu settings were not persisted.")
+    return dict(row)
+
+
+def save_uploaded_image(
+    workspace: Path,
+    object_key: str,
+    url: str,
+    mime_type: str,
+    size: int,
+    cached_path: str | None,
+) -> dict[str, object]:
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO uploaded_images (
+                workspace_path,
+                object_key,
+                url,
+                mime_type,
+                size,
+                cached_path
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(workspace_path, url) DO UPDATE SET
+                object_key = excluded.object_key,
+                mime_type = excluded.mime_type,
+                size = excluded.size,
+                cached_path = excluded.cached_path
+            """,
+            (
+                str(workspace.resolve()),
+                object_key,
+                url,
+                mime_type,
+                size,
+                cached_path,
+            ),
+        )
+        row = connection.execute(
+            """
+            SELECT *
+            FROM uploaded_images
+            WHERE workspace_path = ? AND url = ?
+            """,
+            (str(workspace.resolve()), url),
+        ).fetchone()
+
+    if row is None:
+        raise RuntimeError("Uploaded image was not persisted.")
+    return dict(row)

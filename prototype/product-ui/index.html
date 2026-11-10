@@ -1,0 +1,1550 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>学习笔记产品原型</title>
+  <link rel="icon" href="data:,">
+  <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+  <style>
+    :root {
+      --ink: #17233d;
+      --muted: #65728a;
+      --faint: #92a0b5;
+      --line: #e0e7f2;
+      --line-strong: #cbd6e7;
+      --paper: #ffffff;
+      --canvas: #f5f8fe;
+      --soft: #edf3fc;
+      --teal: #2f6fed;
+      --teal-soft: #e8f0ff;
+      --orange: #d47720;
+      --orange-soft: #fff3e5;
+      --blue: #2f6fed;
+      --blue-soft: #eaf1ff;
+      --yellow: #bf8618;
+      --yellow-soft: #fff7e2;
+      --shadow: 0 16px 44px rgba(38, 72, 133, .12);
+      --radius: 8px;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      color: var(--ink);
+      background: var(--canvas);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      letter-spacing: 0;
+    }
+
+    button, input, textarea { font: inherit; }
+    button { color: inherit; }
+    svg { width: 18px; height: 18px; stroke-width: 1.8; }
+    .icon-btn {
+      width: 32px;
+      height: 32px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 0;
+      border-radius: 7px;
+      background: transparent;
+      color: var(--muted);
+    }
+    .icon-btn:hover { background: var(--soft); color: var(--ink); }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 24px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .pill.teal { color: #2358c7; background: var(--teal-soft); }
+    .pill.orange { color: #a65d16; background: var(--orange-soft); }
+    .pill.blue { color: #245bc9; background: var(--blue-soft); }
+    .pill.neutral { color: var(--muted); background: #f0f4fb; }
+    .muted { color: var(--muted); }
+    .tiny { font-size: 11px; }
+    .small { font-size: 12px; }
+    .strong { font-weight: 650; }
+    .divider { height: 1px; background: var(--line); }
+    .logo {
+      width: 30px;
+      height: 30px;
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      background: #2557c8;
+      color: white;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: -.3px;
+    }
+    .avatar {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: #dce8ff;
+      color: #2458bd;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .screen { display: none; min-height: 100vh; }
+    body[data-variant="A"] .screen-a,
+    body[data-variant="B"] .screen-b,
+    body[data-variant="C"] .screen-c { display: flex; }
+
+    /* Shared top bar */
+    .topbar {
+      height: 56px;
+      flex: 0 0 56px;
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,.97);
+    }
+    .workspace-switch {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-left: 10px;
+      padding: 6px 8px;
+      border: 1px solid transparent;
+      border-radius: 7px;
+    }
+    .workspace-switch:hover { border-color: var(--line); background: #f8faff; }
+    .workspace-name { font-size: 13px; font-weight: 700; }
+    .workspace-sub { font-size: 10px; color: var(--faint); margin-top: 1px; }
+    .top-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+    .search-trigger {
+      height: 34px;
+      min-width: 270px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #f8faff;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .kbd {
+      margin-left: auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      color: var(--faint);
+      font-size: 11px;
+    }
+    .kbd span {
+      min-width: 18px;
+      height: 19px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--line-strong);
+      border-radius: 4px;
+      background: white;
+    }
+
+    /* Variant A */
+    .app-a { flex: 1; flex-direction: column; overflow: hidden; }
+    .layout-a {
+      min-height: 0;
+      flex: 1;
+      display: grid;
+      grid-template-columns: 54px 232px minmax(480px, 1fr) 408px;
+    }
+    .rail {
+      border-right: 1px solid var(--line);
+      background: #fbfcff;
+      padding: 12px 8px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 9px;
+    }
+    .rail .active { background: var(--teal-soft); color: var(--teal); }
+    .rail-bottom { margin-top: auto; display: grid; gap: 8px; }
+    .library-a {
+      min-width: 0;
+      border-right: 1px solid var(--line);
+      background: #f9fbff;
+      display: flex;
+      flex-direction: column;
+    }
+    .library-head {
+      padding: 18px 16px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .section-label {
+      font-size: 10px;
+      line-height: 1;
+      color: var(--faint);
+      text-transform: uppercase;
+      font-weight: 750;
+      letter-spacing: .7px;
+    }
+    .library-scroll { overflow: hidden; padding: 0 8px 14px; }
+    .tree-row {
+      height: 31px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      color: #43506a;
+    }
+    .tree-row svg { width: 15px; height: 15px; color: #7c8ba3; }
+    .tree-row.active { background: #eaf1ff; color: #1d4ed8; font-weight: 650; }
+    .tree-row.active svg { color: var(--teal); }
+    .tree-row .count { margin-left: auto; color: var(--faint); font-size: 10px; }
+    .tree-indent { padding-left: 27px; }
+    .tree-gap { height: 14px; }
+    .library-note {
+      margin: 10px 8px 0;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: white;
+      font-size: 11px;
+      line-height: 1.5;
+    }
+    .library-note .title { font-weight: 650; margin-bottom: 4px; }
+    .editor-a {
+      min-width: 0;
+      background: #f7faff;
+      overflow: hidden;
+      position: relative;
+    }
+    .doc-shell {
+      height: 100%;
+      max-width: 790px;
+      margin: 0 auto;
+      background: white;
+      border-left: 1px solid var(--line);
+      border-right: 1px solid var(--line);
+      position: relative;
+      overflow: hidden;
+    }
+    .doc-top {
+      height: 54px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 24px;
+      border-bottom: 1px solid #eef2f8;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .doc-top .right { margin-left: auto; display: flex; gap: 4px; }
+    .doc-body { padding: 34px 62px 120px; overflow: hidden; }
+    .doc-kicker { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+    .doc-title {
+      margin: 0 0 13px;
+      font-family: ui-serif, "Songti SC", "STSong", Georgia, serif;
+      font-size: 34px;
+      line-height: 1.22;
+      font-weight: 650;
+      letter-spacing: -.7px;
+    }
+    .doc-meta { color: var(--muted); font-size: 11px; display: flex; gap: 12px; margin-bottom: 27px; }
+    .doc-lead {
+      font-family: ui-serif, "Songti SC", "STSong", Georgia, serif;
+      font-size: 17px;
+      line-height: 1.9;
+      color: #34425f;
+      margin: 0 0 19px;
+    }
+    .doc-h2 {
+      margin: 30px 0 10px;
+      font-family: ui-serif, "Songti SC", "STSong", Georgia, serif;
+      font-size: 21px;
+      line-height: 1.4;
+    }
+    .doc-p {
+      margin: 0 0 16px;
+      font-size: 14px;
+      line-height: 1.9;
+      color: #3b4965;
+    }
+    .selection {
+      background: #deebff;
+      border-bottom: 1px solid #8eb5ff;
+      padding: 1px 2px;
+    }
+    .quote-note {
+      margin: 22px 0;
+      display: grid;
+      grid-template-columns: 3px 1fr;
+      gap: 14px;
+      padding: 13px 16px;
+      background: #f5f8fe;
+      border-radius: 5px;
+    }
+    .quote-note .bar { background: var(--teal); border-radius: 2px; }
+    .quote-note p { margin: 0; color: #58677f; font-size: 12px; line-height: 1.7; }
+    .inline-tutor {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      margin: -1px 0 -1px 8px;
+      padding: 2px 7px;
+      border: 1px solid #b7ccf7;
+      border-radius: 999px;
+      color: #2458c4;
+      background: #f2f7ff;
+      font-size: 10px;
+      font-weight: 650;
+      vertical-align: 2px;
+    }
+    .inline-tutor svg { width: 12px; height: 12px; }
+    .attention-figure {
+      margin: 25px 0 20px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      overflow: hidden;
+    }
+    .figure-head {
+      height: 38px;
+      display: flex;
+      align-items: center;
+      padding: 0 13px;
+      background: #f8faff;
+      border-bottom: 1px solid var(--line);
+      font-size: 11px;
+      font-weight: 650;
+    }
+    .heatmap {
+      padding: 18px 20px 16px;
+      display: grid;
+      grid-template-columns: 42px repeat(5, 1fr);
+      gap: 5px;
+      background: #fcfdff;
+    }
+    .heatmap span { font-size: 9px; color: var(--faint); display: grid; place-items: center; }
+    .cell { height: 24px; border-radius: 3px; background: #edf3ff; }
+    .cell:nth-child(3n) { background: #b9cef2; }
+    .cell:nth-child(5n) { background: #5f8fe4; }
+    .figure-caption { padding: 0 13px 12px; color: var(--muted); font-size: 10px; }
+    .block-controls {
+      position: absolute;
+      left: -38px;
+      top: 5px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      color: #9aa8bd;
+    }
+    .block-wrap { position: relative; }
+    .tutor-a {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      border-left: 1px solid var(--line);
+      background: #fbfcff;
+    }
+    .tutor-head {
+      height: 56px;
+      padding: 0 14px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      border-bottom: 1px solid var(--line);
+    }
+    .tutor-title { font-size: 13px; font-weight: 700; }
+    .tutor-status { font-size: 10px; color: var(--muted); margin-top: 2px; }
+    .tutor-head-actions { margin-left: auto; display: flex; gap: 2px; }
+    .tutor-scroll { flex: 1; overflow: hidden; padding: 14px 14px 12px; }
+    .context-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+    .context-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      height: 26px;
+      padding: 0 8px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: white;
+      font-size: 10px;
+      color: #55647c;
+    }
+    .context-chip svg { width: 12px; height: 12px; }
+    .user-msg {
+      margin: 6px 0 13px 28px;
+      padding: 10px 12px;
+      background: #edf3fc;
+      border-radius: 8px 8px 2px 8px;
+      font-size: 12px;
+      line-height: 1.65;
+    }
+    .grounded-msg {
+      padding-bottom: 13px;
+      margin-bottom: 14px;
+      border-bottom: 1px solid #eef2f8;
+    }
+    .answer-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: #2458c4;
+      font-size: 10px;
+      font-weight: 750;
+      margin-bottom: 9px;
+    }
+    .answer-label svg { width: 13px; height: 13px; }
+    .answer-body { font-size: 12px; line-height: 1.78; color: #3b4964; }
+    .answer-body p { margin: 0 0 10px; }
+    .citation {
+      display: inline-flex;
+      align-items: center;
+      height: 18px;
+      margin: 0 2px;
+      padding: 0 5px;
+      border-radius: 4px;
+      background: var(--blue-soft);
+      color: #255bc9;
+      font-size: 9px;
+      font-weight: 700;
+      vertical-align: 1px;
+    }
+    .evidence {
+      display: grid;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .evidence-row {
+      display: grid;
+      grid-template-columns: 17px 1fr auto;
+      gap: 7px;
+      align-items: start;
+      padding: 8px 9px;
+      border: 1px solid #dce6f5;
+      border-radius: 6px;
+      background: #f8faff;
+      font-size: 10px;
+      line-height: 1.45;
+    }
+    .evidence-row svg { width: 14px; height: 14px; color: var(--blue); }
+    .evidence-row .more { color: var(--muted); }
+    .practice-suggest {
+      margin-top: 12px;
+      border: 1px solid #eeddb6;
+      border-radius: 7px;
+      background: #fffbf3;
+      padding: 11px 12px;
+    }
+    .practice-title { display: flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 700; }
+    .practice-title svg { width: 14px; color: #a8790b; }
+    .practice-copy { color: #77684a; font-size: 10px; line-height: 1.55; margin: 6px 0 9px; }
+    .small-btn {
+      border: 1px solid var(--line-strong);
+      border-radius: 6px;
+      background: white;
+      height: 28px;
+      padding: 0 9px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 10px;
+      font-weight: 650;
+    }
+    .small-btn.primary { border-color: var(--teal); background: var(--teal); color: white; }
+    .composer-a {
+      margin: 0 12px 12px;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: white;
+      box-shadow: 0 4px 14px rgba(44,75,130,.07);
+    }
+    .composer-text { padding: 11px 12px 8px; color: #98a5b8; font-size: 11px; }
+    .composer-tools { display: flex; align-items: center; padding: 6px 7px; border-top: 1px solid #eef2f8; }
+    .composer-tools .send {
+      margin-left: auto;
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      border: 0;
+      border-radius: 6px;
+      color: white;
+      background: var(--teal);
+    }
+    .composer-tools .send svg { width: 14px; }
+
+    /* Variant B */
+    .screen-b { flex-direction: column; background: #edf3fc; }
+    .topbar-b {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      background: #f8faff;
+    }
+    .crumb-b {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .crumb-b .current { color: var(--ink); font-weight: 650; }
+    .topbar-b .top-actions { margin: 0; justify-self: end; }
+    .topbar-left-b { display: flex; align-items: center; gap: 10px; }
+    .reader-layout {
+      flex: 1;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 230px minmax(560px, 1fr) 366px;
+    }
+    .outline-b {
+      padding: 18px 13px;
+      background: #f5f8fe;
+      border-right: 1px solid var(--line);
+      overflow: hidden;
+    }
+    .outline-title { display: flex; align-items: center; justify-content: space-between; margin: 0 4px 15px; }
+    .thumb-list { display: grid; gap: 10px; }
+    .thumb {
+      display: grid;
+      grid-template-columns: 48px 1fr;
+      gap: 9px;
+      padding: 7px;
+      border: 1px solid transparent;
+      border-radius: 7px;
+    }
+    .thumb.active { border-color: #b7ccf7; background: #eaf1ff; }
+    .thumb-page {
+      height: 61px;
+      border: 1px solid #dbe3ef;
+      border-radius: 3px;
+      background: white;
+      padding: 8px 6px;
+    }
+    .thumb-line { height: 3px; margin-bottom: 4px; border-radius: 2px; background: #dbe3f0; }
+    .thumb-line.short { width: 60%; }
+    .thumb-line.dark { width: 73%; background: #a7b4c9; }
+    .thumb-info { padding-top: 1px; font-size: 10px; line-height: 1.35; }
+    .thumb-info .label { margin-bottom: 3px; font-weight: 650; }
+    .thumb-info .meta { color: var(--faint); font-size: 9px; }
+    .outline-section { margin-top: 23px; }
+    .outline-item {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 29px;
+      padding: 0 7px;
+      border-radius: 5px;
+      color: #56657d;
+      font-size: 10px;
+    }
+    .outline-item.active { color: #1d4ed8; background: #e7efff; font-weight: 650; }
+    .outline-item .marker { width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+    .pdf-stage { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+    .pdf-toolbar {
+      height: 46px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 0 14px;
+      border-bottom: 1px solid var(--line);
+      background: #f7f9ff;
+    }
+    .toolbar-group { display: flex; align-items: center; gap: 2px; padding-right: 8px; border-right: 1px solid var(--line); }
+    .toolbar-group:last-child { border: 0; margin-left: auto; padding-right: 0; }
+    .page-pill {
+      height: 25px;
+      display: flex;
+      align-items: center;
+      padding: 0 8px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: white;
+      font-size: 10px;
+      color: var(--muted);
+    }
+    .pdf-scroll { flex: 1; overflow: hidden; padding: 19px 28px 40px; display: flex; justify-content: center; }
+    .pdf-page {
+      width: 640px;
+      min-height: 850px;
+      background: white;
+      box-shadow: var(--shadow);
+      padding: 50px 58px 55px;
+      position: relative;
+    }
+    .pdf-page::after {
+      content: "14";
+      position: absolute;
+      right: 45px;
+      bottom: 26px;
+      font-size: 10px;
+      color: #98a5b8;
+    }
+    .paper-eyebrow { font: 600 9px/1.4 -apple-system, sans-serif; letter-spacing: 1.3px; color: #74839c; text-transform: uppercase; }
+    .paper-title {
+      margin: 8px 0 23px;
+      font-family: ui-serif, "Songti SC", Georgia, serif;
+      font-size: 26px;
+      line-height: 1.3;
+      font-weight: 650;
+    }
+    .paper-abstract {
+      margin: 0 0 24px;
+      padding: 15px 17px;
+      border-left: 2px solid #b8cbf0;
+      background: #f6f9ff;
+      font-family: ui-serif, "Songti SC", Georgia, serif;
+      font-size: 12px;
+      line-height: 1.75;
+      color: #465470;
+    }
+    .paper-two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      font-family: ui-serif, "Songti SC", Georgia, serif;
+      font-size: 10.5px;
+      line-height: 1.8;
+      color: #3d4a65;
+    }
+    .paper-two-col p { margin: 0 0 10px; }
+    .paper-two-col h3 { font: 700 13px/1.4 -apple-system, sans-serif; margin: 4px 0 10px; }
+    .paper-selected {
+      background: #dbe9ff;
+      outline: 2px solid rgba(47,111,237,.14);
+    }
+    .paper-figure {
+      grid-column: 1 / -1;
+      padding: 10px;
+      border: 1px solid #dfe6f2;
+      background: #fbfcff;
+    }
+    .attention-bars { height: 103px; display: flex; align-items: end; gap: 8px; padding: 13px 18px 5px; }
+    .attention-bars span { flex: 1; background: #6f97e8; border-radius: 2px 2px 0 0; }
+    .attention-bars span:nth-child(2n) { background: #c7d9f8; }
+    .paper-caption { font: 9px/1.5 -apple-system, sans-serif; color: #6b7890; padding-top: 4px; }
+    .reader-assist {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      background: #fbfcff;
+      border-left: 1px solid var(--line);
+    }
+    .assist-tabs {
+      height: 53px;
+      display: flex;
+      align-items: end;
+      gap: 18px;
+      padding: 0 17px;
+      border-bottom: 1px solid var(--line);
+    }
+    .assist-tab {
+      height: 53px;
+      display: flex;
+      align-items: center;
+      border-bottom: 2px solid transparent;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 650;
+    }
+    .assist-tab.active { border-color: var(--teal); color: var(--ink); }
+    .assist-tabs .icon-btn { margin-left: auto; margin-bottom: 10px; }
+    .selection-card {
+      margin: 14px;
+      padding: 12px 12px 11px;
+      border: 1px solid #cbdaf2;
+      border-radius: 7px;
+      background: #f2f7ff;
+    }
+    .selection-card .quote {
+      margin: 7px 0 0;
+      font-family: ui-serif, "Songti SC", Georgia, serif;
+      font-size: 12px;
+      line-height: 1.65;
+      color: #465570;
+    }
+    .assist-body { flex: 1; padding: 1px 14px; overflow: hidden; }
+    .ask-path {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin: 5px 0 16px;
+      color: var(--faint);
+      font-size: 10px;
+    }
+    .ask-path svg { width: 13px; height: 13px; }
+    .assist-answer {
+      padding: 14px;
+      border: 1px solid #dfe7f4;
+      border-radius: 7px;
+      background: white;
+    }
+    .assist-answer h4 { margin: 0 0 8px; font-size: 12px; }
+    .assist-answer p { margin: 0 0 10px; color: #4c5a73; font-size: 11px; line-height: 1.7; }
+    .citation-list { display: grid; gap: 7px; margin-top: 12px; }
+    .citation-item {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 7px 8px;
+      border-radius: 5px;
+      background: var(--blue-soft);
+      color: #275dbd;
+      font-size: 9px;
+    }
+    .citation-item svg { width: 12px; }
+    .floating-ask {
+      margin: 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      height: 42px;
+      padding: 0 12px;
+      border: 1px solid #bdcbe1;
+      border-radius: 8px;
+      background: white;
+      box-shadow: 0 7px 22px rgba(43,72,126,.10);
+      color: #98a5b8;
+      font-size: 11px;
+    }
+    .floating-ask .send { margin-left: auto; color: var(--teal); }
+
+    /* Variant C */
+    .screen-c { flex-direction: column; background: #f5f8fe; }
+    .cockpit-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: 220px minmax(0, 1fr); }
+    .cockpit-nav {
+      border-right: 1px solid var(--line);
+      background: #fbfcff;
+      padding: 15px 10px;
+      display: flex;
+      flex-direction: column;
+    }
+    .nav-row {
+      min-height: 34px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 0 9px;
+      border-radius: 6px;
+      color: #58677f;
+      font-size: 11px;
+    }
+    .nav-row.active { background: #e8f0ff; color: #1d4ed8; font-weight: 700; }
+    .nav-row svg { width: 15px; height: 15px; }
+    .nav-row .badge {
+      margin-left: auto;
+      min-width: 19px;
+      height: 19px;
+      padding: 0 5px;
+      border-radius: 999px;
+      display: grid;
+      place-items: center;
+      background: #edf2fa;
+      color: #69768c;
+      font-size: 9px;
+    }
+    .nav-row.active .badge { color: #1d4ed8; background: #d8e6ff; }
+    .cockpit-nav .section-label { margin: 20px 9px 7px; }
+    .mini-workspace {
+      margin-top: auto;
+      padding: 10px 9px;
+      border-top: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 10px;
+    }
+    .dashboard-c {
+      overflow: hidden;
+      padding: 23px 28px 28px;
+    }
+    .dash-head {
+      display: flex;
+      align-items: end;
+      margin-bottom: 20px;
+    }
+    .dash-head h1 {
+      margin: 0;
+      font-family: ui-serif, "Songti SC", Georgia, serif;
+      font-size: 28px;
+      line-height: 1.2;
+    }
+    .dash-head .date { margin-top: 5px; color: var(--muted); font-size: 11px; }
+    .dash-head .actions { margin-left: auto; display: flex; gap: 7px; }
+    .primary-btn {
+      height: 32px;
+      padding: 0 11px;
+      border: 1px solid var(--teal);
+      border-radius: 6px;
+      background: var(--teal);
+      color: white;
+      font-size: 10px;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .primary-btn svg { width: 13px; }
+    .stats-band {
+      min-height: 92px;
+      display: grid;
+      grid-template-columns: 1.35fr repeat(3, 1fr);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: white;
+      overflow: hidden;
+      margin-bottom: 22px;
+    }
+    .stats-lead {
+      padding: 17px 20px;
+      background: #173d7a;
+      color: white;
+    }
+    .stats-lead .eyebrow { color: #a9c2ff; font-size: 9px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }
+    .stats-lead .number { margin-top: 7px; font-size: 25px; line-height: 1; font-weight: 700; }
+    .stats-lead .caption { margin-top: 7px; color: #cfddff; font-size: 10px; }
+    .stat-cell { padding: 17px 18px; border-left: 1px solid var(--line); }
+    .stat-cell svg { color: var(--teal); width: 15px; }
+    .stat-cell .number { margin: 7px 0 2px; font-size: 21px; font-weight: 700; }
+    .stat-cell .label { color: var(--muted); font-size: 10px; }
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: minmax(440px, 1.15fr) minmax(340px, .85fr);
+      gap: 18px;
+    }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: white;
+      overflow: hidden;
+    }
+    .panel-head {
+      height: 48px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 16px;
+      border-bottom: 1px solid #eef2f8;
+    }
+    .panel-head h2 { margin: 0; font-size: 13px; }
+    .panel-head .count { color: var(--muted); font-size: 10px; }
+    .panel-head .link { margin-left: auto; color: var(--teal); font-size: 10px; font-weight: 650; }
+    .review-list { padding: 5px 0; }
+    .review-row {
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      min-height: 60px;
+      padding: 8px 16px;
+      border-bottom: 1px solid #f0f3f9;
+    }
+    .review-row:last-child { border-bottom: 0; }
+    .review-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+      display: grid;
+      place-items: center;
+      background: var(--yellow-soft);
+      color: #a97a0b;
+    }
+    .review-icon.blue { background: var(--blue-soft); color: var(--blue); }
+    .review-icon.orange { background: var(--orange-soft); color: var(--orange); }
+    .review-icon svg { width: 14px; }
+    .review-title { font-size: 11px; font-weight: 650; line-height: 1.35; }
+    .review-meta { margin-top: 3px; display: flex; align-items: center; gap: 7px; color: var(--faint); font-size: 9px; }
+    .review-btn {
+      height: 27px;
+      padding: 0 9px;
+      border: 1px solid var(--line-strong);
+      border-radius: 5px;
+      background: white;
+      font-size: 9px;
+      font-weight: 650;
+    }
+    .gaps-list { padding: 12px 15px 8px; }
+    .gap-item {
+      padding: 0 0 13px;
+      margin-bottom: 13px;
+      border-bottom: 1px solid #eef2f8;
+    }
+    .gap-item:last-child { border-bottom: 0; margin-bottom: 0; }
+    .gap-title { font-size: 10px; font-weight: 650; line-height: 1.45; }
+    .gap-source { margin-top: 5px; color: var(--muted); font-size: 9px; display: flex; align-items: center; gap: 5px; }
+    .gap-source svg { width: 11px; }
+    .continue-panel { margin-top: 18px; }
+    .continue-body { padding: 13px 16px 15px; }
+    .continue-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 0;
+      border-bottom: 1px solid #f0f3f9;
+    }
+    .continue-row:last-child { border: 0; }
+    .page-icon {
+      width: 30px;
+      height: 36px;
+      border: 1px solid #dce4f0;
+      border-radius: 3px;
+      display: grid;
+      place-items: center;
+      color: #7185a4;
+      background: #fbfcff;
+    }
+    .page-icon svg { width: 14px; }
+    .continue-title { font-size: 10px; font-weight: 650; }
+    .continue-sub { color: var(--faint); font-size: 9px; margin-top: 3px; }
+    .continue-row .icon-btn { margin-left: auto; }
+    .review-goal {
+      margin-top: 18px;
+      border: 1px solid #d4e0f2;
+      border-radius: 8px;
+      padding: 14px 15px;
+      background: #f1f6ff;
+    }
+    .goal-row { display: flex; align-items: center; gap: 8px; font-size: 10px; }
+    .goal-row strong { font-size: 11px; }
+    .progress { height: 5px; margin-top: 11px; border-radius: 99px; background: #dbe5f5; overflow: hidden; }
+    .progress span { display: block; width: 58%; height: 100%; background: var(--teal); }
+    .goal-meta { margin-top: 7px; color: var(--muted); font-size: 9px; }
+
+    /* Prototype switcher */
+    .prototype-switcher {
+      position: fixed;
+      left: 50%;
+      bottom: 22px;
+      z-index: 1000;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      height: 42px;
+      padding: 0 8px;
+      border: 1px solid #142342;
+      border-radius: 999px;
+      background: #17233d;
+      color: white;
+      box-shadow: 0 12px 32px rgba(22, 39, 72, .28);
+    }
+    .prototype-switcher button {
+      width: 29px;
+      height: 29px;
+      display: grid;
+      place-items: center;
+      border: 0;
+      border-radius: 50%;
+      background: #2d3b58;
+      color: white;
+    }
+    .switcher-label { min-width: 142px; text-align: center; font-size: 11px; font-weight: 650; }
+    .switcher-label span { color: #9fb0cf; font-weight: 500; }
+    body.capture .prototype-switcher { display: none; }
+
+    @media (max-width: 1180px) {
+      .layout-a { grid-template-columns: 48px 210px minmax(420px, 1fr); }
+      .tutor-a { display: none; }
+      .reader-layout { grid-template-columns: 190px minmax(500px, 1fr) 330px; }
+      .cockpit-layout { grid-template-columns: 190px minmax(0, 1fr); }
+    }
+  </style>
+</head>
+<body data-variant="A">
+  <!--
+    Throwaway UI prototype. Three structural directions share one route:
+    A notebook desk, B reading focus, C learning cockpit.
+    Switch with ?variant=A|B|C. Add &capture=1 for screenshots without the switcher.
+  -->
+
+  <section class="screen screen-a">
+    <div class="app-a">
+      <header class="topbar">
+        <div class="logo">学</div>
+        <button class="workspace-switch">
+          <div>
+            <div class="workspace-name">认知科学与学习</div>
+            <div class="workspace-sub">本地笔记本空间</div>
+          </div>
+          <i data-lucide="chevrons-up-down" style="width:14px"></i>
+        </button>
+        <div class="top-actions">
+          <button class="search-trigger">
+            <i data-lucide="search"></i>
+            <span>搜索页面、正文和学习记录</span>
+            <span class="kbd"><span>⌘</span><span>K</span></span>
+          </button>
+          <button class="icon-btn" aria-label="同步状态"><i data-lucide="cloud-off"></i></button>
+          <div class="avatar">王</div>
+        </div>
+      </header>
+
+      <div class="layout-a">
+        <nav class="rail">
+          <button class="icon-btn active" aria-label="工作空间"><i data-lucide="library"></i></button>
+          <button class="icon-btn" aria-label="Review"><i data-lucide="refresh-ccw-dot"></i></button>
+          <button class="icon-btn" aria-label="Search"><i data-lucide="search"></i></button>
+          <div class="rail-bottom">
+            <button class="icon-btn" aria-label="Help"><i data-lucide="circle-help"></i></button>
+            <button class="icon-btn" aria-label="Settings"><i data-lucide="settings"></i></button>
+          </div>
+        </nav>
+
+        <aside class="library-a">
+          <div class="library-head">
+            <span class="section-label">资料库</span>
+            <div style="display:flex;gap:2px">
+              <button class="icon-btn" aria-label="新建页面"><i data-lucide="square-pen"></i></button>
+              <button class="icon-btn" aria-label="更多"><i data-lucide="ellipsis"></i></button>
+            </div>
+          </div>
+          <div class="library-scroll">
+            <div class="tree-row"><i data-lucide="chevron-down"></i><i data-lucide="book-open"></i><span>课程与论文</span><span class="count">12</span></div>
+            <div class="tree-row tree-indent"><i data-lucide="file-text"></i><span>注意力机制如何塑造工作记忆</span></div>
+            <div class="tree-row tree-indent"><i data-lucide="file-text"></i><span>多重记忆系统比较</span></div>
+            <div class="tree-row tree-indent"><i data-lucide="file-text"></i><span>认知负荷与学习设计</span></div>
+            <div class="tree-gap"></div>
+            <div class="tree-row"><i data-lucide="chevron-right"></i><i data-lucide="folder"></i><span>课堂资料</span><span class="count">8</span></div>
+            <div class="tree-row"><i data-lucide="chevron-right"></i><i data-lucide="folder"></i><span>研究论文</span><span class="count">24</span></div>
+            <div class="tree-gap"></div>
+            <div class="tree-row"><i data-lucide="calendar-days"></i><span>每日笔记</span><span class="count">今天</span></div>
+            <div class="tree-row"><i data-lucide="tags"></i><span>标签</span></div>
+            <div class="tree-gap"></div>
+            <div class="section-label" style="padding:3px 8px 8px">最近笔记</div>
+            <div class="tree-row"><i data-lucide="file-clock"></i><span>认知负荷的三个来源</span></div>
+            <div class="tree-row"><i data-lucide="file-clock"></i><span>巴德利模型整理</span></div>
+            <div class="tree-row"><i data-lucide="file-clock"></i><span>第 4 章复习提纲</span></div>
+          </div>
+          <div class="library-note">
+            <div class="title">当前工作区</div>
+            <div class="muted">74 个页面 · 最近索引 2 分钟前</div>
+          </div>
+        </aside>
+
+        <main class="editor-a">
+          <div class="doc-shell">
+            <div class="doc-top">
+              <i data-lucide="folder"></i>
+              <span>课程与论文</span>
+              <i data-lucide="chevron-right" style="width:12px"></i>
+              <span>注意力机制如何塑造工作记忆</span>
+              <div class="right">
+                <span class="pill teal"><i data-lucide="check" style="width:11px"></i> 已保存</span>
+                <button class="icon-btn" aria-label="页面历史"><i data-lucide="history"></i></button>
+                <button class="icon-btn" aria-label="更多"><i data-lucide="ellipsis"></i></button>
+              </div>
+            </div>
+            <div class="doc-body">
+              <div class="doc-kicker">
+                <span class="pill neutral">认知心理学</span>
+                <span class="pill blue">注意力</span>
+                <span class="pill teal">已读 68%</span>
+              </div>
+              <h1 class="doc-title">注意力机制如何塑造工作记忆</h1>
+              <div class="doc-meta">
+                <span>更新于 12 分钟前</span>
+                <span>关联 2 份文献</span>
+                <span>3 个讨论线程</span>
+              </div>
+
+              <p class="doc-lead">
+                工作记忆并不是一个固定容量的“盒子”。注意力通过选择、抑制与刷新，把有限的资源持续分配给当前目标相关的表征。
+              </p>
+
+              <div class="block-wrap">
+                <div class="block-controls">
+                  <i data-lucide="grip-vertical" style="width:14px"></i>
+                  <i data-lucide="plus" style="width:14px"></i>
+                </div>
+                <h2 class="doc-h2">1. 容量限制来自资源竞争</h2>
+                <p class="doc-p">
+                  经典模型将工作记忆描述为容量有限的中央执行系统。新的研究发现，
+                  <span class="selection">限制更可能来自多个任务对同一注意力资源的竞争，而不只是存储槽位数量</span>
+                  <button class="inline-tutor"><i data-lucide="sparkles"></i> 已提问</button>。
+                </p>
+                <div class="quote-note">
+                  <div class="bar"></div>
+                  <p><strong>我的理解：</strong>如果资源被重新分配，表现下降不一定意味着信息已经从记忆中消失，而可能只是暂时无法被优先访问。</p>
+                </div>
+              </div>
+
+              <h2 class="doc-h2">2. 自上而下与自下而上的控制</h2>
+              <p class="doc-p">
+                目标相关信息通过自上而下的控制获得更高权重，显著刺激则可能捕获注意力。二者并不是简单的“好/坏”对立，而是在不同任务阶段共同调节信息进入工作记忆的稳定性。
+              </p>
+
+              <div class="attention-figure">
+                <div class="figure-head">
+                  <i data-lucide="image" style="width:14px;margin-right:7px"></i>
+                  图 4.2 · 目标相关性与记忆保持率
+                  <span style="margin-left:auto;color:var(--muted);font-weight:500">来自 注意力与工作记忆</span>
+                </div>
+                <div class="heatmap">
+                  <span></span><span>低</span><span>中</span><span>高</span><span>干扰</span><span>目标</span>
+                  <span>0 秒</span><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+                  <span>2 秒</span><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+                  <span>4 秒</span><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+                </div>
+                <div class="figure-caption">颜色越深表示目标相关表征在延迟阶段的保持概率越高。</div>
+              </div>
+
+              <h2 class="doc-h2">3. 对学习策略的启示</h2>
+              <p class="doc-p">
+                与其一次插入更多信息，不如减少竞争性线索，并在学习后主动重建关键关系。这解释了为什么“间隔 + 回忆”通常优于连续重读。
+              </p>
+            </div>
+          </div>
+        </main>
+
+        <aside class="tutor-a">
+          <div class="tutor-head">
+            <div class="logo" style="width:28px;height:28px;background:#dce8ff;color:#2458bd">教</div>
+            <div>
+              <div class="tutor-title">资料私教</div>
+              <div class="tutor-status"><span style="color:#2f6fed">●</span> 基于当前选区和 2 个固定来源</div>
+            </div>
+            <div class="tutor-head-actions">
+              <button class="icon-btn" aria-label="上下文"><i data-lucide="panel-right"></i></button>
+              <button class="icon-btn" aria-label="更多"><i data-lucide="ellipsis"></i></button>
+            </div>
+          </div>
+          <div class="tutor-scroll">
+            <div class="context-row">
+              <span class="context-chip"><i data-lucide="file-text"></i>当前页面</span>
+              <span class="context-chip"><i data-lucide="file"></i>注意力与工作记忆</span>
+              <span class="context-chip"><i data-lucide="link"></i>注意力综述 §2.3</span>
+              <button class="context-chip" style="border-style:dashed"><i data-lucide="plus"></i>固定资料</button>
+            </div>
+
+            <div class="user-msg">为什么容量限制不是单纯由神经元数量决定？</div>
+
+            <div class="grounded-msg">
+              <div class="answer-label"><i data-lucide="badge-check"></i> 有据回答</div>
+              <div class="answer-body">
+                <p>
+                  关键差别在于<strong>可用资源</strong>与<strong>资源分配</strong>。神经元数量提供的是潜在存储基础，但当前表现取决于注意力如何把资源分配给目标表征
+                  <span class="citation">文献第14页</span><span class="citation">综述 §2.3</span>。
+                </p>
+                <p>
+                  当干扰刺激竞争同一资源时，即使信息仍然存在，也可能暂时无法被稳定访问。这更接近“优先级和带宽”问题，而不是简单的槽位耗尽。
+                </p>
+              </div>
+              <div class="evidence">
+                <div class="evidence-row">
+                  <i data-lucide="file-text"></i>
+                  <span><strong>注意力与工作记忆 · 第14页</strong><br>资源竞争模型中，目标与干扰项共享同一有限资源池……</span>
+                  <i data-lucide="arrow-up-right" class="more" style="width:12px"></i>
+                </div>
+                <div class="evidence-row">
+                  <i data-lucide="book-open"></i>
+                  <span><strong>注意力机制综述 · §2.3</strong><br>中央执行系统通过刷新与抑制重新分配当前目标权重。</span>
+                  <i data-lucide="arrow-up-right" class="more" style="width:12px"></i>
+                </div>
+              </div>
+              <div style="display:flex;gap:6px;margin-top:10px">
+                <button class="small-btn"><i data-lucide="list-tree" style="width:12px"></i> 提供线索</button>
+                <button class="small-btn"><i data-lucide="message-circle-question" style="width:12px"></i> 换个角度</button>
+                <button class="small-btn"><i data-lucide="copy" style="width:12px"></i></button>
+              </div>
+            </div>
+
+            <div class="practice-suggest">
+              <div class="practice-title"><i data-lucide="target"></i> 现在适合检验理解</div>
+              <div class="practice-copy">根据刚才的讨论生成 3 道短答题，检查“资源竞争”与“容量限制”的区别。</div>
+              <button class="small-btn primary"><i data-lucide="sparkles" style="width:12px"></i> 考考我</button>
+            </div>
+          </div>
+          <div class="composer-a">
+            <div class="composer-text">追问这段内容，或粘贴自己的解释…</div>
+            <div class="composer-tools">
+              <button class="icon-btn" aria-label="添加资料"><i data-lucide="plus"></i></button>
+              <button class="icon-btn" aria-label="附件"><i data-lucide="paperclip"></i></button>
+              <span class="tiny muted" style="margin-left:4px">引导模式</span>
+              <button class="send" aria-label="发送"><i data-lucide="arrow-up"></i></button>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <section class="screen screen-b">
+    <header class="topbar topbar-b">
+      <div class="topbar-left-b">
+        <div class="logo">学</div>
+        <button class="icon-btn"><i data-lucide="arrow-left"></i></button>
+        <div class="crumb-b">
+          <span>研究论文</span>
+          <i data-lucide="chevron-right" style="width:11px"></i>
+          <span class="current">注意力与工作记忆 · 2024</span>
+        </div>
+      </div>
+      <div class="crumb-b">
+        <span class="pill teal"><i data-lucide="scan-text" style="width:11px"></i> 文本索引完成</span>
+      </div>
+      <div class="top-actions">
+        <button class="search-trigger" style="min-width:230px">
+          <i data-lucide="search"></i><span>搜索本篇</span><span class="kbd"><span>⌘</span><span>F</span></span>
+        </button>
+        <button class="icon-btn"><i data-lucide="panel-left"></i></button>
+        <div class="avatar">王</div>
+      </div>
+    </header>
+
+    <div class="reader-layout">
+      <aside class="outline-b">
+        <div class="outline-title">
+          <span class="section-label">页面</span>
+          <button class="icon-btn" style="width:26px;height:26px"><i data-lucide="layout-grid"></i></button>
+        </div>
+        <div class="thumb-list">
+          <div class="thumb">
+            <div class="thumb-page"><div class="thumb-line dark"></div><div class="thumb-line"></div><div class="thumb-line"></div><div class="thumb-line short"></div></div>
+            <div class="thumb-info"><div class="label">引言</div><div class="meta">第 12 页 · 已读</div></div>
+          </div>
+          <div class="thumb">
+            <div class="thumb-page"><div class="thumb-line dark"></div><div class="thumb-line"></div><div class="thumb-line short"></div><div class="thumb-line"></div></div>
+            <div class="thumb-info"><div class="label">资源竞争</div><div class="meta">第 13 页 · 已读</div></div>
+          </div>
+          <div class="thumb active">
+            <div class="thumb-page"><div class="thumb-line dark"></div><div class="thumb-line"></div><div class="thumb-line"></div><div class="thumb-line short"></div></div>
+            <div class="thumb-info"><div class="label">注意与容量</div><div class="meta">第 14 页 · 当前</div></div>
+          </div>
+        </div>
+        <div class="outline-section">
+          <div class="section-label" style="margin:0 7px 8px">大纲</div>
+          <div class="outline-item"><span class="marker"></span>摘要</div>
+          <div class="outline-item"><span class="marker"></span>资源模型</div>
+          <div class="outline-item active"><span class="marker"></span>注意力与容量</div>
+          <div class="outline-item"><span class="marker"></span>实验一</div>
+          <div class="outline-item"><span class="marker"></span>讨论</div>
+        </div>
+        <div class="outline-section">
+          <div class="section-label" style="margin:0 7px 8px">本文笔记</div>
+          <div class="outline-item"><i data-lucide="quote" style="width:12px"></i>资源假设</div>
+          <div class="outline-item"><i data-lucide="quote" style="width:12px"></i>与巴德利模型的区别</div>
+        </div>
+      </aside>
+
+      <main class="pdf-stage">
+        <div class="pdf-toolbar">
+          <div class="toolbar-group">
+            <button class="icon-btn"><i data-lucide="chevron-left"></i></button>
+            <span class="page-pill">14 / 27</span>
+            <button class="icon-btn"><i data-lucide="chevron-right"></i></button>
+          </div>
+          <div class="toolbar-group">
+            <button class="icon-btn"><i data-lucide="zoom-out"></i></button>
+            <span class="page-pill">100%</span>
+            <button class="icon-btn"><i data-lucide="zoom-in"></i></button>
+          </div>
+          <div class="toolbar-group">
+            <button class="icon-btn" style="color:var(--teal);background:var(--teal-soft)"><i data-lucide="highlighter"></i></button>
+            <button class="icon-btn"><i data-lucide="message-square-plus"></i></button>
+            <button class="icon-btn"><i data-lucide="bookmark"></i></button>
+          </div>
+          <div class="toolbar-group">
+            <span class="tiny muted">阅读模式</span>
+            <i data-lucide="chevron-down" style="width:13px"></i>
+          </div>
+        </div>
+        <div class="pdf-scroll">
+          <article class="pdf-page">
+            <div class="paper-eyebrow">认知心理学期刊 · 2024</div>
+            <h1 class="paper-title">注意力、资源竞争与工作记忆的边界</h1>
+            <div class="paper-abstract">
+              <strong>摘要。</strong>工作记忆容量通常被视为固定数量的存储槽。三项实验表明，表现更适合由注意资源的竞争程度预测，而不只是由信息保持数量决定。
+            </div>
+            <div class="paper-two-col">
+              <div>
+                <h3>1. 资源竞争</h3>
+                <p>已有研究强调固定存储容量的作用，但参与者在注意被重新引导时，经常仍保留着暂时无法报告的信息。</p>
+                <p class="paper-selected">当前结果表明，容量限制来自多个表征对共享注意资源的竞争。</p>
+                <p>这一区分对教学很重要：减少竞争性线索可能改善信息可访问性，而不必增加名义上的存储容量。</p>
+              </div>
+              <div>
+                <h3>2. 注意力权重</h3>
+                <p>目标相关表征获得更高优先级，并在保持阶段被更频繁地刷新。显著干扰项则竞争同一资源池。</p>
+                <p>当参与者描述自己的策略时，明确使用优先级策略的人在较高负荷下表现出更稳定的回忆。</p>
+                <p>这些发现支持将工作记忆视为动态资源分配系统，而不是被动缓冲器。</p>
+              </div>
+              <div class="paper-figure">
+                <div class="attention-bars">
+                  <span style="height:38%"></span><span style="height:56%"></span><span style="height:44%"></span>
+                  <span style="height:78%"></span><span style="height:52%"></span><span style="height:91%"></span>
+                  <span style="height:63%"></span><span style="height:84%"></span>
+                </div>
+                <div class="paper-caption">图 2. 不同目标相关性与干扰负荷下的记忆保持准确率。为保持清晰，图中省略误差线。</div>
+              </div>
+            </div>
+          </article>
+        </div>
+      </main>
+
+      <aside class="reader-assist">
+        <div class="assist-tabs">
+          <div class="assist-tab active">私教</div>
+          <div class="assist-tab">练习</div>
+          <div class="assist-tab">笔记</div>
+          <button class="icon-btn"><i data-lucide="panel-right-close"></i></button>
+        </div>
+        <div class="selection-card">
+          <div class="tiny muted">选中文本 · 第14页</div>
+          <p class="quote">“容量限制来自多个表征对共享注意资源的竞争。”</p>
+        </div>
+        <div class="assist-body">
+          <div class="ask-path">
+            <i data-lucide="mouse-pointer-2"></i>
+            <span>从选区发起的学习会话</span>
+            <i data-lucide="chevron-right" style="width:11px"></i>
+          </div>
+          <div class="assist-answer">
+            <div class="answer-label"><i data-lucide="badge-check"></i> 有据回答</div>
+            <h4>这句话否定了“固定槽位”模型</h4>
+            <p>
+              更准确地说，它否定的是把容量限制只归因于槽位数量。作者认为表征之间共享注意力资源，竞争会影响可访问性
+              <span class="citation">第14页</span>。
+            </p>
+            <p>但作者没有直接否认存储本身存在上限，只是把解释重心从“装得下多少”转向“当前能分配到多少”。</p>
+            <div class="citation-list">
+              <div class="citation-item"><i data-lucide="file-text"></i><span>注意力与工作记忆 · 2024 · 第14页</span></div>
+              <div class="citation-item"><i data-lucide="book-open"></i><span>注意力机制综述 · §2.3</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="floating-ask">
+          <i data-lucide="sparkles"></i>
+          <span>继续追问这个选区…</span>
+          <i data-lucide="arrow-up" class="send"></i>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <section class="screen screen-c">
+    <header class="topbar">
+      <div class="logo">学</div>
+      <button class="workspace-switch">
+        <div>
+          <div class="workspace-name">认知科学与学习</div>
+          <div class="workspace-sub">本地笔记本空间</div>
+        </div>
+        <i data-lucide="chevrons-up-down" style="width:14px"></i>
+      </button>
+      <div class="top-actions">
+        <button class="search-trigger">
+          <i data-lucide="search"></i>
+          <span>搜索页面、正文和学习记录</span>
+          <span class="kbd"><span>⌘</span><span>K</span></span>
+        </button>
+        <button class="icon-btn"><i data-lucide="bell"></i></button>
+        <div class="avatar">王</div>
+      </div>
+    </header>
+
+    <div class="cockpit-layout">
+      <aside class="cockpit-nav">
+        <div class="nav-row"><i data-lucide="library"></i><span>工作空间</span></div>
+        <div class="nav-row active"><i data-lucide="refresh-ccw-dot"></i><span>复习</span><span class="badge">6</span></div>
+        <div class="nav-row"><i data-lucide="search"></i><span>搜索</span></div>
+        <div class="section-label">工作空间</div>
+        <div class="nav-row active"><i data-lucide="book-open"></i><span>认知科学与学习</span><span class="badge">74</span></div>
+        <div class="nav-row"><i data-lucide="book-open"></i><span>机器学习基础</span><span class="badge">31</span></div>
+        <div class="nav-row"><i data-lucide="book-open"></i><span>产品研究</span><span class="badge">18</span></div>
+        <div class="nav-row" style="color:var(--muted)"><i data-lucide="plus"></i><span>连接本地目录</span></div>
+        <div class="mini-workspace">
+          <div class="avatar" style="width:24px;height:24px">王</div>
+          <div><div class="strong">本地数据</div><div class="muted tiny">上次备份 今天 09:40</div></div>
+          <i data-lucide="settings" style="margin-left:auto;width:14px;color:var(--muted)"></i>
+        </div>
+      </aside>
+
+      <main class="dashboard-c">
+        <div class="dash-head">
+          <div>
+            <h1>今天继续把理解变成掌握</h1>
+            <div class="date">11 月 9 日 · 认知科学与学习</div>
+          </div>
+          <div class="actions">
+            <button class="small-btn"><i data-lucide="shuffle" style="width:12px"></i> 混合复习</button>
+            <button class="primary-btn"><i data-lucide="play"></i> 开始今日复习</button>
+          </div>
+        </div>
+
+        <section class="stats-band">
+          <div class="stats-lead">
+            <div class="eyebrow">今日</div>
+            <div class="number">22 分钟</div>
+            <div class="caption">预计复习时间 · 比昨天少 6 分钟</div>
+          </div>
+          <div class="stat-cell">
+            <i data-lucide="refresh-ccw-dot"></i>
+            <div class="number">6</div>
+            <div class="label">到期复习项</div>
+          </div>
+          <div class="stat-cell">
+            <i data-lucide="circle-dashed"></i>
+            <div class="number">3</div>
+            <div class="label">新增知识缺口</div>
+          </div>
+          <div class="stat-cell">
+            <i data-lucide="flame"></i>
+            <div class="number">8 天</div>
+            <div class="label">连续完成复习</div>
+          </div>
+        </section>
+
+        <div class="dashboard-grid">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>今日复习</h2>
+              <span class="count">6 个复习项</span>
+              <span class="link">查看全部</span>
+            </div>
+            <div class="review-list">
+              <div class="review-row">
+                <div class="review-icon"><i data-lucide="target"></i></div>
+                <div>
+                  <div class="review-title">为什么容量限制更接近资源竞争，而不是槽位耗尽？</div>
+                  <div class="review-meta"><span>短答</span><span>注意力机制如何塑造工作记忆</span><span>上次：部分掌握</span></div>
+                </div>
+                <button class="review-btn">开始</button>
+              </div>
+              <div class="review-row">
+                <div class="review-icon blue"><i data-lucide="list-checks"></i></div>
+                <div>
+                  <div class="review-title">区分自上而下控制与显著性捕获</div>
+                  <div class="review-meta"><span>单选</span><span>注意力综述 · §2.3</span><span>上次：正确</span></div>
+                </div>
+                <button class="review-btn">开始</button>
+              </div>
+              <div class="review-row">
+                <div class="review-icon orange"><i data-lucide="triangle-alert"></i></div>
+                <div>
+                  <div class="review-title">巴德利模型与资源模型的解释边界</div>
+                  <div class="review-meta"><span>知识缺口</span><span>注意力与工作记忆 · 第14页</span><span>2 天前</span></div>
+                </div>
+                <button class="review-btn">开始</button>
+              </div>
+              <div class="review-row">
+                <div class="review-icon"><i data-lucide="target"></i></div>
+                <div>
+                  <div class="review-title">用“带宽与优先级”解释一次分心经历</div>
+                  <div class="review-meta"><span>短答</span><span>学习会话 · 昨天</span><span>上次：部分掌握</span></div>
+                </div>
+                <button class="review-btn">开始</button>
+              </div>
+            </div>
+          </section>
+
+          <div>
+            <section class="panel">
+              <div class="panel-head">
+                <h2>知识缺口</h2>
+                <span class="count">3 个待巩固</span>
+                <span class="link">管理</span>
+              </div>
+              <div class="gaps-list">
+                <div class="gap-item">
+                  <div class="gap-title">容量限制与“资源总量”之间的关系仍然模糊</div>
+                  <div class="gap-source"><i data-lucide="file-text"></i> 注意力与工作记忆 · 2024 · 第14页</div>
+                </div>
+                <div class="gap-item">
+                  <div class="gap-title">没有区分目标的保持与干扰项的抑制</div>
+                  <div class="gap-source"><i data-lucide="file-text"></i> 注意力机制综述 · §2.3</div>
+                </div>
+                <div class="gap-item">
+                  <div class="gap-title">复习时仍依赖熟悉感，缺少主动回忆</div>
+                  <div class="gap-source"><i data-lucide="message-circle"></i> 学习会话 · 11 月 8 日</div>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel continue-panel">
+              <div class="panel-head">
+                <h2>继续学习</h2>
+                <span class="link">最近页面</span>
+              </div>
+              <div class="continue-body">
+                <div class="continue-row">
+                  <div class="page-icon"><i data-lucide="file-text"></i></div>
+                  <div><div class="continue-title">注意力机制如何塑造工作记忆</div><div class="continue-sub">3 个未结束讨论 · 2 个知识缺口</div></div>
+                  <button class="icon-btn"><i data-lucide="arrow-up-right"></i></button>
+                </div>
+                <div class="continue-row">
+                  <div class="page-icon"><i data-lucide="file-text"></i></div>
+                  <div><div class="continue-title">认知负荷的三个来源</div><div class="continue-sub">12 分钟前编辑</div></div>
+                  <button class="icon-btn"><i data-lucide="arrow-up-right"></i></button>
+                </div>
+              </div>
+            </section>
+
+            <section class="review-goal">
+              <div class="goal-row"><i data-lucide="flag" style="width:14px;color:var(--teal)"></i><strong>本周目标</strong><span class="muted">完成 5 次复习</span></div>
+              <div class="progress"><span></span></div>
+              <div class="goal-meta">已完成 3 次 · 还差 2 次，按当前节奏预计周三完成</div>
+            </section>
+          </div>
+        </div>
+      </main>
+    </div>
+  </section>
+
+  <div class="prototype-switcher">
+    <button id="prev-variant" aria-label="上一个方案"><i data-lucide="arrow-left"></i></button>
+    <div class="switcher-label" id="switcher-label">A · 笔记本工作台</div>
+    <button id="next-variant" aria-label="下一个方案"><i data-lucide="arrow-right"></i></button>
+  </div>
+
+  <script>
+    const variants = [
+      { key: 'A', name: '笔记本工作台' },
+      { key: 'B', name: '阅读工作区' },
+      { key: 'C', name: '学习驾驶舱' }
+    ];
+    const params = new URLSearchParams(location.search);
+    const initial = variants.find(v => v.key === params.get('variant')) || variants[0];
+
+    function setVariant(key, push = true) {
+      const variant = variants.find(v => v.key === key) || variants[0];
+      document.body.dataset.variant = variant.key;
+      document.getElementById('switcher-label').innerHTML =
+        `<strong>${variant.key}</strong> <span>· ${variant.name}</span>`;
+      if (push) {
+        params.set('variant', variant.key);
+        history.replaceState(null, '', `?${params.toString()}`);
+      }
+    }
+
+    function stepVariant(delta) {
+      const current = variants.findIndex(v => v.key === document.body.dataset.variant);
+      const next = (current + delta + variants.length) % variants.length;
+      setVariant(variants[next].key);
+    }
+
+    document.getElementById('prev-variant').addEventListener('click', () => stepVariant(-1));
+    document.getElementById('next-variant').addEventListener('click', () => stepVariant(1));
+    window.addEventListener('keydown', event => {
+      const target = event.target;
+      if (target.matches('input, textarea, [contenteditable]')) return;
+      if (event.key === 'ArrowLeft') stepVariant(-1);
+      if (event.key === 'ArrowRight') stepVariant(1);
+    });
+
+    if (params.get('capture') === '1') document.body.classList.add('capture');
+    setVariant(initial.key, false);
+    lucide.createIcons();
+  </script>
+</body>
+</html>
