@@ -1,14 +1,23 @@
 from contextlib import asynccontextmanager
 import hashlib
 import json
+import mimetypes
+import posixpath
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote, urlsplit
 
 import fitz
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
+from credentials import (
+    ACCESS_KEY_ACCOUNT,
+    SECRET_KEY_ACCOUNT,
+    credential_store,
+    save_qiniu_credentials,
+)
 from documents import (
     DocumentConflictError,
     load_document,
@@ -20,6 +29,7 @@ from model_client import (
     ModelRequestError,
     test_model_connection,
 )
+from qiniu_images import MAX_IMAGE_BYTES, QiniuError, delete_image, upload_image
 from search_index import rebuild_workspace_index, search_workspace
 from secret_store import has_api_key, load_api_key, save_api_key
 from storage import (
@@ -31,12 +41,14 @@ from storage import (
     load_app_setting,
     load_active_workspace,
     load_document_draft,
+    load_qiniu_settings,
     load_source_citation,
     load_saved_workspace_path,
     move_document_draft,
     save_active_workspace,
     save_app_setting,
     save_document_draft,
+    save_qiniu_settings,
     save_source_citation,
 )
 from tutor import (
@@ -112,6 +124,22 @@ class SaveDraftRequest(BaseModel):
     content: str
     blocks: list[dict[str, object]]
     base_revision: str
+
+
+class QiniuSettingsRequest(BaseModel):
+    bucket: str
+    domain: str
+    access_key: Optional[str] = None
+    secret_key: Optional[str] = None
+
+
+class DeleteImageRequest(BaseModel):
+    url: str
+
+
+class LocalImageRequest(BaseModel):
+    path: str
+    src: str
 
 
 def require_active_workspace() -> Path:
@@ -305,6 +333,54 @@ def configured_model() -> ModelConfig:
     return ModelConfig(base_url=base_url, api_key=api_key, model=model)
 
 
+def normalize_qiniu_domain(value: str) -> str:
+    parsed = urlsplit(value.strip())
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="七牛访问域名必须是 HTTPS 域名，且不能包含路径或参数。",
+        )
+    return f"https://{parsed.netloc.lower()}"
+
+
+def normalize_qiniu_bucket(value: str) -> str:
+    bucket = value.strip().lower()
+    if (
+        len(bucket) < 3
+        or len(bucket) > 63
+        or not bucket[0].isalnum()
+        or not bucket[-1].isalnum()
+        or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-"
+               for character in bucket)
+    ):
+        raise HTTPException(status_code=422, detail="七牛桶名称无效。")
+    return bucket
+
+
+def serialize_qiniu_settings() -> dict[str, object]:
+    settings = load_qiniu_settings()
+    store = credential_store()
+    access_key = store.get(ACCESS_KEY_ACCOUNT)
+    secret_key = store.get(SECRET_KEY_ACCOUNT)
+    return {
+        "bucket": settings["bucket"] if settings else "",
+        "configured": bool(
+            settings and access_key is not None and secret_key is not None
+        ),
+        "domain": settings["domain"] if settings else "",
+        "hasAccessKey": access_key is not None,
+        "hasSecretKey": secret_key is not None,
+    }
+
+
 def open_pdf(file_path: Path) -> tuple[bytes, fitz.Document]:
     try:
         pdf_bytes = file_path.read_bytes()
@@ -449,6 +525,97 @@ def create_tutor_turn(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/api/settings/qiniu")
+def qiniu_settings() -> dict[str, object]:
+    return serialize_qiniu_settings()
+
+
+@app.put("/api/settings/qiniu")
+def update_qiniu_settings(request: QiniuSettingsRequest) -> dict[str, object]:
+    bucket = normalize_qiniu_bucket(request.bucket)
+    domain = normalize_qiniu_domain(request.domain)
+    store = credential_store()
+    current_access_key = store.get(ACCESS_KEY_ACCOUNT)
+    current_secret_key = store.get(SECRET_KEY_ACCOUNT)
+    access_key = (request.access_key or "").strip() or current_access_key
+    secret_key = (request.secret_key or "").strip() or current_secret_key
+    if not access_key or not secret_key:
+        raise HTTPException(
+            status_code=422,
+            detail="首次配置需要同时填写 Access Key 和 Secret Key。",
+        )
+
+    save_qiniu_credentials(access_key, secret_key)
+    save_qiniu_settings(bucket, domain)
+    return serialize_qiniu_settings()
+
+
+@app.post("/api/images", status_code=201)
+def create_image(file: UploadFile = File(...)) -> dict[str, object]:
+    workspace = require_active_workspace()
+    try:
+        return upload_image(
+            workspace,
+            file.filename or "image",
+            file.content_type or "",
+            file.file.read(MAX_IMAGE_BYTES + 1),
+        )
+    except QiniuError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@app.post("/api/images/delete")
+def remove_image(request: DeleteImageRequest) -> dict[str, object]:
+    workspace = require_active_workspace()
+    try:
+        return delete_image(workspace, request.url)
+    except QiniuError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
+@app.get("/api/images/asset")
+def workspace_image(path: str) -> FileResponse:
+    file_path = resolve_workspace_file(
+        path,
+        {".png", ".jpg", ".jpeg", ".gif", ".webp"},
+    )
+    media_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+    return FileResponse(
+        file_path,
+        media_type=media_type,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/images/local")
+def upload_local_image(request: LocalImageRequest) -> dict[str, object]:
+    if request.src.startswith(("http://", "https://", "data:", "blob:")):
+        raise HTTPException(status_code=422, detail="这张图片已经是远程图片。")
+    parsed_src = unquote(request.src.split("?", 1)[0].split("#", 1)[0])
+    page_dir = posixpath.dirname(request.path)
+    if parsed_src.startswith("/"):
+        relative = parsed_src.lstrip("/")
+    else:
+        relative = posixpath.normpath(posixpath.join(page_dir, parsed_src))
+    if relative.startswith("../"):
+        raise HTTPException(status_code=400, detail="图片路径无效。")
+    file_path = resolve_workspace_file(
+        relative,
+        {".png", ".jpg", ".jpeg", ".gif", ".webp"},
+    )
+    content_type = mimetypes.guess_type(file_path.name)[0] or ""
+    try:
+        uploaded = upload_image(
+            require_active_workspace(),
+            file_path.name,
+            content_type,
+            file_path.read_bytes(),
+        )
+    except QiniuError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    return {"source": request.src, **uploaded}
 
 
 @app.get("/api/workspace")

@@ -21,7 +21,6 @@ import {
   type MarkdownDocument,
   type TutorSelection
 } from "./blocknote-editor";
-import { ModelSettingsDialog } from "./model-settings-dialog";
 import { PdfViewer } from "./pdf-viewer";
 import { SearchDialog, type SearchResult } from "./search-dialog";
 import { TutorPanel, type TutorCitation } from "./tutor-panel";
@@ -46,6 +45,21 @@ type WorkspaceState = {
 };
 
 type OpenFile = MarkdownDocument;
+
+type QiniuSettings = {
+  bucket: string;
+  configured: boolean;
+  domain: string;
+  hasAccessKey: boolean;
+  hasSecretKey: boolean;
+};
+
+type ModelSettings = {
+  baseUrl: string;
+  configured: boolean;
+  hasApiKey: boolean;
+  model: string;
+};
 
 function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
   for (const node of nodes) {
@@ -172,7 +186,25 @@ export default function HomePage() {
   const [moveDialogOpen, setMoveDialogOpen] = useState(false);
   const [movePath, setMovePath] = useState("");
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [qiniuSettings, setQiniuSettings] = useState<QiniuSettings | null>(
+    null
+  );
+  const [qiniuBucket, setQiniuBucket] = useState("");
+  const [qiniuDomain, setQiniuDomain] = useState("");
+  const [qiniuAccessKey, setQiniuAccessKey] = useState("");
+  const [qiniuSecretKey, setQiniuSecretKey] = useState("");
+  const [settingsStatus, setSettingsStatus] = useState<string | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [modelBaseUrl, setModelBaseUrl] = useState("");
+  const [modelApiKey, setModelApiKey] = useState("");
+  const [modelName, setModelName] = useState("");
+  const [hasModelApiKey, setHasModelApiKey] = useState(false);
+  const [modelTesting, setModelTesting] = useState(false);
+  const [modelSaving, setModelSaving] = useState(false);
+  const [modelStatus, setModelStatus] = useState<string | null>(null);
+  const [modelError, setModelError] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -538,6 +570,155 @@ export default function HomePage() {
     }
   }
 
+  async function openSettings() {
+    setSettingsOpen(true);
+    setSettingsLoading(true);
+    setSettingsError(null);
+    setSettingsStatus(null);
+    setModelError(null);
+    setModelStatus(null);
+
+    try {
+      const [qiniuResponse, modelResponse] = await Promise.all([
+        fetch("/api/settings/qiniu", { cache: "no-store" }),
+        fetch("/api/model-settings", { cache: "no-store" })
+      ]);
+      const qiniuData = (await qiniuResponse.json()) as QiniuSettings & {
+        detail?: string;
+      };
+      const modelData = (await modelResponse.json()) as ModelSettings & {
+        detail?: string;
+      };
+      if (!qiniuResponse.ok) {
+        throw new Error(qiniuData.detail ?? "无法读取七牛配置。");
+      }
+      if (!modelResponse.ok) {
+        throw new Error(modelData.detail ?? "无法读取模型设置。");
+      }
+      setQiniuSettings(qiniuData);
+      setQiniuBucket(qiniuData.bucket);
+      setQiniuDomain(qiniuData.domain);
+      setQiniuAccessKey("");
+      setQiniuSecretKey("");
+      setModelBaseUrl(modelData.baseUrl);
+      setModelName(modelData.model);
+      setHasModelApiKey(modelData.hasApiKey);
+      setModelApiKey("");
+    } catch (settingsLoadError) {
+      setSettingsError(
+        settingsLoadError instanceof Error
+          ? settingsLoadError.message
+          : "无法读取设置。"
+      );
+    } finally {
+      setSettingsLoading(false);
+    }
+  }
+
+  function modelPayload() {
+    return {
+      base_url: modelBaseUrl,
+      model: modelName,
+      api_key: modelApiKey
+    };
+  }
+
+  async function testModelConnection() {
+    setModelTesting(true);
+    setModelStatus(null);
+    setModelError(null);
+    try {
+      const response = await fetch("/api/model-settings/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(modelPayload())
+      });
+      const data = (await response.json()) as {
+        detail?: string;
+        ok?: boolean;
+      };
+      if (!response.ok || !data.ok) {
+        throw new Error(data.detail ?? "连接失败。");
+      }
+      setModelStatus("连接成功");
+    } catch (modelTestError) {
+      setModelError(
+        modelTestError instanceof Error ? modelTestError.message : "连接失败。"
+      );
+    } finally {
+      setModelTesting(false);
+    }
+  }
+
+  async function saveModelSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setModelSaving(true);
+    setModelStatus(null);
+    setModelError(null);
+    try {
+      const response = await fetch("/api/model-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(modelPayload())
+      });
+      const data = (await response.json()) as ModelSettings & {
+        detail?: string;
+      };
+      if (!response.ok) {
+        throw new Error(data.detail ?? "无法保存模型设置。");
+      }
+      setHasModelApiKey(data.hasApiKey);
+      setModelApiKey("");
+      setSettingsOpen(false);
+    } catch (modelSaveError) {
+      setModelError(
+        modelSaveError instanceof Error
+          ? modelSaveError.message
+          : "无法保存模型设置。"
+      );
+    } finally {
+      setModelSaving(false);
+    }
+  }
+
+  async function saveQiniuSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSettingsError(null);
+    setSettingsStatus(null);
+
+    try {
+      const response = await fetch("/api/settings/qiniu", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          bucket: qiniuBucket,
+          domain: qiniuDomain,
+          access_key: qiniuAccessKey || null,
+          secret_key: qiniuSecretKey || null
+        })
+      });
+      const data = (await response.json()) as QiniuSettings & {
+        detail?: string;
+      };
+      if (!response.ok) {
+        throw new Error(data.detail ?? "无法保存七牛配置。");
+      }
+
+      setQiniuSettings(data);
+      setQiniuBucket(data.bucket);
+      setQiniuDomain(data.domain);
+      setQiniuAccessKey("");
+      setQiniuSecretKey("");
+      setSettingsStatus("七牛配置已保存");
+    } catch (settingsSaveError) {
+      setSettingsError(
+        settingsSaveError instanceof Error
+          ? settingsSaveError.message
+          : "无法保存七牛配置。"
+      );
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -561,7 +742,7 @@ export default function HomePage() {
             className="icon-button"
             type="button"
             aria-label="设置"
-            onClick={() => setModelSettingsOpen(true)}
+            onClick={() => void openSettings()}
           >
             <Settings2 aria-hidden="true" size={17} />
           </button>
@@ -777,6 +958,207 @@ export default function HomePage() {
         </section>
       </div>
 
+      {settingsOpen ? (
+        <div className="modal-backdrop">
+          <div
+            aria-labelledby="model-settings-title"
+            aria-modal="true"
+            className="dialog settings-dialog"
+            role="dialog"
+          >
+            <div className="dialog-title-row">
+              <div>
+                <h2 id="model-settings-title">模型设置</h2>
+                <p className="dialog-copy">
+                  连接你自己的 OpenAI-compatible 服务。资料片段只会发送到这个服务。
+                </p>
+              </div>
+              <button
+                aria-label="收起设置面板"
+                className="icon-button"
+                type="button"
+                onClick={() => setSettingsOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+
+            {settingsLoading ? (
+              <div className="settings-loading" role="status">
+                <LoaderCircle className="spin" aria-hidden="true" size={17} />
+                正在读取设置…
+              </div>
+            ) : (
+              <>
+                <form className="settings-form" onSubmit={saveModelSettings}>
+                  <label htmlFor="model-base-url">Base URL</label>
+                  <input
+                    autoFocus
+                    id="model-base-url"
+                    name="model-base-url"
+                    autoComplete="url"
+                    placeholder="https://api.example.com/v1"
+                    spellCheck={false}
+                    value={modelBaseUrl}
+                    onChange={(event) => setModelBaseUrl(event.target.value)}
+                  />
+                  <label htmlFor="model-api-key">API Key</label>
+                  <input
+                    id="model-api-key"
+                    name="model-api-key"
+                    autoComplete="new-password"
+                    placeholder={
+                      hasModelApiKey ? "已保存在 Keychain，留空则不修改" : ""
+                    }
+                    spellCheck={false}
+                    type="password"
+                    value={modelApiKey}
+                    onChange={(event) => setModelApiKey(event.target.value)}
+                  />
+                  <label htmlFor="model-name">聊天模型</label>
+                  <input
+                    id="model-name"
+                    name="model-name"
+                    autoComplete="off"
+                    placeholder="gpt-4.1-mini"
+                    spellCheck={false}
+                    value={modelName}
+                    onChange={(event) => setModelName(event.target.value)}
+                  />
+                  {modelStatus ? (
+                    <p className="settings-result is-success" role="status">
+                      {modelStatus}
+                    </p>
+                  ) : null}
+                  {modelError ? (
+                    <p className="settings-result is-error" role="alert">
+                      {modelError}
+                    </p>
+                  ) : null}
+                  <div className="dialog-actions">
+                    <button
+                      className="secondary-text-button settings-test"
+                      disabled={modelTesting || modelSaving}
+                      type="button"
+                      onClick={() => void testModelConnection()}
+                    >
+                      {modelTesting ? "正在测试…" : "测试连接"}
+                    </button>
+                    <button
+                      className="secondary-text-button"
+                      type="button"
+                      onClick={() => setSettingsOpen(false)}
+                    >
+                      取消
+                    </button>
+                    <button
+                      className="primary-button"
+                      disabled={modelSaving}
+                      type="submit"
+                    >
+                      {modelSaving ? "正在保存…" : "保存设置"}
+                    </button>
+                  </div>
+                </form>
+
+                <section className="settings-section">
+                  <h2 id="settings-title">七牛图片存储</h2>
+                  <p className="dialog-copy">
+                    新图片会上传到公开读桶。Access Key 与 Secret Key
+                    只写入系统安全存储，不会进入页面或配置数据库。
+                  </p>
+                  <form className="settings-form" onSubmit={saveQiniuSettings}>
+                    <label htmlFor="qiniu-bucket">七牛桶</label>
+                    <input
+                      id="qiniu-bucket"
+                      name="qiniu-bucket"
+                      autoComplete="off"
+                      spellCheck={false}
+                      value={qiniuBucket}
+                      onChange={(event) => setQiniuBucket(event.target.value)}
+                    />
+                    <label htmlFor="qiniu-domain">访问域名</label>
+                    <input
+                      id="qiniu-domain"
+                      name="qiniu-domain"
+                      autoComplete="url"
+                      placeholder="https://images.example.com"
+                      spellCheck={false}
+                      value={qiniuDomain}
+                      onChange={(event) => setQiniuDomain(event.target.value)}
+                    />
+                    <div className="settings-grid">
+                      <div>
+                        <label htmlFor="qiniu-access-key">Access Key</label>
+                        <input
+                          id="qiniu-access-key"
+                          name="qiniu-access-key"
+                          autoComplete="new-password"
+                          placeholder={
+                            qiniuSettings?.hasAccessKey
+                              ? "已保存在 Keychain"
+                              : ""
+                          }
+                          spellCheck={false}
+                          type="password"
+                          value={qiniuAccessKey}
+                          onChange={(event) =>
+                            setQiniuAccessKey(event.target.value)
+                          }
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="qiniu-secret-key">Secret Key</label>
+                        <input
+                          id="qiniu-secret-key"
+                          name="qiniu-secret-key"
+                          autoComplete="new-password"
+                          placeholder={
+                            qiniuSettings?.hasSecretKey
+                              ? "已保存在 Keychain"
+                              : ""
+                          }
+                          spellCheck={false}
+                          type="password"
+                          value={qiniuSecretKey}
+                          onChange={(event) =>
+                            setQiniuSecretKey(event.target.value)
+                          }
+                        />
+                      </div>
+                    </div>
+                    {settingsError ? (
+                      <p className="error-message">{settingsError}</p>
+                    ) : null}
+                    {settingsStatus ? (
+                      <p className="settings-status" role="status">
+                        {settingsStatus}
+                      </p>
+                    ) : null}
+                    <div className="dialog-actions">
+                      <button
+                        className="secondary-text-button"
+                        type="button"
+                        onClick={() => setSettingsOpen(false)}
+                      >
+                        关闭
+                      </button>
+                      <button
+                        className="primary-button"
+                        type="submit"
+                        disabled={!qiniuBucket.trim() || !qiniuDomain.trim()}
+                      >
+                        保存七牛配置
+                      </button>
+                    </div>
+                  </form>
+                </section>
+              </>
+            )}
+          </div>
+        </div>
+      ) : null}
+
       {createDialogOpen ? (
         <div className="modal-backdrop">
           <div
@@ -818,10 +1200,6 @@ export default function HomePage() {
             </form>
           </div>
         </div>
-      ) : null}
-
-      {modelSettingsOpen ? (
-        <ModelSettingsDialog onClose={() => setModelSettingsOpen(false)} />
       ) : null}
 
       {moveDialogOpen ? (
