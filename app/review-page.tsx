@@ -458,7 +458,7 @@ export function ReviewPage({
         <div className="review-empty">
           <BookOpenCheck aria-hidden="true" size={22} />
           <strong>还没有知识缺口</strong>
-          <p>在练习反馈或 Learning session 中明确记录后，会出现在这里。</p>
+          <p>在练习反馈或学习会话中明确记录后，会出现在这里。</p>
         </div>
       )}
     </section>

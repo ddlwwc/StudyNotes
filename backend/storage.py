@@ -148,6 +148,8 @@ def initialize_database() -> None:
                 block_id TEXT,
                 page INTEGER,
                 quote TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                archived INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
@@ -284,6 +286,18 @@ def initialize_database() -> None:
             )
         _ensure_column(
             connection,
+            "learning_sessions",
+            "title",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+        _ensure_column(
+            connection,
+            "learning_sessions",
+            "archived",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        _ensure_column(
+            connection,
             "practice_items",
             "item_type",
             "TEXT NOT NULL DEFAULT 'single_choice'",
@@ -344,7 +358,6 @@ def save_active_workspace(workspace: Path) -> None:
             INSERT INTO workspaces (path, name)
             VALUES (?, ?)
             ON CONFLICT(path) DO UPDATE SET
-                name = excluded.name,
                 updated_at = CURRENT_TIMESTAMP
             """,
             (str(workspace), workspace.name or str(workspace)),
@@ -357,6 +370,66 @@ def save_active_workspace(workspace: Path) -> None:
             """,
             (str(workspace),),
         )
+
+
+def list_registered_workspaces() -> list[dict[str, object]]:
+    active = load_saved_workspace_path()
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT path, name, created_at, updated_at
+            FROM workspaces
+            ORDER BY updated_at DESC, name ASC
+            """
+        ).fetchall()
+    return [
+        {
+            **dict(row),
+            "active": active is not None and Path(str(row["path"])) == active,
+        }
+        for row in rows
+    ]
+
+
+def rename_registered_workspace(workspace: Path, name: str) -> Optional[dict[str, object]]:
+    normalized_name = " ".join(name.split())
+    if not normalized_name:
+        raise ValueError("工作区名称不能为空。")
+    with connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE workspaces
+            SET name = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE path = ?
+            """,
+            (normalized_name[:120], str(workspace.resolve())),
+        )
+        if cursor.rowcount == 0:
+            return None
+        row = connection.execute(
+            "SELECT path, name, created_at, updated_at FROM workspaces WHERE path = ?",
+            (str(workspace.resolve()),),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def remove_registered_workspace(workspace: Path) -> bool:
+    workspace_path = str(workspace.resolve())
+    with connect() as connection:
+        cursor = connection.execute(
+            "DELETE FROM workspaces WHERE path = ?",
+            (workspace_path,),
+        )
+        if cursor.rowcount == 0:
+            return False
+        active = connection.execute(
+            "SELECT value FROM app_state WHERE key = 'active_workspace_path'"
+        ).fetchone()
+        if active is not None and str(active["value"]) == workspace_path:
+            connection.execute(
+                "DELETE FROM app_state WHERE key = 'active_workspace_path'"
+            )
+    return True
 
 
 def load_app_setting(key: str, default: str = "") -> str:
@@ -388,6 +461,8 @@ def create_learning_session(
     page: Optional[int] = None,
 ) -> dict[str, object]:
     session_id = str(uuid.uuid4())
+    normalized_quote = " ".join(quote.split())
+    title = normalized_quote[:80] or Path(relative_path).stem
     with connect() as connection:
         connection.execute(
             """
@@ -397,9 +472,10 @@ def create_learning_session(
                 path,
                 block_id,
                 page,
-                quote
+                quote,
+                title
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -408,6 +484,7 @@ def create_learning_session(
                 block_id,
                 page,
                 quote,
+                title,
             ),
         )
         row = connection.execute(
@@ -415,7 +492,7 @@ def create_learning_session(
             (session_id,),
         ).fetchone()
     if row is None:
-        raise RuntimeError("Learning session was not persisted.")
+        raise RuntimeError("学习会话 was not persisted.")
     return dict(row)
 
 
@@ -424,6 +501,129 @@ def load_learning_session(
     session_id: str,
 ) -> Optional[dict[str, object]]:
     with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM learning_sessions
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (str(workspace.resolve()), session_id),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_learning_sessions(
+    workspace: Path,
+    *,
+    query: str = "",
+    archived: Optional[bool] = None,
+) -> list[dict[str, object]]:
+    clauses = ["workspace_path = ?"]
+    parameters: list[object] = [str(workspace.resolve())]
+    normalized_query = " ".join(query.split())
+    if normalized_query:
+        clauses.append("(title LIKE ? COLLATE NOCASE OR quote LIKE ? COLLATE NOCASE)")
+        pattern = f"%{normalized_query}%"
+        parameters.extend([pattern, pattern])
+    if archived is not None:
+        clauses.append("archived = ?")
+        parameters.append(1 if archived else 0)
+    with connect() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT *
+            FROM learning_sessions
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at ASC, rowid ASC
+            """,
+            parameters,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def search_learning_records(
+    workspace: Path,
+    query: str,
+    *,
+    limit: int = 20,
+) -> dict[str, list[dict[str, object]]]:
+    workspace_path = str(workspace.resolve())
+    pattern = f"%{' '.join(query.split())}%"
+    with connect() as connection:
+        sessions = connection.execute(
+            """
+            SELECT *
+            FROM learning_sessions
+            WHERE workspace_path = ?
+              AND (title LIKE ? COLLATE NOCASE OR quote LIKE ? COLLATE NOCASE)
+            ORDER BY updated_at DESC, rowid DESC
+            LIMIT ?
+            """,
+            (workspace_path, pattern, pattern, limit),
+        ).fetchall()
+        practice_items = connection.execute(
+            """
+            SELECT practice_items.*, practice_sets.created_at AS practice_created_at
+            FROM practice_items
+            JOIN practice_sets ON practice_sets.id = practice_items.practice_set_id
+            WHERE practice_items.workspace_path = ?
+              AND (
+                practice_items.stem LIKE ? COLLATE NOCASE
+                OR practice_items.explanation LIKE ? COLLATE NOCASE
+              )
+            ORDER BY practice_items.created_at DESC, practice_items.rowid DESC
+            LIMIT ?
+            """,
+            (workspace_path, pattern, pattern, limit),
+        ).fetchall()
+        gaps = connection.execute(
+            """
+            SELECT *
+            FROM gap_records
+            WHERE workspace_path = ?
+              AND title LIKE ? COLLATE NOCASE
+            ORDER BY updated_at DESC, rowid DESC
+            LIMIT ?
+            """,
+            (workspace_path, pattern, limit),
+        ).fetchall()
+    return {
+        "sessions": [dict(row) for row in sessions],
+        "practice": [dict(row) for row in practice_items],
+        "gaps": [dict(row) for row in gaps],
+    }
+
+
+def update_learning_session(
+    workspace: Path,
+    session_id: str,
+    *,
+    title: Optional[str] = None,
+    archived: Optional[bool] = None,
+) -> Optional[dict[str, object]]:
+    assignments = ["updated_at = CURRENT_TIMESTAMP"]
+    parameters: list[object] = []
+    if title is not None:
+        normalized_title = " ".join(title.split())
+        if not normalized_title:
+            raise ValueError("学习会话标题不能为空。")
+        assignments.append("title = ?")
+        parameters.append(normalized_title[:120])
+    if archived is not None:
+        assignments.append("archived = ?")
+        parameters.append(1 if archived else 0)
+    parameters.extend([str(workspace.resolve()), session_id])
+    with connect() as connection:
+        cursor = connection.execute(
+            f"""
+            UPDATE learning_sessions
+            SET {', '.join(assignments)}
+            WHERE workspace_path = ? AND id = ?
+            """,
+            parameters,
+        )
+        if cursor.rowcount == 0:
+            return None
         row = connection.execute(
             """
             SELECT *
@@ -527,7 +727,7 @@ def save_learning_session_source(
             (source_id,),
         ).fetchone()
     if row is None:
-        raise RuntimeError("Learning source was not persisted.")
+        raise RuntimeError("学习资料 was not persisted.")
     return dict(row), False
 
 
@@ -816,6 +1016,61 @@ def load_practice_item_by_id(
             (item_id, str(workspace.resolve())),
         ).fetchone()
     return dict(row) if row is not None else None
+
+
+def delete_practice_item(
+    workspace: Path,
+    session_id: str,
+    item_id: str,
+) -> bool:
+    workspace_path = str(workspace.resolve())
+    with connect() as connection:
+        item = connection.execute(
+            """
+            SELECT id, practice_set_id
+            FROM practice_items
+            WHERE workspace_path = ? AND session_id = ? AND id = ?
+            """,
+            (workspace_path, session_id, item_id),
+        ).fetchone()
+        if item is None:
+            return False
+        connection.execute(
+            """
+            UPDATE gap_records
+            SET practice_item_id = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ? AND practice_item_id = ?
+            """,
+            (workspace_path, item_id),
+        )
+        connection.execute(
+            """
+            DELETE FROM practice_attempts
+            WHERE workspace_path = ? AND session_id = ? AND practice_item_id = ?
+            """,
+            (workspace_path, session_id, item_id),
+        )
+        connection.execute(
+            """
+            DELETE FROM practice_items
+            WHERE workspace_path = ? AND session_id = ? AND id = ?
+            """,
+            (workspace_path, session_id, item_id),
+        )
+        connection.execute(
+            """
+            UPDATE practice_sets
+            SET question_count = (
+                SELECT COUNT(*)
+                FROM practice_items
+                WHERE practice_items.practice_set_id = practice_sets.id
+            )
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (workspace_path, str(item["practice_set_id"])),
+        )
+    return True
 
 
 def load_practice_attempt(
@@ -1479,6 +1734,220 @@ def move_document_draft(
             WHERE workspace_path = ? AND path = ?
             """,
             (new_path, str(workspace.resolve()), old_path),
+        )
+
+
+PATH_TABLES = (
+    ("document_drafts", "path"),
+    ("source_citations", "path"),
+    ("learning_sessions", "path"),
+    ("learning_session_sources", "path"),
+    ("search_sources", "path"),
+    ("embedding_entries", "path"),
+)
+JSON_TABLES = (
+    ("session_messages", "context_json"),
+    ("session_messages", "citations_json"),
+    ("practice_items", "citation_json"),
+    ("practice_attempts", "feedback_json"),
+    ("gap_records", "citation_json"),
+)
+
+
+def _mapped_relative_path(
+    value: object,
+    old_path: str,
+    new_path: str,
+    *,
+    directory: bool,
+) -> object:
+    if not isinstance(value, str):
+        return value
+    if value == old_path:
+        return new_path
+    if directory and value.startswith(f"{old_path}/"):
+        return f"{new_path}{value[len(old_path):]}"
+    return value
+
+
+def _rewrite_json_paths(
+    value: object,
+    old_path: str,
+    new_path: str,
+    *,
+    directory: bool,
+) -> tuple[object, bool]:
+    changed = False
+    if isinstance(value, dict):
+        rewritten: dict[str, object] = {}
+        for key, item in value.items():
+            if key == "path":
+                mapped = _mapped_relative_path(
+                    item,
+                    old_path,
+                    new_path,
+                    directory=directory,
+                )
+                changed = changed or mapped != item
+                rewritten[key] = mapped
+            else:
+                rewritten_item, item_changed = _rewrite_json_paths(
+                    item,
+                    old_path,
+                    new_path,
+                    directory=directory,
+                )
+                rewritten[key] = rewritten_item
+                changed = changed or item_changed
+        return rewritten, changed
+    if isinstance(value, list):
+        rewritten_list: list[object] = []
+        for item in value:
+            rewritten_item, item_changed = _rewrite_json_paths(
+                item,
+                old_path,
+                new_path,
+                directory=directory,
+            )
+            rewritten_list.append(rewritten_item)
+            changed = changed or item_changed
+        return rewritten_list, changed
+    return value, False
+
+
+def remap_relative_paths(
+    workspace: Path,
+    old_path: str,
+    new_path: str,
+    *,
+    directory: bool = False,
+) -> None:
+    """Migrate every local reference that points at a moved page or directory."""
+    workspace_path = str(workspace.resolve())
+    old_path = old_path.strip("/")
+    new_path = new_path.strip("/")
+    with connect() as connection:
+        for table, column in PATH_TABLES:
+            if directory:
+                connection.execute(
+                    f"""
+                    UPDATE {table}
+                    SET {column} = ? || substr({column}, length(?) + 1)
+                    WHERE workspace_path = ?
+                      AND ({column} = ? OR {column} LIKE ?)
+                    """,
+                    (
+                        new_path,
+                        old_path,
+                        workspace_path,
+                        old_path,
+                        f"{old_path}/%",
+                    ),
+                )
+            else:
+                connection.execute(
+                    f"""
+                    UPDATE {table}
+                    SET {column} = ?
+                    WHERE workspace_path = ? AND {column} = ?
+                    """,
+                    (new_path, workspace_path, old_path),
+                )
+
+        if directory:
+            connection.execute(
+                """
+                UPDATE search_fts
+                SET path = ? || substr(path, length(?) + 1)
+                WHERE workspace_path = ?
+                  AND (path = ? OR path LIKE ?)
+                """,
+                (new_path, old_path, workspace_path, old_path, f"{old_path}/%"),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE search_fts
+                SET path = ?
+                WHERE workspace_path = ? AND path = ?
+                """,
+                (new_path, workspace_path, old_path),
+            )
+
+        for table, column in JSON_TABLES:
+            rows = connection.execute(
+                f"""
+                SELECT rowid AS row_id, {column}
+                FROM {table}
+                WHERE workspace_path = ? AND {column} IS NOT NULL
+                """,
+                (workspace_path,),
+            ).fetchall()
+            for row in rows:
+                try:
+                    parsed = json.loads(str(row[column]))
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                rewritten, changed = _rewrite_json_paths(
+                    parsed,
+                    old_path,
+                    new_path,
+                    directory=directory,
+                )
+                if changed:
+                    connection.execute(
+                        f"UPDATE {table} SET {column} = ? WHERE rowid = ?",
+                        (json.dumps(rewritten, ensure_ascii=False), row["row_id"]),
+                    )
+
+
+WORKSPACE_TABLES = (
+    "document_drafts",
+    "source_citations",
+    "uploaded_images",
+    "search_sources",
+    "embedding_entries",
+    "search_fts",
+    "learning_sessions",
+    "session_messages",
+    "learning_session_sources",
+    "practice_sets",
+    "practice_items",
+    "practice_attempts",
+    "gap_records",
+    "review_results",
+)
+
+
+def relocate_workspace_data(old_workspace: Path, new_workspace: Path) -> None:
+    old_path = str(old_workspace.resolve())
+    new_path = str(new_workspace.resolve())
+    if old_path == new_path:
+        return
+    with connect() as connection:
+        for table in WORKSPACE_TABLES:
+            connection.execute(
+                f"UPDATE {table} SET workspace_path = ? WHERE workspace_path = ?",
+                (new_path, old_path),
+            )
+        existing = connection.execute(
+            "SELECT path FROM workspaces WHERE path = ?",
+            (new_path,),
+        ).fetchone()
+        if existing is None:
+            connection.execute(
+                "UPDATE workspaces SET path = ?, updated_at = CURRENT_TIMESTAMP WHERE path = ?",
+                (new_path, old_path),
+            )
+        else:
+            connection.execute("DELETE FROM workspaces WHERE path = ?", (old_path,))
+        connection.execute(
+            """
+            INSERT INTO app_state (key, value)
+            VALUES ('active_workspace_path', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (new_path,),
         )
 
 

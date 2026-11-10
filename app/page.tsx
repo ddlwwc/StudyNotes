@@ -2,11 +2,14 @@
 
 import {
   BookOpenText,
+  Check,
   ChevronDown,
   ChevronRight,
+  CalendarDays,
   FileText,
   FolderOpen,
   Library,
+  Link2,
   LoaderCircle,
   Pencil,
   Plus,
@@ -15,7 +18,7 @@ import {
   Trash2
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import type { FormEvent } from "react";
+import type { FormEvent, MouseEvent as ReactMouseEvent } from "react";
 import { BackupSettings } from "./backup-settings";
 import {
   BlockNoteEditor,
@@ -35,7 +38,7 @@ type TreeNode = {
   name: string;
   path: string;
   type: "directory" | "file";
-  kind?: "markdown" | "pdf";
+  kind?: "markdown" | "pdf" | "text";
   children?: TreeNode[];
 };
 
@@ -51,6 +54,14 @@ type WorkspaceState = {
 };
 
 type OpenFile = MarkdownDocument;
+
+type TextFile = {
+  content: string;
+  path: string;
+  readOnly: true;
+  revision: string;
+  title: string;
+};
 
 type QiniuSettings = {
   bucket: string;
@@ -68,6 +79,12 @@ type ModelSettings = {
   embeddingModel: string;
   hasApiKey: boolean;
   model: string;
+};
+
+type RegisteredWorkspace = {
+  active: boolean;
+  name: string;
+  path: string;
 };
 
 function findTreeNode(nodes: TreeNode[], path: string): TreeNode | null {
@@ -107,6 +124,16 @@ function flattenSourceOptions(nodes: TreeNode[]): TutorSourceOption[] {
         path: node.path
       }
     ];
+  });
+}
+
+function filterTree(nodes: TreeNode[], paths: Set<string>): TreeNode[] {
+  return nodes.flatMap((node) => {
+    if (node.type === "file") {
+      return paths.has(node.path) ? [node] : [];
+    }
+    const children = filterTree(node.children ?? [], paths);
+    return children.length > 0 ? [{ ...node, children }] : [];
   });
 }
 
@@ -187,6 +214,7 @@ export default function HomePage() {
     useState<WorkspaceState["staleWorkspace"]>(null);
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [openFile, setOpenFile] = useState<OpenFile | null>(null);
+  const [openTextFile, setOpenTextFile] = useState<TextFile | null>(null);
   const [tutorSelection, setTutorSelection] = useState<TutorSelection | null>(
     null
   );
@@ -202,6 +230,7 @@ export default function HomePage() {
   } | null>(null);
   const [markdownSearchTarget, setMarkdownSearchTarget] =
     useState<SearchResult | null>(null);
+  const [sessionTargetId, setSessionTargetId] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<TreeNode | null>(null);
   const [mainView, setMainView] = useState<"workspace" | "review">("workspace");
   const [workspacePath, setWorkspacePath] = useState("");
@@ -212,6 +241,31 @@ export default function HomePage() {
   const [working, setWorking] = useState(false);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [newPageName, setNewPageName] = useState("");
+  const [templates, setTemplates] = useState<
+    Array<{ name: string; path: string }>
+  >([]);
+  const [selectedTemplate, setSelectedTemplate] = useState("");
+  const [tags, setTags] = useState<string[]>([]);
+  const [activeTag, setActiveTag] = useState("");
+  const [taggedPaths, setTaggedPaths] = useState<Set<string>>(new Set());
+  const [dailyStatus, setDailyStatus] = useState<string | null>(null);
+  const [backlinks, setBacklinks] = useState<{
+    backlinks: Array<{
+      context: string;
+      label: string;
+      sourcePath: string;
+      syntax: string;
+      targetPath: string;
+    }>;
+    outgoing: Array<{
+      context: string;
+      label: string;
+      sourcePath: string;
+      syntax: string;
+      targetPath: string;
+    }>;
+  } | null>(null);
+  const [backlinksOpen, setBacklinksOpen] = useState(false);
   const [moveDialogOpen, setMoveDialogOpen] = useState(false);
   const [movePath, setMovePath] = useState("");
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -237,20 +291,48 @@ export default function HomePage() {
   const [modelSaving, setModelSaving] = useState(false);
   const [modelStatus, setModelStatus] = useState<string | null>(null);
   const [modelError, setModelError] = useState<string | null>(null);
+  const [registeredWorkspaces, setRegisteredWorkspaces] = useState<
+    RegisteredWorkspace[]
+  >([]);
+  const [workspaceNames, setWorkspaceNames] = useState<Record<string, string>>(
+    {}
+  );
+  const [newWorkspacePath, setNewWorkspacePath] = useState("");
+  const [workspaceStatus, setWorkspaceStatus] = useState<string | null>(null);
+  const [onboardingCompleted, setOnboardingCompleted] = useState<
+    boolean | null
+  >(null);
+  const [boundaryAccepted, setBoundaryAccepted] = useState(false);
+  const [onboardingStep, setOnboardingStep] = useState<1 | 2 | 3>(1);
   const [searchOpen, setSearchOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const sourceOptions = flattenSourceOptions(tree);
+  const visibleTree = activeTag ? filterTree(tree, taggedPaths) : tree;
 
   useEffect(() => {
     let active = true;
 
     async function loadWorkspace() {
       try {
-        const response = await fetch("/api/workspace");
+        const [response, onboardingResponse] = await Promise.all([
+          fetch("/api/workspace"),
+          fetch("/api/onboarding", { cache: "no-store" })
+        ]);
         if (!response.ok) {
-          throw new Error("无法读取当前 Notebook workspace。");
+          throw new Error("无法读取当前 学习工作区。");
         }
         const data = (await response.json()) as WorkspaceState;
+        if (onboardingResponse.ok) {
+          const onboarding = (await onboardingResponse.json()) as {
+            boundaryAccepted: boolean;
+            completed: boolean;
+          };
+          if (active) {
+            setBoundaryAccepted(onboarding.boundaryAccepted);
+            setOnboardingCompleted(onboarding.completed);
+            setOnboardingStep(data.workspace ? 2 : 1);
+          }
+        }
         if (active) {
           setWorkspace(data.workspace);
           setStaleWorkspace(data.staleWorkspace);
@@ -260,6 +342,7 @@ export default function HomePage() {
           } else if (data.staleWorkspace) {
             setWorkspacePath(data.staleWorkspace.path);
           }
+          void loadNotebookMetadata();
         }
       } catch (loadError) {
         if (active) {
@@ -279,6 +362,27 @@ export default function HomePage() {
       active = false;
     };
   }, []);
+
+  async function loadNotebookMetadata() {
+    try {
+      const [tagsResponse, templatesResponse] = await Promise.all([
+        fetch("/api/tags", { cache: "no-store" }),
+        fetch("/api/templates", { cache: "no-store" })
+      ]);
+      if (tagsResponse.ok) {
+        const tagData = (await tagsResponse.json()) as { tags: string[] };
+        setTags(tagData.tags);
+      }
+      if (templatesResponse.ok) {
+        const templateData = (await templatesResponse.json()) as {
+          templates: Array<{ name: string; path: string }>;
+        };
+        setTemplates(templateData.templates);
+      }
+    } catch {
+      // The workspace tree remains usable while metadata is refreshed.
+    }
+  }
 
   useEffect(() => {
     if (!workspace) {
@@ -324,6 +428,34 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
+    if (!openFile) {
+      setBacklinks(null);
+      return;
+    }
+    let active = true;
+    void fetch(`/api/links?path=${encodeURIComponent(openFile.path)}`, {
+      cache: "no-store"
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error("无法读取页面链接。");
+        }
+        const data = (await response.json()) as NonNullable<typeof backlinks>;
+        if (active) {
+          setBacklinks(data);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setBacklinks({ backlinks: [], outgoing: [] });
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [openFile?.path]);
+
+  useEffect(() => {
     function handleSearchShortcut(event: KeyboardEvent) {
       if (
         workspace &&
@@ -353,27 +485,79 @@ export default function HomePage() {
         detail?: string;
       };
       if (!response.ok) {
-        throw new Error(data.detail ?? "无法打开这个 Notebook workspace。");
+        throw new Error(data.detail ?? "无法打开这个 学习工作区。");
       }
 
       setWorkspace(data.workspace);
       setStaleWorkspace(data.staleWorkspace);
       setTree(data.tree);
       setOpenFile(null);
+      setOpenTextFile(null);
       setOpenPdfPath(null);
       setSelectedNode(null);
       setMainView("workspace");
+      setOnboardingStep(2);
       if (data.workspace) {
         setWorkspacePath(data.workspace.path);
+        void loadNotebookMetadata();
       }
     } catch (openError) {
       setError(
         openError instanceof Error
           ? openError.message
-          : "无法打开这个 Notebook workspace。"
+          : "无法打开这个 学习工作区。"
       );
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function setDataBoundary(accepted: boolean) {
+    setBoundaryAccepted(accepted);
+    try {
+      const response = await fetch("/api/onboarding", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ boundary_accepted: accepted })
+      });
+      if (!response.ok) {
+        throw new Error("无法保存资料发送边界确认。");
+      }
+      setBoundaryAccepted(accepted);
+    } catch (boundaryError) {
+      setBoundaryAccepted(!accepted);
+      setError(
+        boundaryError instanceof Error
+          ? boundaryError.message
+          : "无法保存资料发送边界确认。"
+      );
+    }
+  }
+
+  async function acceptDataBoundary() {
+    await setDataBoundary(true);
+  }
+
+  async function completeOnboarding() {
+    try {
+      const response = await fetch("/api/onboarding", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          boundary_accepted: boundaryAccepted,
+          completed: true
+        })
+      });
+      if (!response.ok) {
+        throw new Error("无法完成首次设置。");
+      }
+      setOnboardingCompleted(true);
+    } catch (onboardingError) {
+      setError(
+        onboardingError instanceof Error
+          ? onboardingError.message
+          : "无法完成首次设置。"
+      );
     }
   }
 
@@ -384,15 +568,45 @@ export default function HomePage() {
     setMainView("workspace");
     setOpeningFile(true);
     setError(null);
+    setSessionTargetId(null);
 
     if (node.kind === "pdf" || node.path.toLowerCase().endsWith(".pdf")) {
       setOpenFile(null);
+      setOpenTextFile(null);
       setTutorSelection(null);
       setMarkdownSearchTarget(null);
       setPdfInitialPage(searchTarget?.page ?? 1);
       setPdfCitationTarget(null);
       setOpenPdfPath(node.path);
       setOpeningFile(false);
+      return;
+    }
+
+    if (node.kind === "text" || node.path.toLowerCase().endsWith(".txt")) {
+      try {
+        const response = await fetch(
+          `/api/file?path=${encodeURIComponent(node.path)}`
+        );
+        const data = (await response.json()) as TextFile & { detail?: string };
+        if (!response.ok) {
+          throw new Error(data.detail ?? "无法读取这个纯文本页面。");
+        }
+        setOpenFile(null);
+        setOpenTextFile(data);
+        setTutorSelection(null);
+        setCitationTarget(null);
+        setMarkdownSearchTarget(searchTarget);
+        setPdfCitationTarget(null);
+        setOpenPdfPath(null);
+      } catch (fileError) {
+        setError(
+          fileError instanceof Error
+            ? fileError.message
+            : "无法读取这个纯文本页面。"
+        );
+      } finally {
+        setOpeningFile(false);
+      }
       return;
     }
 
@@ -406,6 +620,7 @@ export default function HomePage() {
       }
 
       setOpenFile(data);
+      setOpenTextFile(null);
       setTutorSelection(null);
       setCitationTarget(null);
       setMarkdownSearchTarget(searchTarget);
@@ -423,7 +638,7 @@ export default function HomePage() {
     }
   }
 
-  function openSearchResult(result: SearchResult) {
+  async function openSearchResult(result: SearchResult) {
     setSearchOpen(false);
     const node = findTreeNode(tree, result.path);
     if (!node) {
@@ -431,7 +646,20 @@ export default function HomePage() {
       return;
     }
     setSelectedNode(node);
-    void openFileNode(node, result);
+    await openFileNode(node, result);
+    if (
+      result.resultType === "session" ||
+      result.resultType === "practice" ||
+      result.resultType === "gap"
+    ) {
+      setSessionTargetId(result.sessionId ?? null);
+      setTutorSelection({
+        blockId: result.blockId,
+        kind: result.kind,
+        page: result.page,
+        quote: result.quote ?? result.snippet
+      });
+    }
   }
 
   const handlePathAvailability = useCallback((available: boolean) => {
@@ -445,11 +673,9 @@ export default function HomePage() {
     (citation: TutorCitation) => {
       setMainView("workspace");
       const node = findTreeNode(tree, citation.path);
-      if (!node) {
-        setError("Source citation 对应的资料已移动或删除。");
-        return;
+      if (node) {
+        setSelectedNode(node);
       }
-      setSelectedNode(node);
       setSearchOpen(false);
       setMarkdownSearchTarget(null);
       setError(null);
@@ -462,6 +688,38 @@ export default function HomePage() {
           quote: citation.quote
         });
         setOpenPdfPath(citation.path);
+        return;
+      }
+
+      if (citation.kind === "text") {
+        setOpeningFile(true);
+        void (async () => {
+          try {
+            const response = await fetch(
+              `/api/file?path=${encodeURIComponent(citation.path)}`
+            );
+            const data = (await response.json()) as TextFile & {
+              detail?: string;
+            };
+            if (!response.ok) {
+              throw new Error(data.detail ?? "无法打开资料引用。");
+            }
+            setOpenFile(null);
+            setOpenTextFile(data);
+            setOpenPdfPath(null);
+            setCitationTarget(null);
+            setPdfCitationTarget(null);
+            setMarkdownSearchTarget(null);
+          } catch (citationError) {
+            setError(
+              citationError instanceof Error
+                ? citationError.message
+                : "无法打开资料引用。"
+            );
+          } finally {
+            setOpeningFile(false);
+          }
+        })();
         return;
       }
 
@@ -490,6 +748,7 @@ export default function HomePage() {
             quote: citation.quote
           });
           setOpenFile(data);
+          setOpenTextFile(null);
           setPdfInitialPage(1);
           setPdfCitationTarget(null);
           setOpenPdfPath(null);
@@ -517,6 +776,27 @@ export default function HomePage() {
     return selectedNode.path.split("/").slice(0, -1).join("/");
   }
 
+  function selectTextLine(
+    event: ReactMouseEvent<HTMLParagraphElement>,
+    line: string
+  ) {
+    const selectedText = window
+      .getSelection()
+      ?.toString()
+      .replace(/\s+/g, " ")
+      .trim();
+    const quote = selectedText || line.replace(/\s+/g, " ").trim();
+    if (quote) {
+      setTutorSelection({
+        blockId: null,
+        kind: "text",
+        page: null,
+        quote
+      });
+      event.currentTarget.classList.add("citation-target");
+    }
+  }
+
   async function createPage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setWorking(true);
@@ -528,7 +808,8 @@ export default function HomePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           directory: selectedDirectoryPath(),
-          name: newPageName
+          name: newPageName,
+          template: selectedTemplate || null
         })
       });
       const data = (await response.json()) as {
@@ -544,6 +825,8 @@ export default function HomePage() {
       setSelectedNode(findTreeNode(data.tree, data.path));
       setCreateDialogOpen(false);
       setNewPageName("");
+      setSelectedTemplate("");
+      void loadNotebookMetadata();
     } catch (createError) {
       setError(
         createError instanceof Error
@@ -552,6 +835,65 @@ export default function HomePage() {
       );
     } finally {
       setWorking(false);
+    }
+  }
+
+  async function createDailyNote() {
+    setWorking(true);
+    setDailyStatus(null);
+    setError(null);
+    try {
+      const response = await fetch("/api/daily", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      });
+      const data = (await response.json()) as {
+        detail?: string;
+        path: string;
+        tree: TreeNode[];
+      };
+      if (!response.ok) {
+        throw new Error(data.detail ?? "无法创建今日笔记。");
+      }
+      setTree(data.tree);
+      setDailyStatus("今日笔记已创建");
+      setSelectedNode(findTreeNode(data.tree, data.path));
+      await openFileNode({
+        name: data.path.split("/").at(-1) ?? data.path,
+        path: data.path,
+        type: "file",
+        kind: "markdown"
+      });
+      void loadNotebookMetadata();
+    } catch (dailyError) {
+      setDailyStatus(
+        dailyError instanceof Error ? dailyError.message : "无法创建今日笔记。"
+      );
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function applyTag(tag: string) {
+    if (activeTag === tag) {
+      setActiveTag("");
+      setTaggedPaths(new Set());
+      return;
+    }
+    setActiveTag(tag);
+    try {
+      const response = await fetch(`/api/tagged?tag=${encodeURIComponent(tag)}`, {
+        cache: "no-store"
+      });
+      if (!response.ok) {
+        throw new Error("无法筛选标签。");
+      }
+      const data = (await response.json()) as { paths: string[] };
+      setTaggedPaths(new Set(data.paths));
+    } catch (tagError) {
+      setError(tagError instanceof Error ? tagError.message : "无法筛选标签。");
+      setTaggedPaths(new Set());
     }
   }
 
@@ -676,9 +1018,10 @@ export default function HomePage() {
     setModelStatus(null);
 
     try {
-      const [qiniuResponse, modelResponse] = await Promise.all([
+      const [qiniuResponse, modelResponse, workspacesResponse] = await Promise.all([
         fetch("/api/settings/qiniu", { cache: "no-store" }),
-        fetch("/api/model-settings", { cache: "no-store" })
+        fetch("/api/model-settings", { cache: "no-store" }),
+        fetch("/api/workspaces", { cache: "no-store" })
       ]);
       const qiniuData = (await qiniuResponse.json()) as QiniuSettings & {
         detail?: string;
@@ -686,11 +1029,18 @@ export default function HomePage() {
       const modelData = (await modelResponse.json()) as ModelSettings & {
         detail?: string;
       };
+      const workspaceData = (await workspacesResponse.json()) as {
+        detail?: string;
+        workspaces: RegisteredWorkspace[];
+      };
       if (!qiniuResponse.ok) {
         throw new Error(qiniuData.detail ?? "无法读取七牛配置。");
       }
       if (!modelResponse.ok) {
         throw new Error(modelData.detail ?? "无法读取模型设置。");
+      }
+      if (!workspacesResponse.ok) {
+        throw new Error(workspaceData.detail ?? "无法读取工作区列表。");
       }
       setQiniuSettings(qiniuData);
       setQiniuBucket(qiniuData.bucket);
@@ -703,6 +1053,12 @@ export default function HomePage() {
       setEmbeddingEnabled(modelData.embeddingEnabled);
       setHasModelApiKey(modelData.hasApiKey);
       setModelApiKey("");
+      setRegisteredWorkspaces(workspaceData.workspaces);
+      setWorkspaceNames(
+        Object.fromEntries(
+          workspaceData.workspaces.map((item) => [item.path, item.name])
+        )
+      );
     } catch (settingsLoadError) {
       setSettingsError(
         settingsLoadError instanceof Error
@@ -711,6 +1067,129 @@ export default function HomePage() {
       );
     } finally {
       setSettingsLoading(false);
+    }
+  }
+
+  function applyWorkspaceResponse(data: WorkspaceState) {
+    setWorkspace(data.workspace);
+    setStaleWorkspace(data.staleWorkspace);
+    setTree(data.tree);
+    setOpenFile(null);
+    setOpenTextFile(null);
+    setOpenPdfPath(null);
+    setTutorSelection(null);
+    setSelectedNode(null);
+    setMainView("workspace");
+    setWorkspacePath(data.workspace?.path ?? data.staleWorkspace?.path ?? "");
+    void loadNotebookMetadata();
+  }
+
+  async function activateWorkspacePath(path: string) {
+    setWorkspaceStatus(null);
+    try {
+      const response = await fetch("/api/workspace", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path })
+      });
+      const data = (await response.json()) as WorkspaceState & {
+        detail?: string;
+      };
+      if (!response.ok) {
+        throw new Error(data.detail ?? "无法切换工作区。");
+      }
+      applyWorkspaceResponse(data);
+      setWorkspaceStatus("工作区已切换");
+      await reloadRegisteredWorkspaces();
+    } catch (workspaceError) {
+      setWorkspaceStatus(
+        workspaceError instanceof Error
+          ? workspaceError.message
+          : "无法切换工作区。"
+      );
+    }
+  }
+
+  async function reloadRegisteredWorkspaces() {
+    const response = await fetch("/api/workspaces", { cache: "no-store" });
+    if (!response.ok) {
+      return;
+    }
+    const data = (await response.json()) as {
+      workspaces: RegisteredWorkspace[];
+    };
+    setRegisteredWorkspaces(data.workspaces);
+    setWorkspaceNames(
+      Object.fromEntries(
+        data.workspaces.map((item) => [item.path, item.name])
+      )
+    );
+  }
+
+  async function renameWorkspace(path: string) {
+    const name = workspaceNames[path] ?? "";
+    setWorkspaceStatus(null);
+    try {
+      const response = await fetch("/api/workspaces", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, name })
+      });
+      const data = (await response.json()) as {
+        detail?: string;
+        workspace?: { name: string; path: string };
+        workspaces?: RegisteredWorkspace[];
+      };
+      if (!response.ok || !data.workspaces) {
+        throw new Error(data.detail ?? "无法重命名工作区。");
+      }
+      setRegisteredWorkspaces(data.workspaces);
+      setWorkspace((current) =>
+        current && current.path === path
+          ? { ...current, name: data.workspace?.name ?? name }
+          : current
+      );
+      setWorkspaceStatus("工作区名称已保存");
+    } catch (renameError) {
+      setWorkspaceStatus(
+        renameError instanceof Error
+          ? renameError.message
+          : "无法重命名工作区。"
+      );
+    }
+  }
+
+  async function removeWorkspaceRegistration(path: string) {
+    setWorkspaceStatus(null);
+    try {
+      const response = await fetch(
+        `/api/workspaces?path=${encodeURIComponent(path)}`,
+        { method: "DELETE" }
+      );
+      const data = (await response.json()) as {
+        detail?: string;
+        workspaces?: RegisteredWorkspace[];
+      };
+      if (!response.ok || !data.workspaces) {
+        throw new Error(data.detail ?? "无法移除工作区注册。");
+      }
+      const removedActive = workspace?.path === path;
+      setRegisteredWorkspaces(data.workspaces);
+      if (removedActive) {
+        setWorkspace(null);
+        setTree([]);
+        setOpenFile(null);
+        setOpenTextFile(null);
+        setOpenPdfPath(null);
+        setWorkspacePath("");
+      }
+      setWorkspaceStatus("已移除注册记录，磁盘文件未删除");
+    } catch (removeError) {
+      setWorkspaceStatus(
+        removeError instanceof Error
+          ? removeError.message
+          : "无法移除工作区注册。"
+      );
     }
   }
 
@@ -799,14 +1278,14 @@ export default function HomePage() {
         ok?: boolean;
       };
       if (!response.ok || !data.ok) {
-        throw new Error(data.detail ?? "Embedding 连接失败。");
+        throw new Error(data.detail ?? "向量模型连接失败。");
       }
-      setModelStatus("Embedding 连接成功");
+      setModelStatus("向量模型连接成功");
     } catch (embeddingTestError) {
       setModelError(
         embeddingTestError instanceof Error
           ? embeddingTestError.message
-          : "Embedding 连接失败。"
+          : "向量模型连接失败。"
       );
     } finally {
       setEmbeddingTesting(false);
@@ -857,7 +1336,7 @@ export default function HomePage() {
         <div className="brand-mark">SN</div>
         <div className="brand-name">StudyNotes</div>
         <div className="workspace-label">
-          {workspace?.name ?? "Notebook workspace"}
+          {workspace?.name ?? "学习工作区"}
         </div>
         <div className="top-actions">
           <button
@@ -911,6 +1390,16 @@ export default function HomePage() {
             <span>资料</span>
             <div className="sidebar-actions">
               <button
+                aria-label="今日笔记"
+                className="sidebar-action"
+                disabled={!workspace || working}
+                title="打开今日笔记"
+                type="button"
+                onClick={() => void createDailyNote()}
+              >
+                <CalendarDays aria-hidden="true" size={14} />
+              </button>
+              <button
                 aria-label="新建页面"
                 className="sidebar-action"
                 disabled={!workspace}
@@ -953,15 +1442,45 @@ export default function HomePage() {
           </div>
           {tree.length > 0 ? (
             <TreeNodes
-              activePath={openFile?.path ?? openPdfPath}
-              nodes={tree}
+              activePath={openFile?.path ?? openTextFile?.path ?? openPdfPath}
+              nodes={visibleTree}
               onOpenFile={(node) => void openFileNode(node)}
               onSelect={setSelectedNode}
               selectedPath={selectedNode?.path ?? null}
             />
           ) : (
-            <p className="sidebar-empty">打开 workspace 后显示目录与页面。</p>
+            <p className="sidebar-empty">打开学习工作区后显示目录与页面。</p>
           )}
+          {tags.length > 0 ? (
+            <section className="notebook-tags" aria-label="标签筛选">
+              <div className="notebook-tags-heading">
+                <strong>标签</strong>
+                {activeTag ? (
+                  <button type="button" onClick={() => void applyTag(activeTag)}>
+                    清除
+                  </button>
+                ) : null}
+              </div>
+              <div className="notebook-tag-list">
+                {tags.map((tag) => (
+                  <button
+                    aria-pressed={activeTag === tag}
+                    className={activeTag === tag ? "is-active" : ""}
+                    key={tag}
+                    type="button"
+                    onClick={() => void applyTag(tag)}
+                  >
+                    {tag}
+                  </button>
+                ))}
+              </div>
+            </section>
+          ) : null}
+          {dailyStatus ? (
+            <p className="notebook-status" role="status">
+              {dailyStatus}
+            </p>
+          ) : null}
           {workspace ? (
             <p className="workspace-path" title={workspace.path}>
               {workspace.path}
@@ -973,7 +1492,7 @@ export default function HomePage() {
           className={`content ${
             mainView === "review"
               ? "is-review"
-              : openFile || openPdfPath
+              : openFile || openTextFile || openPdfPath
                 ? "has-reading-surface"
                 : ""
           }`}
@@ -1008,8 +1527,42 @@ export default function HomePage() {
                 }}
               />
               <TutorPanel
+                initialSessionId={sessionTargetId}
                 onCitationSelect={handleCitationSelect}
                 path={openPdfPath}
+                selection={tutorSelection}
+                sourceOptions={sourceOptions}
+              />
+            </div>
+          ) : openTextFile ? (
+            <div className="reading-workspace">
+              <article className="document text-document">
+                <header className="document-header">
+                  <span>{openTextFile.path}</span>
+                  <span className="blocknote-label">纯文本 · 只读</span>
+                </header>
+                <p className="text-readonly-notice">
+                  纯文本资料为只读；需要编辑时请另存为 Markdown 页面。
+                </p>
+                <div className="text-reader" aria-label="纯文本阅读器">
+                  {openTextFile.content.split(/\r?\n/).map((line, index) =>
+                    line ? (
+                      <p
+                        key={`${index}:${line}`}
+                        onMouseUp={(event) => selectTextLine(event, line)}
+                      >
+                        {line}
+                      </p>
+                    ) : (
+                      <br key={`line-${index}`} />
+                    )
+                  )}
+                </div>
+              </article>
+              <TutorPanel
+                initialSessionId={sessionTargetId}
+                onCitationSelect={handleCitationSelect}
+                path={openTextFile.path}
                 selection={tutorSelection}
                 sourceOptions={sourceOptions}
               />
@@ -1033,14 +1586,160 @@ export default function HomePage() {
                     setCitationTarget(null);
                   }}
                 />
+                <section className="backlink-tools">
+                  <button
+                    aria-expanded={backlinksOpen}
+                    type="button"
+                    onClick={() => setBacklinksOpen((current) => !current)}
+                  >
+                    <Link2 aria-hidden="true" size={14} />
+                    反向链接
+                  </button>
+                  {backlinks && backlinks.backlinks.length > 0 ? (
+                    <span>{backlinks.backlinks.length} 条</span>
+                  ) : null}
+                </section>
+                {backlinksOpen ? (
+                  <section
+                    aria-label="反向链接"
+                    className="backlink-panel"
+                    role="region"
+                  >
+                    <h3>指向当前页面的链接</h3>
+                    {backlinks && backlinks.backlinks.length > 0 ? (
+                      backlinks.backlinks.map((link) => (
+                        <button
+                          key={`${link.sourcePath}:${link.syntax}:${link.context}`}
+                          type="button"
+                          onClick={() => {
+                            const node = findTreeNode(tree, link.sourcePath);
+                            if (node) {
+                              void openFileNode(node);
+                            }
+                          }}
+                        >
+                          <span>
+                            {link.sourcePath} ·{" "}
+                            {link.syntax === "wiki" ? "Wiki 链接" : "相对链接"}
+                          </span>
+                          <p>{link.context}</p>
+                        </button>
+                      ))
+                    ) : (
+                      <p>还没有其他页面链接到这里。</p>
+                    )}
+                    {backlinks && backlinks.outgoing.length > 0 ? (
+                      <>
+                        <h3>当前页面的外部链接</h3>
+                        {backlinks.outgoing.map((link) => (
+                          <div
+                            className="backlink-outgoing"
+                            key={`${link.targetPath}:${link.syntax}`}
+                          >
+                            {link.targetPath} · {link.label}
+                          </div>
+                        ))}
+                      </>
+                    ) : null}
+                  </section>
+                ) : null}
               </article>
               <TutorPanel
+                initialSessionId={sessionTargetId}
                 onCitationSelect={handleCitationSelect}
                 path={openFile.path}
                 selection={tutorSelection}
                 sourceOptions={sourceOptions}
               />
             </div>
+          ) : workspace && onboardingCompleted === false ? (
+            <section
+              aria-label="首次设置"
+              className="onboarding-panel"
+            >
+              <p className="eyebrow">三步开始</p>
+              <h1>先完成资料、模型和图片设置</h1>
+              <p className="picker-copy">
+                学习记录、索引和会话保存在本机。只有模型推理与图片上传会访问网络。
+              </p>
+              <div className="onboarding-steps">
+                <article className="is-complete">
+                  <span>1</span>
+                  <div>
+                    <strong>资料目录</strong>
+                    <p>{workspace.path}</p>
+                  </div>
+                  <Check aria-hidden="true" size={16} />
+                </article>
+                <article className={onboardingStep === 2 ? "is-current" : ""}>
+                  <span>2</span>
+                  <div>
+                    <strong>模型服务</strong>
+                    <p>配置 Base URL、API Key 与聊天模型；也可以稍后设置。</p>
+                  </div>
+                </article>
+                <article className={onboardingStep === 3 ? "is-current" : ""}>
+                  <span>3</span>
+                  <div>
+                    <strong>七牛图片</strong>
+                    <p>可选；跳过不影响阅读、编辑、辅导、练习和复习。</p>
+                  </div>
+                </article>
+              </div>
+              <label className="data-boundary-confirm">
+                <input
+                  aria-label="首次联网资料边界确认"
+                  checked={boundaryAccepted}
+                  type="checkbox"
+                  onChange={(event) =>
+                    void setDataBoundary(event.target.checked)
+                  }
+                />
+                <span>
+                  我了解：模型会收到当前选区、固定资料与检索片段；图片上传会把图片发送到七牛云。
+                </span>
+              </label>
+              <div className="onboarding-actions">
+                {onboardingStep === 2 ? (
+                  <>
+                    <button
+                      className="secondary-button"
+                      disabled={!boundaryAccepted}
+                      type="button"
+                      onClick={() => void openSettings()}
+                    >
+                      打开模型设置
+                    </button>
+                    <button
+                      className="secondary-text-button"
+                      type="button"
+                      onClick={() => setOnboardingStep(3)}
+                    >
+                      稍后配置模型
+                    </button>
+                  </>
+                ) : null}
+                {onboardingStep === 3 ? (
+                  <>
+                    <button
+                      className="secondary-button"
+                      disabled={!boundaryAccepted}
+                      type="button"
+                      onClick={() => void openSettings()}
+                    >
+                      打开七牛设置
+                    </button>
+                    <button
+                      className="primary-button"
+                      type="button"
+                      onClick={() => void completeOnboarding()}
+                    >
+                      跳过七牛并完成
+                    </button>
+                  </>
+                ) : null}
+              </div>
+            </section>
           ) : workspace ? (
             <div className="empty-document">
               <h1>{workspace.name}</h1>
@@ -1052,7 +1751,7 @@ export default function HomePage() {
                 <FolderOpen size={24} />
               </div>
               <p className="eyebrow">路径已变化</p>
-              <h1>Notebook workspace 需要重新定位</h1>
+              <h1>学习工作区需要重新定位</h1>
               <p className="stale-workspace-label">原路径</p>
               <p className="stale-workspace-path">{staleWorkspace.path}</p>
               <p className="picker-copy">
@@ -1060,7 +1759,7 @@ export default function HomePage() {
               </p>
               <form className="picker-form" onSubmit={openWorkspace}>
                 <label htmlFor="relocated-workspace-path">
-                  新的 workspace 路径
+                  新的学习工作区路径
                 </label>
                 <div className="path-row">
                   <input
@@ -1090,10 +1789,10 @@ export default function HomePage() {
               <p className="eyebrow">本地优先</p>
               <h1>打开你的学习空间</h1>
               <p className="picker-copy">
-                选择一个本地 Notebook workspace，开始你的学习。
+                选择一个本地 学习工作区，开始你的学习。
               </p>
               <form className="picker-form" onSubmit={openWorkspace}>
-                <label htmlFor="workspace-path">Notebook workspace 路径</label>
+                <label htmlFor="workspace-path">学习工作区路径</label>
                 <div className="path-row">
                   <input
                     id="workspace-path"
@@ -1125,7 +1824,7 @@ export default function HomePage() {
               </form>
               {error ? <p className="error-message">{error}</p> : null}
               <p className="privacy-note">
-                资料保留在本机，product data 保存在本地应用目录。
+                资料保留在本机，学习数据 保存在本地应用目录。
               </p>
             </div>
           )}
@@ -1144,7 +1843,7 @@ export default function HomePage() {
               <div>
                 <h2 id="model-settings-title">模型设置</h2>
                 <p className="dialog-copy">
-                  连接你自己的 OpenAI-compatible 服务。资料片段只会发送到这个服务。
+                  连接你自己配置的兼容 OpenAI 接口的模型服务。资料片段只会发送到这个服务。
                 </p>
               </div>
               <button
@@ -1164,6 +1863,19 @@ export default function HomePage() {
               </div>
             ) : (
               <>
+                <label className="data-boundary-confirm">
+                  <input
+                    aria-label="资料发送边界确认"
+                    checked={boundaryAccepted}
+                    type="checkbox"
+                    onChange={(event) =>
+                      void setDataBoundary(event.target.checked)
+                    }
+                  />
+                  <span>
+                    我了解：向模型提问时，选中的资料片段与检索上下文会发送到我配置的模型服务；上传图片时会发送到七牛云。
+                  </span>
+                </label>
                 <form className="settings-form" onSubmit={saveModelSettings}>
                   <label htmlFor="model-base-url">Base URL</label>
                   <input
@@ -1182,7 +1894,7 @@ export default function HomePage() {
                     name="model-api-key"
                     autoComplete="new-password"
                     placeholder={
-                      hasModelApiKey ? "已保存在 Keychain，留空则不修改" : ""
+                      hasModelApiKey ? "已保存在系统安全存储，留空则不修改" : ""
                     }
                     spellCheck={false}
                     type="password"
@@ -1212,7 +1924,7 @@ export default function HomePage() {
                     <label htmlFor="embedding-enabled">启用语义检索</label>
                     <p>关闭后只使用本地全文检索，资料仍可正常提问。</p>
                   </div>
-                  <label htmlFor="embedding-model">Embedding 模型</label>
+                  <label htmlFor="embedding-model">向量模型</label>
                   <input
                     id="embedding-model"
                     name="embedding-model"
@@ -1236,7 +1948,10 @@ export default function HomePage() {
                     <button
                       className="secondary-text-button settings-test"
                       disabled={
-                        modelTesting || embeddingTesting || modelSaving
+                        !boundaryAccepted ||
+                        modelTesting ||
+                        embeddingTesting ||
+                        modelSaving
                       }
                       type="button"
                       onClick={() => void testModelConnection()}
@@ -1246,14 +1961,17 @@ export default function HomePage() {
                     <button
                       className="secondary-text-button settings-test"
                       disabled={
-                        modelTesting || embeddingTesting || modelSaving
+                        !boundaryAccepted ||
+                        modelTesting ||
+                        embeddingTesting ||
+                        modelSaving
                       }
                       type="button"
                       onClick={() => void testEmbeddingConnection()}
                     >
                       {embeddingTesting
-                        ? "正在测试 Embedding…"
-                        : "测试 Embedding"}
+                        ? "正在测试向量模型…"
+                        : "测试向量模型"}
                     </button>
                     <button
                       className="secondary-text-button"
@@ -1264,7 +1982,7 @@ export default function HomePage() {
                     </button>
                     <button
                       className="primary-button"
-                      disabled={modelSaving}
+                      disabled={modelSaving || !boundaryAccepted}
                       type="submit"
                     >
                       {modelSaving ? "正在保存…" : "保存设置"}
@@ -1307,7 +2025,7 @@ export default function HomePage() {
                           autoComplete="new-password"
                           placeholder={
                             qiniuSettings?.hasAccessKey
-                              ? "已保存在 Keychain"
+                              ? "已保存在系统安全存储"
                               : ""
                           }
                           spellCheck={false}
@@ -1326,7 +2044,7 @@ export default function HomePage() {
                           autoComplete="new-password"
                           placeholder={
                             qiniuSettings?.hasSecretKey
-                              ? "已保存在 Keychain"
+                              ? "已保存在系统安全存储"
                               : ""
                           }
                           spellCheck={false}
@@ -1357,12 +2075,105 @@ export default function HomePage() {
                       <button
                         className="primary-button"
                         type="submit"
-                        disabled={!qiniuBucket.trim() || !qiniuDomain.trim()}
+                      disabled={
+                        !boundaryAccepted ||
+                        !qiniuBucket.trim() ||
+                        !qiniuDomain.trim()
+                      }
                       >
                         保存七牛配置
                       </button>
                     </div>
                   </form>
+                </section>
+
+                <section className="settings-section" aria-label="工作区管理">
+                  <h2 id="workspace-management-title">工作区</h2>
+                  <p className="dialog-copy">
+                    同一时间只激活一个本地资料目录。移除注册记录不会删除磁盘文件。
+                  </p>
+                  <div className="workspace-management-list">
+                    {registeredWorkspaces.map((workspaceItem) => (
+                      <div
+                        className={`workspace-management-row ${
+                          workspaceItem.active ? "is-active" : ""
+                        }`}
+                        key={workspaceItem.path}
+                      >
+                        <div>
+                          <input
+                            aria-label={`工作区名称 ${workspaceItem.path}`}
+                            value={workspaceNames[workspaceItem.path] ?? ""}
+                            onChange={(event) =>
+                              setWorkspaceNames((current) => ({
+                                ...current,
+                                [workspaceItem.path]: event.target.value
+                              }))
+                            }
+                          />
+                          <small title={workspaceItem.path}>
+                            {workspaceItem.path}
+                          </small>
+                        </div>
+                        <div className="workspace-management-actions">
+                          <button
+                            className="secondary-text-button"
+                            disabled={workspaceItem.active}
+                            type="button"
+                            onClick={() =>
+                              void activateWorkspacePath(workspaceItem.path)
+                            }
+                          >
+                            {workspaceItem.active ? "当前工作区" : "切换"}
+                          </button>
+                          <button
+                            className="secondary-text-button"
+                            type="button"
+                            onClick={() => void renameWorkspace(workspaceItem.path)}
+                          >
+                            保存名称
+                          </button>
+                          <button
+                            className="danger-text-button"
+                            type="button"
+                            onClick={() =>
+                              void removeWorkspaceRegistration(
+                                workspaceItem.path
+                              )
+                            }
+                          >
+                            移除注册
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="workspace-add-row">
+                    <label htmlFor="new-workspace-path">添加本地工作区</label>
+                    <div className="path-row">
+                      <input
+                        id="new-workspace-path"
+                        placeholder="/Users/you/Documents/另一个学习目录"
+                        value={newWorkspacePath}
+                        onChange={(event) => setNewWorkspacePath(event.target.value)}
+                      />
+                      <button
+                        className="secondary-button"
+                        disabled={!newWorkspacePath.trim()}
+                        type="button"
+                        onClick={() =>
+                          void activateWorkspacePath(newWorkspacePath.trim())
+                        }
+                      >
+                        添加并切换
+                      </button>
+                    </div>
+                  </div>
+                  {workspaceStatus ? (
+                    <p className="settings-status" role="status">
+                      {workspaceStatus}
+                    </p>
+                  ) : null}
                 </section>
 
                 <BackupSettings disabled={!workspace} />
@@ -1382,9 +2193,23 @@ export default function HomePage() {
           >
             <h2 id="create-page-title">新建 Markdown 页面</h2>
             <p className="dialog-copy">
-              创建位置：{selectedDirectoryPath() || workspace?.name || "workspace 根目录"}
+              创建位置：{selectedDirectoryPath() || workspace?.name || "工作区根目录"}
             </p>
             <form onSubmit={createPage}>
+              <label htmlFor="page-template">页面模板</label>
+              <select
+                id="page-template"
+                name="page-template"
+                value={selectedTemplate}
+                onChange={(event) => setSelectedTemplate(event.target.value)}
+              >
+                <option value="">空白页面</option>
+                {templates.map((template) => (
+                  <option key={template.path} value={template.path}>
+                    {template.name}
+                  </option>
+                ))}
+              </select>
               <label htmlFor="new-page-name">页面名称</label>
               <input
                 autoFocus
@@ -1425,7 +2250,7 @@ export default function HomePage() {
           >
             <h2 id="move-entry-title">重命名或移动</h2>
             <p className="dialog-copy">
-              输入相对于 workspace 的新路径。目录使用名称，页面保留 .md 后缀。
+              输入相对于工作区的新路径。目录使用名称，页面保留原后缀。
             </p>
             <form onSubmit={moveEntry}>
               <label htmlFor="new-entry-path">新相对路径</label>
@@ -1497,7 +2322,7 @@ export default function HomePage() {
       <SearchDialog
         open={searchOpen}
         onClose={() => setSearchOpen(false)}
-        onSelect={openSearchResult}
+        onSelect={(result) => void openSearchResult(result)}
       />
     </main>
   );

@@ -1,6 +1,15 @@
 "use client";
 
-import { FileText, FileType2, LoaderCircle, Search, X } from "lucide-react";
+import {
+  BookOpenCheck,
+  Bookmark,
+  FileText,
+  FileType2,
+  History,
+  LoaderCircle,
+  Search,
+  X
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 export type SearchResult = {
@@ -8,17 +17,34 @@ export type SearchResult = {
   blockIndex: number | null;
   headingPath: string[];
   id: string;
-  kind: "markdown" | "pdf";
+  kind: "markdown" | "pdf" | "text";
   matchedIn: string;
   page: number | null;
   path: string;
   snippet: string;
   tags: string[];
   title: string;
+  entityId?: string;
+  resultType: "source" | "session" | "gap" | "practice";
+  sessionId?: string;
+  quote?: string;
 };
 
 type SearchResponse = {
   detail?: string;
+  index?: {
+    failedSources: number;
+    indexedSources: number;
+    removedSources: number;
+    totalSources: number;
+    unchangedSources: number;
+  };
+  indexIssues?: Array<{
+    error: string;
+    indexedAt: string;
+    kind: string;
+    path: string;
+  }>;
   results: SearchResult[];
 };
 
@@ -35,6 +61,12 @@ export function SearchDialog({
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [indexIssues, setIndexIssues] = useState<SearchResponse["indexIssues"]>(
+    []
+  );
+  const [indexStats, setIndexStats] = useState<SearchResponse["index"]>();
+  const [reindexStatus, setReindexStatus] = useState<string | null>(null);
+  const [reindexing, setReindexing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -44,6 +76,9 @@ export function SearchDialog({
     setQuery("");
     setResults([]);
     setError(null);
+    setIndexIssues([]);
+    setIndexStats(undefined);
+    setReindexStatus(null);
     window.setTimeout(() => inputRef.current?.focus(), 0);
   }, [open]);
 
@@ -74,6 +109,8 @@ export function SearchDialog({
           throw new Error(data.detail ?? "搜索暂时不可用。");
         }
         setResults(data.results);
+        setIndexIssues(data.indexIssues ?? []);
+        setIndexStats(data.index);
       } catch (searchError) {
         if (!controller.signal.aborted) {
           setResults([]);
@@ -95,6 +132,31 @@ export function SearchDialog({
       window.clearTimeout(timer);
     };
   }, [open, query]);
+
+  async function rebuildIndex() {
+    setReindexing(true);
+    setReindexStatus(null);
+    try {
+      const response = await fetch("/api/search/reindex", { method: "POST" });
+      const data = (await response.json()) as SearchResponse;
+      if (!response.ok) {
+        throw new Error(data.detail ?? "索引重建失败。");
+      }
+      setIndexIssues(data.indexIssues ?? []);
+      setIndexStats(data.index);
+      setReindexStatus(
+        data.index
+          ? `重建完成：索引 ${data.index.indexedSources} 个文件`
+          : "重建完成"
+      );
+    } catch (rebuildError) {
+      setReindexStatus(
+        rebuildError instanceof Error ? rebuildError.message : "索引重建失败。"
+      );
+    } finally {
+      setReindexing(false);
+    }
+  }
 
   useEffect(() => {
     if (!open) {
@@ -162,7 +224,16 @@ export function SearchDialog({
 
         <div className="search-results" aria-live="polite">
           {results.map((result) => {
-            const Icon = result.kind === "pdf" ? FileType2 : FileText;
+            const Icon =
+              result.resultType === "session"
+                ? History
+                : result.resultType === "gap"
+                  ? Bookmark
+                  : result.resultType === "practice"
+                    ? BookOpenCheck
+                    : result.kind === "pdf"
+                      ? FileType2
+                      : FileText;
             return (
               <button
                 className="search-result"
@@ -176,7 +247,17 @@ export function SearchDialog({
                 <span className="search-result-copy">
                   <span className="search-result-heading">
                     <strong>{result.title}</strong>
-                    <span>{result.path}</span>
+                    <span>
+                      {result.resultType === "source"
+                        ? "资料"
+                        : result.resultType === "session"
+                          ? "学习会话"
+                          : result.resultType === "gap"
+                            ? "知识缺口"
+                            : "练习项"}
+                      {" · "}
+                      {result.path}
+                    </span>
                   </span>
                   {result.headingPath.length > 0 || result.page ? (
                     <span className="search-result-locator">
@@ -204,6 +285,34 @@ export function SearchDialog({
           ) : null}
           {error ? <p className="search-error">{error}</p> : null}
         </div>
+        <footer className="search-index-status">
+          <div>
+            <strong>本地索引</strong>
+            <span>
+              {indexStats
+                ? `${indexStats.totalSources} 个资料，${indexStats.failedSources} 个失败`
+                : "开始搜索后显示索引状态"}
+            </span>
+          </div>
+          {indexIssues && indexIssues.length > 0 ? (
+            <div className="search-index-issues" role="alert">
+              <strong>索引问题</strong>
+              {indexIssues.map((issue) => (
+                <span key={issue.path}>
+                  {issue.path} · {issue.error}
+                </span>
+              ))}
+            </div>
+          ) : null}
+          {reindexStatus ? <span role="status">{reindexStatus}</span> : null}
+          <button
+            disabled={reindexing}
+            type="button"
+            onClick={() => void rebuildIndex()}
+          >
+            {reindexing ? "正在重建索引…" : "重建索引"}
+          </button>
+        </footer>
       </section>
     </div>
   );

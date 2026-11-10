@@ -1,12 +1,16 @@
 "use client";
 
 import {
+  Archive,
+  ArchiveRestore,
   BookOpenCheck,
   BookmarkPlus,
+  History,
   PanelRight,
   RotateCcw,
   Send,
   Square,
+  Trash2,
   X
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -19,7 +23,7 @@ export type TutorCitation = {
   blockIndex: number | null;
   headingPath: string[];
   key?: string;
-  kind: "markdown" | "pdf";
+  kind: "markdown" | "pdf" | "text";
   path: string;
   page: number | null;
   quote: string;
@@ -27,7 +31,7 @@ export type TutorCitation = {
 };
 
 export type TutorSourceOption = {
-  kind: "markdown" | "pdf";
+  kind: "markdown" | "pdf" | "text";
   name: string;
   path: string;
 };
@@ -38,7 +42,7 @@ type TutorSource = {
   headingPath: string[];
   id: string;
   isInitial: boolean;
-  kind: "markdown" | "pdf";
+  kind: "markdown" | "pdf" | "text";
   page: number | null;
   path: string;
   quote: string;
@@ -55,7 +59,7 @@ type TutorContext = {
   };
   omitted: Array<{
     blockId: string | null;
-    kind: "markdown" | "pdf";
+    kind: "markdown" | "pdf" | "text";
     origin: string;
     page: number | null;
     path: string;
@@ -72,7 +76,7 @@ type TutorContext = {
   retrieved: Array<{
     blockId: string | null;
     headingPath: string[];
-    kind: "markdown" | "pdf";
+    kind: "markdown" | "pdf" | "text";
     origin: string;
     path: string;
     page: number | null;
@@ -83,7 +87,7 @@ type TutorContext = {
     blockId: string | null;
     blockIndex: number | null;
     headingPath: string[];
-    kind: "markdown" | "pdf";
+    kind: "markdown" | "pdf" | "text";
     path: string;
     page: number | null;
     quote: string;
@@ -93,7 +97,7 @@ type TutorContext = {
     chunks: Array<{
       blockId: string | null;
       headingPath: string[];
-      kind: "markdown" | "pdf";
+      kind: "markdown" | "pdf" | "text";
       path: string;
       page: number | null;
       quote: string;
@@ -112,6 +116,17 @@ type LastRequest = {
   supplementRequested: boolean;
 };
 
+type SessionSummary = {
+  archived: boolean;
+  createdAt: string | null;
+  id: string;
+  path: string;
+  quote: string;
+  sourceCount?: number;
+  title: string;
+  updatedAt: string | null;
+};
+
 async function readError(response: Response): Promise<string> {
   try {
     const payload = (await response.json()) as { detail?: string };
@@ -122,11 +137,13 @@ async function readError(response: Response): Promise<string> {
 }
 
 export function TutorPanel({
+  initialSessionId,
   onCitationSelect,
   path,
   selection,
   sourceOptions
 }: {
+  initialSessionId?: string | null;
   onCitationSelect: (citation: TutorCitation) => void;
   path: string;
   selection: TutorSelection | null;
@@ -135,6 +152,7 @@ export function TutorPanel({
   const [mode, setMode] = useState<"guided" | "direct">("guided");
   const [question, setQuestion] = useState("");
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionAnchorKey, setSessionAnchorKey] = useState<string | null>(null);
   const [status, setStatus] = useState<TutorStatus>("idle");
   const [answer, setAnswer] = useState("");
   const [answerType, setAnswerType] = useState<string | null>(null);
@@ -143,6 +161,7 @@ export function TutorPanel({
   const [context, setContext] = useState<TutorContext | null>(null);
   const [contextOpen, setContextOpen] = useState(false);
   const [retrievalComplete, setRetrievalComplete] = useState(false);
+  const [receivedCharacters, setReceivedCharacters] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [lastRequest, setLastRequest] = useState<LastRequest | null>(null);
   const [sources, setSources] = useState<TutorSource[]>([]);
@@ -153,12 +172,29 @@ export function TutorPanel({
   const [gapSessionId, setGapSessionId] = useState<string | null>(null);
   const [gapCreating, setGapCreating] = useState(false);
   const [gapStatus, setGapStatus] = useState<string | null>(null);
+  const [sessionPanelOpen, setSessionPanelOpen] = useState(false);
+  const [sessionSearch, setSessionSearch] = useState("");
+  const [sessionList, setSessionList] = useState<SessionSummary[]>([]);
+  const [sessionTitles, setSessionTitles] = useState<Record<string, string>>(
+    {}
+  );
+  const [sessionListError, setSessionListError] = useState<string | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
+  const selectionAnchorKey = selection
+    ? [
+        path,
+        selection.kind,
+        selection.blockId ?? "",
+        selection.page ?? "",
+        selection.quote.replace(/\s+/g, " ").trim()
+      ].join("\u001f")
+    : null;
 
   useEffect(() => {
     controllerRef.current?.abort();
     controllerRef.current = null;
     setSessionId(null);
+    setSessionAnchorKey(null);
     setStatus("idle");
     setAnswer("");
     setAnswerType(null);
@@ -167,6 +203,7 @@ export function TutorPanel({
     setContext(null);
     setContextOpen(false);
     setRetrievalComplete(false);
+    setReceivedCharacters(0);
     setError(null);
     setLastRequest(null);
     setSources([]);
@@ -175,14 +212,181 @@ export function TutorPanel({
     setGapDialogOpen(false);
     setGapSessionId(null);
     setGapStatus(null);
-  }, [path]);
+    setSessionPanelOpen(false);
+    setSessionSearch("");
+    setSessionList([]);
+    setSessionTitles({});
+    setSessionListError(null);
+    setQuestion("");
+  }, [selectionAnchorKey]);
+
+  useEffect(() => {
+    if (!initialSessionId) {
+      return;
+    }
+    let active = true;
+    void fetch(`/api/tutor/sessions/${initialSessionId}`, {
+      cache: "no-store"
+    })
+      .then(async (response) => {
+        const payload = (await response.json()) as {
+          detail?: string;
+          messages?: Array<{
+            answerType?: string | null;
+            citations?: TutorCitation[];
+            content: string;
+            role: string;
+          }>;
+          session?: {
+            id: string;
+          };
+          sources?: TutorSource[];
+        };
+        if (!response.ok || !payload.session) {
+          throw new Error(payload.detail ?? "无法打开学习会话。");
+        }
+        if (!active) {
+          return;
+        }
+        const lastAssistant = [...(payload.messages ?? [])]
+          .reverse()
+          .find((message) => message.role === "assistant");
+        setSessionId(payload.session.id);
+        setSessionAnchorKey(selectionAnchorKey);
+        setSources(payload.sources ?? []);
+        if (lastAssistant) {
+          setAnswer(lastAssistant.content);
+          setAnswerType(lastAssistant.answerType ?? null);
+          setCitations(lastAssistant.citations ?? []);
+          setStatus("done");
+        }
+      })
+      .catch((sessionError) => {
+        if (active) {
+          setError(
+            sessionError instanceof Error
+              ? sessionError.message
+              : "无法打开学习会话。"
+          );
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [initialSessionId, selectionAnchorKey]);
+
+  async function loadSessionList(query = sessionSearch) {
+    setSessionListError(null);
+    try {
+      const response = await fetch(
+        `/api/tutor/sessions?q=${encodeURIComponent(query.trim())}`,
+        { cache: "no-store" }
+      );
+      const payload = (await response.json()) as {
+        detail?: string;
+        sessions?: SessionSummary[];
+      };
+      if (!response.ok || !payload.sessions) {
+        throw new Error(payload.detail ?? "无法读取学习会话。");
+      }
+      setSessionList(payload.sessions);
+      setSessionTitles(
+        Object.fromEntries(
+          payload.sessions.map((session) => [session.id, session.title])
+        )
+      );
+    } catch (sessionError) {
+      setSessionListError(
+        sessionError instanceof Error
+          ? sessionError.message
+          : "无法读取学习会话。"
+      );
+    }
+  }
+
+  async function renameSession(sessionIdValue: string) {
+    const title = sessionTitles[sessionIdValue] ?? "";
+    try {
+      const response = await fetch(
+        `/api/tutor/sessions/${sessionIdValue}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title })
+        }
+      );
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+      await loadSessionList();
+    } catch (sessionError) {
+      setSessionListError(
+        sessionError instanceof Error
+          ? sessionError.message
+          : "无法重命名学习会话。"
+      );
+    }
+  }
+
+  async function setSessionArchived(
+    session: SessionSummary,
+    archived: boolean
+  ) {
+    try {
+      const response = await fetch(`/api/tutor/sessions/${session.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ archived })
+      });
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+      await loadSessionList();
+    } catch (sessionError) {
+      setSessionListError(
+        sessionError instanceof Error
+          ? sessionError.message
+          : "无法更新学习会话。"
+      );
+    }
+  }
+
+  async function deleteSession(session: SessionSummary) {
+    try {
+      const response = await fetch(`/api/tutor/sessions/${session.id}`, {
+        method: "DELETE"
+      });
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+      if (sessionId === session.id) {
+        setSessionId(null);
+        setSessionAnchorKey(null);
+        setAnswer("");
+        setAnswerType(null);
+        setCitations([]);
+        setContext(null);
+      }
+      await loadSessionList();
+    } catch (sessionError) {
+      setSessionListError(
+        sessionError instanceof Error
+          ? sessionError.message
+          : "无法删除学习会话。"
+      );
+    }
+  }
 
   async function ensureSession(): Promise<string> {
-    if (sessionId) {
+    if (
+      sessionId &&
+      selectionAnchorKey &&
+      sessionAnchorKey === selectionAnchorKey
+    ) {
       return sessionId;
     }
     if (!selection) {
-      throw new Error("请先在资料块、Markdown 选区或 PDF 选区上建立 Learning session。");
+      throw new Error("请先在资料块、Markdown 选区或 PDF 选区上建立 学习会话。");
     }
     const response = await fetch("/api/tutor/sessions", {
       method: "POST",
@@ -202,6 +406,7 @@ export function TutorPanel({
       sources?: TutorSource[];
     };
     setSessionId(session.id);
+    setSessionAnchorKey(selectionAnchorKey);
     setSources(session.sources ?? []);
     return session.id;
   }
@@ -228,7 +433,7 @@ export function TutorPanel({
         source?: TutorSource;
       };
       if (!response.ok || !payload.source) {
-        throw new Error(payload.detail ?? "无法固定这个 Learning source。");
+        throw new Error(payload.detail ?? "无法固定这个 学习资料。");
       }
       setSources((current) =>
         current.some((source) => source.id === payload.source?.id)
@@ -242,7 +447,7 @@ export function TutorPanel({
       );
     } catch (pinError) {
       setSourceStatus(
-        pinError instanceof Error ? pinError.message : "无法固定 Learning source。"
+        pinError instanceof Error ? pinError.message : "无法固定 学习资料。"
       );
     } finally {
       setSourceWorking(false);
@@ -314,12 +519,12 @@ export function TutorPanel({
       setSources((current) =>
         current.filter((source) => source.id !== sourceId)
       );
-      setSourceStatus("已移除 Learning source");
+      setSourceStatus("已移除学习资料");
     } catch (removeError) {
       setSourceStatus(
         removeError instanceof Error
           ? removeError.message
-          : "无法移除 Learning source。"
+          : "无法移除 学习资料。"
       );
     } finally {
       setSourceWorking(false);
@@ -356,6 +561,14 @@ export function TutorPanel({
       setMissing(
         Array.isArray(payload.missing) ? payload.missing.map(String) : []
       );
+      return;
+    }
+    if (eventName === "generation") {
+      setReceivedCharacters(Number(payload.receivedCharacters ?? 0));
+      return;
+    }
+    if (eventName === "retry") {
+      setReceivedCharacters(0);
       return;
     }
     if (eventName === "delta") {
@@ -399,6 +612,7 @@ export function TutorPanel({
     setMissing([]);
     setContext(null);
     setRetrievalComplete(false);
+    setReceivedCharacters(0);
     setError(null);
     setLastRequest({
       question: prompt.trim(),
@@ -480,25 +694,123 @@ export function TutorPanel({
   const streaming = status === "streaming";
   const answerTypeLabel =
     answerType === "grounded"
-      ? "Grounded answer"
+      ? "有据回答"
       : answerType === "insufficient_evidence"
         ? "证据不足"
         : answerType === "unsupported_supplement"
-          ? "Unsupported supplement"
+          ? "非资料补充"
           : null;
 
   return (
     <aside
-      aria-label="Grounded tutor"
+      aria-label="资料型私教"
       className="tutor-panel"
     >
       <header className="tutor-heading">
         <div>
-          <span className="field-label">Learning session</span>
+          <span className="field-label">学习会话</span>
           <h2>学习私教</h2>
         </div>
-        <BookOpenCheck aria-hidden="true" size={18} />
+        <div className="tutor-heading-actions">
+          <button
+            aria-expanded={sessionPanelOpen}
+            aria-label="学习会话记录"
+            type="button"
+            onClick={() => {
+              const next = !sessionPanelOpen;
+              setSessionPanelOpen(next);
+              if (next) {
+                void loadSessionList();
+              }
+            }}
+          >
+            <History aria-hidden="true" size={15} />
+          </button>
+          <BookOpenCheck aria-hidden="true" size={18} />
+        </div>
       </header>
+
+      {sessionPanelOpen ? (
+        <section aria-label="学习会话记录" className="tutor-session-panel">
+          <form
+            className="tutor-session-search"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void loadSessionList();
+            }}
+          >
+            <input
+              aria-label="搜索学习会话"
+              placeholder="搜索标题或锚点"
+              value={sessionSearch}
+              onChange={(event) => setSessionSearch(event.target.value)}
+            />
+            <button type="submit">搜索</button>
+          </form>
+          {sessionListError ? (
+            <p className="tutor-source-status" role="alert">
+              {sessionListError}
+            </p>
+          ) : null}
+          {sessionList.length > 0 ? (
+            <div className="tutor-session-list">
+              {sessionList.map((session) => (
+                <div
+                  className={`tutor-session-item ${
+                    session.archived ? "is-archived" : ""
+                  }`}
+                  key={session.id}
+                >
+                  <input
+                    aria-label={`会话标题 ${session.id}`}
+                    value={sessionTitles[session.id] ?? ""}
+                    onChange={(event) =>
+                      setSessionTitles((current) => ({
+                        ...current,
+                        [session.id]: event.target.value
+                      }))
+                    }
+                  />
+                  <span>
+                    {session.path}
+                    {session.archived ? " · 已归档" : ""}
+                  </span>
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => void renameSession(session.id)}
+                    >
+                      保存名称
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void setSessionArchived(session, !session.archived)
+                      }
+                    >
+                      {session.archived ? (
+                        <ArchiveRestore aria-hidden="true" size={12} />
+                      ) : (
+                        <Archive aria-hidden="true" size={12} />
+                      )}
+                      {session.archived ? "取消归档" : "归档"}
+                    </button>
+                    <button
+                      aria-label={`删除学习会话 ${session.id}`}
+                      type="button"
+                      onClick={() => void deleteSession(session)}
+                    >
+                      <Trash2 aria-hidden="true" size={12} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="tutor-empty">没有匹配的学习会话。</p>
+          )}
+        </section>
+      ) : null}
 
       <div className="tutor-mode" aria-label="辅导模式">
         <button
@@ -526,6 +838,8 @@ export function TutorPanel({
           <span className="field-label">
             {selection.kind === "pdf"
               ? `已绑定 PDF 第 ${selection.page} 页`
+              : selection.kind === "text"
+                ? "已绑定纯文本位置"
               : "已绑定 Markdown 选区"}
           </span>
           <p>{selection.quote}</p>
@@ -554,7 +868,7 @@ export function TutorPanel({
       )}
 
       {selection ? (
-        <section className="tutor-sources" aria-label="Learning sources">
+        <section className="tutor-sources" aria-label="学习资料">
           <div className="tutor-sources-heading">
             <strong>资料范围</strong>
             <span>{Math.max(sources.length, sessionId ? 1 : 0)} 个来源</span>
@@ -567,6 +881,8 @@ export function TutorPanel({
                   ? source.page
                     ? ` · 第 ${source.page} 页`
                     : " · 完整 PDF"
+                  : source.kind === "text"
+                    ? " · 纯文本"
                   : source.isInitial
                     ? " · 当前锚点"
                     : " · Markdown"}
@@ -585,12 +901,12 @@ export function TutorPanel({
           ))}
           <div className="tutor-source-picker">
             <select
-              aria-label="选择其他 Learning source"
+              aria-label="选择其他 学习资料"
               disabled={sourceWorking}
               value={sourcePath}
               onChange={(event) => setSourcePath(event.target.value)}
             >
-              <option value="">选择 Markdown 或 PDF</option>
+              <option value="">选择 Markdown、纯文本或 PDF</option>
               {sourceOptions.map((option) => (
                 <option key={option.path} value={option.path}>
                   {option.path}
@@ -684,7 +1000,9 @@ export function TutorPanel({
           ? "已绑定当前资料位置"
           : streaming
             ? retrievalComplete
-              ? "正在生成…"
+              ? receivedCharacters > 0
+                ? `正在生成… 已接收 ${receivedCharacters} 字，正在校验引用…`
+                : "正在生成…"
               : "正在检索资料…"
             : status === "done"
               ? "已完成"
@@ -758,7 +1076,7 @@ export function TutorPanel({
           <div className="tutor-answer-heading">
             <span>{answerTypeLabel ?? "正在整理回答"}</span>
             {answerType === "unsupported_supplement" ? (
-              <strong>不来自 Learning source</strong>
+              <strong>不来自学习资料</strong>
             ) : null}
           </div>
           <p>{answer}</p>
@@ -776,7 +1094,7 @@ export function TutorPanel({
             <div className="tutor-citations">
               {citations.map((citation) => (
                 <button
-                  aria-label={`Source citation ${citation.path}: ${citation.quote}`}
+                  aria-label={`资料引用 ${citation.path}: ${citation.quote}`}
                   key={citation.key ?? `${citation.sourceId}:${citation.path}:${
                     citation.blockId ?? citation.page ?? ""
                   }:${citation.quote}`}
@@ -784,9 +1102,11 @@ export function TutorPanel({
                   onClick={() => onCitationSelect(citation)}
                 >
                   <span>
-                    Source citation · {citation.path}
+                    资料引用 · {citation.path}
                     {citation.kind === "pdf"
                       ? ` · 第 ${citation.page} 页`
+                      : citation.kind === "text"
+                        ? " · 纯文本"
                       : citation.headingPath.length > 0
                       ? ` / ${citation.headingPath.at(-1)}`
                       : ""}
@@ -872,6 +1192,8 @@ export function TutorPanel({
                   {source.path}
                   {source.kind === "pdf" && source.page
                     ? ` · 第 ${source.page} 页`
+                    : source.kind === "text"
+                      ? " · 纯文本"
                     : ""}
                 </span>
               </div>

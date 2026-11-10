@@ -256,7 +256,7 @@ def semantic_search_workspace(
         except (json.JSONDecodeError, TypeError, ValueError):
             continue
         if len(query_vector) != len(vector):
-            raise ValueError("Embedding 向量维度与本地索引不一致。")
+            raise ValueError("向量模型向量维度与本地索引不一致。")
         score = _cosine_similarity(query_vector, vector)
         if score >= MIN_SEMANTIC_SCORE:
             scored.append((score, row))
@@ -319,7 +319,7 @@ def retrieve_tutor_sources(
                 "mode": "fulltext",
                 "label": "全文检索（已降级）",
                 "fallback": True,
-                "reason": "Embedding 检索不可用，已自动回退全文检索。",
+                "reason": "向量模型检索不可用，已自动回退全文检索。",
             },
             fulltext_stats,
         )

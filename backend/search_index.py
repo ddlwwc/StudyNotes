@@ -9,10 +9,11 @@ import fitz
 
 from documents import load_document
 from storage import connect
+from workspace_files import SOURCE_SUFFIXES, safe_source_files
 
 
 PARSER_VERSION = "fulltext-1"
-SUPPORTED_SUFFIXES = {".md", ".pdf"}
+SUPPORTED_SUFFIXES = SOURCE_SUFFIXES
 TAG_SEPARATOR = "\x1f"
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 BODY_TAG_RE = re.compile(r"(?:^|\s)#([\w\u3400-\u9fff-]+)")
@@ -29,13 +30,7 @@ def source_hash(file_path: Path) -> str:
 
 
 def source_files(workspace: Path) -> list[Path]:
-    files: list[Path] = []
-    for candidate in workspace.rglob("*"):
-        if any(part.startswith(".") for part in candidate.relative_to(workspace).parts):
-            continue
-        if candidate.is_file() and candidate.suffix.lower() in SUPPORTED_SUFFIXES:
-            files.append(candidate)
-    return sorted(files, key=lambda item: item.as_posix().casefold())
+    return safe_source_files(workspace, suffixes=SUPPORTED_SUFFIXES)
 
 
 def parse_frontmatter(markdown: str) -> tuple[list[str], str]:
@@ -157,7 +152,7 @@ def markdown_entries(
     body_tags = BODY_TAG_RE.findall(body)
     tags = list(dict.fromkeys([*frontmatter_tags, *body_tags]))
     blocks = markdown_blocks(body)
-    document = load_document(file_path)
+    document = load_document(file_path, repair_sidecar=False)
     metadata = document.get("blocks", [])
     if not isinstance(metadata, list):
         metadata = []
@@ -245,6 +240,48 @@ def pdf_entries(
     return entries
 
 
+def text_entries(
+    file_path: Path,
+    relative_path: str,
+    content_hash: str,
+) -> list[dict[str, object]]:
+    content = file_path.read_text(encoding="utf-8")
+    title = file_path.stem
+    entries: list[dict[str, object]] = [
+        {
+            "path": relative_path,
+            "kind": "text",
+            "block_id": None,
+            "block_index": None,
+            "heading_path": [],
+            "page": None,
+            "title": title,
+            "tags": [],
+            "body": "",
+            "content_hash": content_hash,
+        }
+    ]
+    for block_index, raw_line in enumerate(content.splitlines()):
+        text = normalize_text(raw_line)
+        if not text:
+            continue
+        entries.append(
+            {
+                "path": relative_path,
+                "kind": "text",
+                "block_id": None,
+                "block_index": block_index,
+                "heading_path": [],
+                "page": None,
+                "title": title,
+                "tags": [],
+                "body": text,
+                "content_hash": content_hash,
+            }
+        )
+    return entries
+
+
 def delete_source_index(connection, workspace: Path, relative_path: str) -> None:
     workspace_path = str(workspace.resolve())
     connection.execute(
@@ -308,11 +345,16 @@ def replace_source(
     relative_path: str,
     content_hash: str,
 ) -> None:
-    entries = (
-        markdown_entries(file_path, relative_path, content_hash)
-        if file_path.suffix.lower() == ".md"
-        else pdf_entries(file_path, relative_path, content_hash)
-    )
+    suffix = file_path.suffix.lower()
+    if suffix == ".md":
+        entries = markdown_entries(file_path, relative_path, content_hash)
+        kind = "markdown"
+    elif suffix == ".pdf":
+        entries = pdf_entries(file_path, relative_path, content_hash)
+        kind = "pdf"
+    else:
+        entries = text_entries(file_path, relative_path, content_hash)
+        kind = "text"
     delete_source_index(connection, workspace, relative_path)
     insert_entries(connection, workspace, entries)
     connection.execute(
@@ -331,7 +373,7 @@ def replace_source(
         (
             str(workspace.resolve()),
             relative_path,
-            "pdf" if file_path.suffix.lower() == ".pdf" else "markdown",
+            kind,
             content_hash,
             PARSER_VERSION,
         ),
@@ -384,29 +426,34 @@ def sync_workspace_index(workspace: Path, *, force: bool = False) -> dict[str, i
                 replace_source(connection, root, file_path, relative_path, content_hash)
             except (OSError, UnicodeDecodeError, ValueError):
                 stats["failedSources"] += 1
-                if indexed is None:
-                    connection.execute(
-                        """
-                        INSERT OR REPLACE INTO search_sources (
-                            workspace_path,
-                            path,
-                            kind,
-                            source_hash,
-                            parser_version,
-                            indexed_at,
-                            error
-                        )
-                        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
-                        """,
-                        (
-                            str(root),
-                            relative_path,
-                            "pdf" if file_path.suffix.lower() == ".pdf" else "markdown",
-                            content_hash,
-                            PARSER_VERSION,
-                            "索引失败",
-                        ),
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO search_sources (
+                        workspace_path,
+                        path,
+                        kind,
+                        source_hash,
+                        parser_version,
+                        indexed_at,
+                        error
                     )
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+                    """,
+                    (
+                        str(root),
+                        relative_path,
+                        (
+                            "pdf"
+                            if file_path.suffix.lower() == ".pdf"
+                            else "text"
+                            if file_path.suffix.lower() == ".txt"
+                            else "markdown"
+                        ),
+                        content_hash,
+                        PARSER_VERSION,
+                        "索引失败：文件无法解析",
+                    ),
+                )
                 continue
             stats["indexedSources"] += 1
 
@@ -425,6 +472,72 @@ def rebuild_workspace_index(workspace: Path) -> dict[str, int]:
             (str(root),),
         )
     return sync_workspace_index(root, force=True)
+
+
+def list_index_issues(workspace: Path) -> list[dict[str, object]]:
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT path, kind, error, indexed_at
+            FROM search_sources
+            WHERE workspace_path = ? AND error IS NOT NULL
+            ORDER BY path ASC
+            """,
+            (str(workspace.resolve()),),
+        ).fetchall()
+    return [
+        {
+            "path": row["path"],
+            "kind": row["kind"],
+            "error": row["error"],
+            "indexedAt": row["indexed_at"],
+        }
+        for row in rows
+    ]
+
+
+def list_workspace_tags(workspace: Path) -> list[str]:
+    sync_workspace_index(workspace)
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT tags
+            FROM search_fts
+            WHERE workspace_path = ?
+            """,
+            (str(workspace.resolve()),),
+        ).fetchall()
+    tags: set[str] = set()
+    for row in rows:
+        tags.update(
+            tag
+            for tag in str(row["tags"] or "").split(TAG_SEPARATOR)
+            if tag
+        )
+    return sorted(tags, key=str.casefold)
+
+
+def paths_for_tag(workspace: Path, tag: str) -> list[str]:
+    sync_workspace_index(workspace)
+    normalized_tag = tag.strip()
+    if not normalized_tag:
+        return []
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT path, tags
+            FROM search_fts
+            WHERE workspace_path = ?
+            ORDER BY path ASC
+            """,
+            (str(workspace.resolve()),),
+        ).fetchall()
+    return [
+        str(row["path"])
+        for row in rows
+        if normalized_tag
+        in str(row["tags"] or "").split(TAG_SEPARATOR)
+    ]
 
 
 def fts_query(value: str) -> Optional[str]:

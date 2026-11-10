@@ -353,7 +353,8 @@ async function openStudyPage(page: Page): Promise<string> {
 }
 
 async function configureModel(page: Page, baseUrl: string) {
-  await page.getByRole("button", { name: "设置" }).click();
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByLabel("资料发送边界确认").check();
   await page.getByLabel("Base URL").fill(baseUrl);
   await page.getByLabel("API Key").fill("test-key");
   await page.getByLabel("聊天模型").fill("mock-model");
@@ -368,7 +369,7 @@ async function prepareTutor(
   baseUrl: string
 ) {
   await page.goto(webUrl);
-  await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+  await page.getByLabel("学习工作区路径").fill(workspaceDir);
   await page.getByRole("button", { name: "打开工作区" }).click();
   await configureModel(page, baseUrl);
   await page
@@ -377,10 +378,10 @@ async function prepareTutor(
   await page
     .getByText("注意力帮助学习者筛选当前任务相关的信息。", { exact: true })
     .click();
-  return page.getByRole("complementary", { name: "Grounded tutor" });
+  return page.getByRole("complementary", { name: "资料型私教" });
 }
 
-test("a Learning session generates, answers, cites, and persists single-choice Practice items", async ({
+test("a 学习会话 generates, answers, cites, and persists single-choice Practice items", async ({
   page
 }) => {
   const app = await startApp();
@@ -902,7 +903,7 @@ test("Review schedules 1, 3, 7, 14 days, batches 20 items, and supports date con
 
   try {
     await page.goto(app.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await expect(
       page.getByRole("button", { name: "注意力机制.md", exact: true })
@@ -1045,6 +1046,121 @@ test("Review schedules 1, 3, 7, 14 days, batches 20 items, and supports date con
       })
       .toBeNull();
   } finally {
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("Practice items and 学习会话s can be renamed, archived, and deleted", async ({
+  page
+}) => {
+  const app = await startApp();
+  const model = await startMockModel();
+  const workspaceDir = await openStudyPage(page);
+
+  try {
+    const tutor = await prepareTutor(
+      page,
+      app.webUrl,
+      workspaceDir,
+      model.baseUrl
+    );
+    const practice = page.getByRole("region", { name: "练习题" });
+    await practice.getByRole("button", { name: "考考我" }).click();
+    await expect(practice.getByText("第 1 / 3 题")).toBeVisible();
+
+    await practice.getByRole("button", { name: "删除当前练习项" }).click();
+    await practice.getByRole("button", { name: "确认删除" }).click();
+    await expect(practice.getByText("第 1 / 2 题")).toBeVisible();
+
+    await tutor.getByRole("button", { name: "学习会话记录" }).click();
+    const sessionPanel = tutor.getByRole("region", { name: "学习会话记录" });
+    const titleInput = sessionPanel.locator(".tutor-session-item input").first();
+    await titleInput.fill("注意力复习会话");
+    await sessionPanel.getByRole("button", { name: "保存名称" }).click();
+    await expect(titleInput).toHaveValue("注意力复习会话");
+
+    await sessionPanel.getByRole("button", { name: "归档" }).click();
+    await expect(sessionPanel.getByText("已归档")).toBeVisible();
+    await sessionPanel.getByRole("button", { name: "取消归档" }).click();
+    await expect(sessionPanel.getByText("已归档")).toHaveCount(0);
+
+    await sessionPanel
+      .getByRole("button", { name: /删除学习会话/ })
+      .click();
+    await expect(sessionPanel.getByText("没有匹配的学习会话。")).toBeVisible();
+  } finally {
+    await model.close();
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("Cmd+K searches sessions, Gaps, Practice items and shows real index failures", async ({
+  page
+}) => {
+  const app = await startApp();
+  const model = await startMockModel();
+  const workspaceDir = await openStudyPage(page);
+  await writeFile(
+    path.join(workspaceDir, "课程", "损坏资料.pdf"),
+    "not a real pdf",
+    "utf8"
+  );
+
+  try {
+    const tutor = await prepareTutor(
+      page,
+      app.webUrl,
+      workspaceDir,
+      model.baseUrl
+    );
+    await page.getByLabel("向当前资料提问").fill("注意力为什么重要？");
+    await tutor.getByRole("button", { name: "发送" }).click();
+    await expect(tutor.getByText("已完成")).toBeVisible();
+
+    const sessionId = await page.evaluate(async () => {
+      const response = await fetch("/api/tutor/sessions");
+      const payload = (await response.json()) as {
+        sessions: Array<{ id: string }>;
+      };
+      return payload.sessions[0].id;
+    });
+    await page.evaluate(async (activeSessionId) => {
+      const response = await fetch(
+        `/api/tutor/sessions/${activeSessionId}/gaps`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: "注意力缺口需要复习" })
+        }
+      );
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+    }, sessionId);
+
+    const practice = page.getByRole("region", { name: "练习题" });
+    await practice.getByRole("button", { name: "考考我" }).click();
+    await expect(practice.getByText("第 1 / 3 题")).toBeVisible();
+
+    await page.getByRole("button", { name: /搜索/ }).click();
+    const search = page.getByRole("dialog", { name: "搜索学习资料" });
+    await search.getByRole("searchbox").fill("注意力");
+    await expect(search.getByText(/学习会话 ·/).first()).toBeVisible();
+    await expect(search.getByText(/知识缺口 · 注意力缺口/)).toBeVisible();
+    await expect(search.getByText(/练习项 · 注意力/).first()).toBeVisible();
+    await expect(search.getByRole("alert")).toContainText("损坏资料.pdf");
+    await search.getByRole("button", { name: "重建索引" }).click();
+    await expect(search.getByText("重建完成：索引 1 个文件")).toBeVisible();
+
+    await search
+      .locator(".search-result")
+      .filter({ hasText: "学习会话 ·" })
+      .click();
+    await expect(tutor.getByText("已完成")).toBeVisible();
+  } finally {
+    await model.close();
     await app.stop();
     await rm(workspaceDir, { recursive: true, force: true });
   }

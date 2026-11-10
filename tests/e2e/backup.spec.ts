@@ -158,7 +158,7 @@ async function openStudyPage(page: Page, webUrl: string) {
   );
 
   await page.goto(webUrl);
-  await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+  await page.getByLabel("学习工作区路径").fill(workspaceDir);
   await page.getByRole("button", { name: "打开工作区" }).click();
   return workspaceDir;
 }
@@ -481,7 +481,7 @@ test("Settings exports one backup package without credentials", async ({
 
   try {
     await configureData(page, app.webUrl, workspaceDir);
-    await page.getByRole("button", { name: "设置" }).click();
+    await page.getByRole("button", { name: "设置", exact: true }).click();
     const backupSection = page.getByRole("region", { name: "学习数据备份" });
     await expect(backupSection).toBeVisible();
     await backupSection.getByRole("button", { name: "导出备份" }).click();
@@ -581,7 +581,7 @@ test("a backup restores the current workspace learning relationships and keeps s
       sourceWorkspace,
       model.baseUrl
     );
-    await page.getByRole("button", { name: "设置" }).click();
+    await page.getByRole("button", { name: "设置", exact: true }).click();
     const sourceBackupSection = page.getByRole("region", {
       name: "学习数据备份"
     });
@@ -718,7 +718,7 @@ test("a backup restores the current workspace learning relationships and keeps s
     );
     expect(targetSessionResponse.ok()).toBe(true);
 
-    await page.getByRole("button", { name: "设置" }).click();
+    await page.getByRole("button", { name: "设置", exact: true }).click();
     const targetBackupSection = page.getByRole("region", {
       name: "学习数据备份"
     });
@@ -877,7 +877,7 @@ test("a corrupt or path-traversing package leaves current data intact and keeps 
       app.webUrl,
       workspaceDir
     );
-    await page.getByRole("button", { name: "设置" }).click();
+    await page.getByRole("button", { name: "设置", exact: true }).click();
     const backupSection = page.getByRole("region", { name: "学习数据备份" });
     await backupSection.getByRole("button", { name: "导出备份" }).click();
     const exportResult = backupSection.locator("[data-backup-path]");
@@ -968,7 +968,7 @@ test("a failed restore transaction rolls back to the current learning data", asy
       workspaceDir,
       model.baseUrl
     );
-    await page.getByRole("button", { name: "设置" }).click();
+    await page.getByRole("button", { name: "设置", exact: true }).click();
     const backupSection = page.getByRole("region", { name: "学习数据备份" });
     await backupSection.getByRole("button", { name: "导出备份" }).click();
     const exportResult = backupSection.locator("[data-backup-path]");

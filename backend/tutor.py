@@ -19,6 +19,7 @@ from model_client import (
 )
 from search_index import normalize_text, sync_workspace_index
 from storage import connect, save_session_message
+from workspace_files import SOURCE_SUFFIXES, WorkspaceFileError, safe_workspace_file
 
 
 ALLOWED_ANSWER_TYPES = {
@@ -28,6 +29,13 @@ ALLOWED_ANSWER_TYPES = {
 }
 JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 TOKEN_RE = re.compile(r"[\w\u3400-\u9fff-]+")
+CITATION_MARKER_RE = re.compile(r"\[(S\d+)\]")
+SENTENCE_UNIT_RE = re.compile(
+    r"[^。！？!?；;\n]+(?:[。！？!?；;](?:\s*\[S\d+\])*)?"
+)
+INSUFFICIENT_SENTENCE_RE = re.compile(
+    r"(资料不足|证据不足|无法确认|不能确认|未找到|没有足够|不足以)"
+)
 MAX_CONTEXT_CHUNKS = 6
 MAX_CONTEXT_CHARACTERS = 12_000
 
@@ -44,7 +52,7 @@ def normalize_source_path(value: str) -> str:
         or normalized.startswith("/")
         or normalized.startswith("../")
     ):
-        raise TutorContextError("Learning source 路径无效。")
+        raise TutorContextError("学习资料 路径无效。")
     return normalized
 
 
@@ -57,11 +65,12 @@ def source_key(
     page: Optional[int],
     quote: str,
 ) -> str:
-    position = (
-        f"block:{block_id or ''}:{block_index if block_index is not None else ''}"
-        if kind == "markdown"
-        else f"page:{page if page is not None else ''}"
-    )
+    if kind in {"markdown", "text"}:
+        position = (
+            f"block:{block_id or ''}:{block_index if block_index is not None else ''}"
+        )
+    else:
+        position = f"page:{page if page is not None else ''}"
     value = "\x1f".join(
         [
             normalize_source_path(relative_path),
@@ -76,14 +85,14 @@ def source_key(
 def _workspace_file(workspace: Path, relative_path: str) -> Path:
     normalized = normalize_source_path(relative_path)
     root = workspace.resolve()
-    candidate = (root / normalized).resolve()
     try:
-        candidate.relative_to(root)
-    except ValueError as error:
-        raise TutorContextError("Learning source 路径无效。") from error
-    if not candidate.is_file() or candidate.suffix.lower() not in {".md", ".pdf"}:
-        raise TutorContextError("Learning source 不存在。")
-    return candidate
+        return safe_workspace_file(
+            root,
+            root / normalized,
+            allowed_suffixes=SOURCE_SUFFIXES,
+        )
+    except WorkspaceFileError as error:
+        raise TutorContextError("学习资料路径无效或不存在。") from error
 
 
 def _heading_path(value: object) -> list[str]:
@@ -97,9 +106,11 @@ def _load_markdown_block(
     relative_path: str,
     block_id: Optional[str],
     quote: str,
+    *,
+    kind: str = "markdown",
 ) -> dict[str, object]:
     sync_workspace_index(workspace)
-    parameters: list[object] = [str(workspace.resolve()), relative_path]
+    parameters: list[object] = [str(workspace.resolve()), relative_path, kind]
     block_filter = ""
     if block_id:
         block_filter = " AND block_id = ?"
@@ -116,7 +127,7 @@ def _load_markdown_block(
             FROM search_fts
             WHERE workspace_path = ?
               AND path = ?
-              AND kind = 'markdown'
+              AND kind = ?
               {block_filter}
             ORDER BY block_index ASC
             """,
@@ -134,10 +145,10 @@ def _load_markdown_block(
                 FROM search_fts
                 WHERE workspace_path = ?
                   AND path = ?
-                  AND kind = 'markdown'
+                  AND kind = ?
                 ORDER BY block_index ASC
                 """,
-                (str(workspace.resolve()), relative_path),
+                (str(workspace.resolve()), relative_path, kind),
             ).fetchall()
 
     normalized_quote = normalize_text(quote)
@@ -158,7 +169,7 @@ def _load_markdown_block(
     if selected_quote not in body:
         raise TutorContextError("选区内容已变化，请重新选择 Markdown 块。")
     return {
-        "kind": "markdown",
+        "kind": kind,
         "blockId": matching["block_id"],
         "blockIndex": matching["block_index"],
         "page": None,
@@ -236,24 +247,35 @@ def resolve_tutor_source(
     if file_path.suffix.lower() == ".pdf":
         source = _load_pdf_source(file_path, normalized_path, page, quote)
     else:
+        source_kind = "text" if file_path.suffix.lower() == ".txt" else "markdown"
         if block_id or normalize_text(quote):
             source = _load_markdown_block(
                 workspace,
                 normalized_path,
                 block_id,
                 quote,
+                kind=source_kind,
             )
         else:
-            document = load_document(file_path)
+            if source_kind == "text":
+                try:
+                    text = file_path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as error:
+                    raise TutorContextError("无法读取纯文本资料。") from error
+                title = file_path.stem
+            else:
+                load_document(file_path)
+                text = ""
+                title = file_path.stem
             source = {
-                "kind": "markdown",
+                "kind": source_kind,
                 "blockId": None,
                 "blockIndex": None,
                 "page": None,
                 "headingPath": [],
                 "path": normalized_path,
-                "text": "",
-                "title": str(document["title"]),
+                "text": normalize_text(text),
+                "title": title,
                 "quote": "",
                 "wholeFile": True,
             }
@@ -624,12 +646,12 @@ def tutor_messages(
         else "学习者要求直接解释：结论要清楚直接，但仍以资料为主要依据。"
     )
     supplement_instruction = (
-        "用户已明确请求非资料补充。可以返回 unsupported_supplement，但必须说明不来自 Learning source。"
+        "用户已明确请求非资料补充。可以返回 unsupported_supplement，但必须说明不来自 学习资料。"
         if supplement_requested
         else "用户没有请求非资料补充。禁止返回 unsupported_supplement。"
     )
     system = (
-        "你是 StudyNotes 的 Grounded tutor。你只能把给定 Learning source 支持的内容"
+        "你是 StudyNotes 的 资料型私教。你只能把给定 学习资料 支持的内容"
         "呈现为 grounded answer。资料不足时必须返回 insufficient_evidence 并说明缺口。"
         f"{mode_instruction}{supplement_instruction}"
         "只返回一个 JSON 对象，不要使用 Markdown 代码围栏。结构必须是："
@@ -637,14 +659,16 @@ def tutor_messages(
         '"answer":"简体中文回答","citations":[{"source_id":"S1","quote":"原文片段"}],'
         '"missing":["资料缺口"]}。'
         "grounded 的每个关键结论都要有至少一个 citation；source_id 只能使用上下文中的值，"
-        "quote 必须逐字或规范化空白后出现在对应来源中。答案中的来源标记可写成 [S1]。"
+        "quote 必须逐字或规范化空白后出现在对应来源中。"
+        "answer 中每一个非问句、非资料不足说明的陈述句都必须以 [S1] 形式的来源标记"
+        "引用至少一个有效 source_id；不能只在整段末尾放一个标记。"
     )
     context_json = json.dumps(context["sent"], ensure_ascii=False)
     messages = [
         {"role": "system", "content": system},
         {
             "role": "user",
-            "content": f"Learning source 上下文：\n{context_json}\n\n问题：{question}",
+            "content": f"学习资料 上下文：\n{context_json}\n\n问题：{question}",
         },
     ]
     if retry_note:
@@ -719,7 +743,30 @@ def validate_answer(
         )
 
     if answer_type == "grounded" and not citations:
-        raise ValueError("Grounded answer 没有有效 Source citation。")
+        raise ValueError("有据回答 没有有效 资料引用。")
+    if answer_type == "grounded":
+        citation_source_ids = {
+            str(citation["sourceId"]) for citation in citations
+        }
+        for sentence_index, sentence in enumerate(
+            _conclusion_sentences(content),
+            start=1,
+        ):
+            markers = CITATION_MARKER_RE.findall(sentence)
+            if not markers:
+                raise ValueError(
+                    f"有据回答 的第 {sentence_index} 个结论句缺少 资料引用。"
+                )
+            unknown_markers = [
+                marker
+                for marker in markers
+                if marker not in citation_source_ids
+            ]
+            if unknown_markers:
+                raise ValueError(
+                    "答案中的引用标记没有对应 citation："
+                    + "、".join(unknown_markers)
+                )
     if answer_type == "unsupported_supplement" and not supplement_requested:
         raise ValueError("用户没有请求非资料补充。")
 
@@ -734,51 +781,21 @@ def validate_answer(
     }
 
 
-def generate_answer(
-    config: ModelConfig,
-    context: dict[str, object],
-    question: str,
-    mode: str,
-    supplement_requested: bool,
-) -> dict[str, object]:
-    retry_note: Optional[str] = None
-    last_error = "模型回答未通过验证。"
-
-    for _attempt in range(2):
-        messages = tutor_messages(
-            context,
-            question,
-            mode,
-            supplement_requested,
-            retry_note,
-        )
-        raw = "".join(
-            stream_chat_completion(
-                config,
-                messages,
-                metadata={
-                    "study_notes_mode": mode,
-                    "supplement_requested": supplement_requested,
-                },
-            )
-        )
-        try:
-            parsed = parse_answer_json(raw)
-            return validate_answer(
-                parsed,
-                context,
-                supplement_requested=supplement_requested,
-            )
-        except (ValueError, json.JSONDecodeError) as validation_error:
-            last_error = str(validation_error)
-            retry_note = last_error
-
-    return {
-        "type": "insufficient_evidence",
-        "answer": "当前资料不足以形成可验证的回答，模型也未能返回有效引用。",
-        "citations": [],
-        "missing": [last_error],
-    }
+def _conclusion_sentences(content: str) -> list[str]:
+    sentences: list[str] = []
+    for raw_sentence in SENTENCE_UNIT_RE.findall(content):
+        sentence = raw_sentence.strip()
+        if not sentence:
+            continue
+        stripped = re.sub(r"^[#>*+\-\d.\s]+", "", sentence).strip()
+        if not stripped:
+            continue
+        if stripped.endswith(("？", "?")):
+            continue
+        if INSUFFICIENT_SENTENCE_RE.search(stripped):
+            continue
+        sentences.append(stripped)
+    return sentences
 
 
 def event_stream(
@@ -791,6 +808,7 @@ def event_stream(
     mode: str,
     supplement_requested: bool,
 ) -> Iterator[str]:
+    upstream = None
     try:
         context = build_tutor_context(
             workspace,
@@ -807,13 +825,67 @@ def event_stream(
             context=context,
         )
         yield sse_event("context", context)
-        answer = generate_answer(
-            config,
-            context,
-            question,
-            mode,
-            supplement_requested,
-        )
+        retry_note: Optional[str] = None
+        last_error = "模型回答未通过验证。"
+        answer: Optional[dict[str, object]] = None
+
+        for attempt in range(2):
+            if attempt > 0:
+                yield sse_event(
+                    "retry",
+                    {"attempt": attempt + 1, "reason": retry_note},
+                )
+            messages = tutor_messages(
+                context,
+                question,
+                mode,
+                supplement_requested,
+                retry_note,
+            )
+            raw_parts: list[str] = []
+            received_characters = 0
+            upstream = stream_chat_completion(
+                config,
+                messages,
+                metadata={
+                    "study_notes_mode": mode,
+                    "supplement_requested": supplement_requested,
+                },
+            )
+            try:
+                for delta in upstream:
+                    raw_parts.append(delta)
+                    received_characters += len(delta)
+                    yield sse_event(
+                        "generation",
+                        {
+                            "attempt": attempt + 1,
+                            "receivedCharacters": received_characters,
+                        },
+                    )
+            finally:
+                upstream.close()
+                upstream = None
+
+            try:
+                parsed = parse_answer_json("".join(raw_parts))
+                answer = validate_answer(
+                    parsed,
+                    context,
+                    supplement_requested=supplement_requested,
+                )
+                break
+            except (ValueError, json.JSONDecodeError) as validation_error:
+                last_error = str(validation_error)
+                retry_note = last_error
+
+        if answer is None:
+            answer = {
+                "type": "insufficient_evidence",
+                "answer": "当前资料不足以形成可验证的回答，模型也未能返回有效引用。",
+                "citations": [],
+                "missing": [last_error],
+            }
         save_session_message(
             workspace,
             str(session["id"]),
@@ -847,6 +919,9 @@ def event_stream(
             "error",
             {"message": str(tutor_error), "retryable": True},
         )
+    finally:
+        if upstream is not None:
+            upstream.close()
 
 
 def sse_event(event: str, payload: object) -> str:

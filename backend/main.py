@@ -53,7 +53,13 @@ from practice import (
     serialize_practice,
 )
 from qiniu_images import MAX_IMAGE_BYTES, QiniuError, delete_image, upload_image
-from search_index import rebuild_workspace_index, search_workspace
+from search_index import (
+    list_index_issues,
+    list_workspace_tags,
+    paths_for_tag,
+    rebuild_workspace_index,
+    search_workspace,
+)
 from secret_store import has_api_key, load_api_key, save_api_key
 from storage import (
     create_gap_record,
@@ -61,11 +67,15 @@ from storage import (
     delete_gap_record,
     delete_learning_session,
     delete_learning_session_source,
+    delete_practice_item,
     delete_document_draft,
     initialize_database,
+    list_learning_sessions,
     list_due_gap_records,
     list_gap_records,
     list_learning_session_sources,
+    list_registered_workspaces,
+    list_session_messages,
     list_review_results,
     load_learning_session,
     load_gap_record,
@@ -82,6 +92,10 @@ from storage import (
     load_saved_workspace_path,
     list_practice_attempts,
     move_document_draft,
+    relocate_workspace_data,
+    remap_relative_paths,
+    remove_registered_workspace,
+    rename_registered_workspace,
     save_practice_attempt,
     save_practice_self_assessment,
     save_short_answer_attempt,
@@ -92,8 +106,10 @@ from storage import (
     save_learning_session_source,
     save_qiniu_settings,
     save_review_result,
+    search_learning_records,
     save_source_citation,
     update_gap_review_date,
+    update_learning_session,
 )
 from tutor import (
     TutorContextError,
@@ -101,6 +117,15 @@ from tutor import (
     event_stream,
     resolve_tutor_source,
 )
+from workspace_files import (
+    SOURCE_SUFFIXES,
+    WorkspaceFileError,
+    relative_parts_without_symlinks,
+    safe_workspace_directory,
+    safe_files_under,
+    safe_workspace_file,
+)
+from workspace_links import workspace_link_graph
 
 
 active_workspace: Optional[Path] = None
@@ -121,6 +146,11 @@ app = FastAPI(title="StudyNotes API", lifespan=lifespan)
 
 class OpenWorkspaceRequest(BaseModel):
     path: str
+
+
+class RenameWorkspaceRequest(BaseModel):
+    path: str
+    name: str = Field(min_length=1, max_length=120)
 
 
 class ModelSettingsRequest(BaseModel):
@@ -149,6 +179,11 @@ class CreateTutorTurnRequest(BaseModel):
     question: str
     mode: str = "guided"
     supplement_requested: bool = False
+
+
+class UpdateTutorSessionRequest(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    archived: Optional[bool] = None
 
 
 class CreatePracticeRequest(BaseModel):
@@ -193,6 +228,16 @@ class CreateCitationRequest(BaseModel):
 class CreatePageRequest(BaseModel):
     directory: str = ""
     name: str
+    template: Optional[str] = None
+
+
+class CreateDailyRequest(BaseModel):
+    date: Optional[str] = None
+
+
+class OnboardingRequest(BaseModel):
+    boundary_accepted: Optional[bool] = None
+    completed: Optional[bool] = None
 
 
 class MoveEntryRequest(BaseModel):
@@ -232,42 +277,41 @@ class LocalImageRequest(BaseModel):
 
 def require_active_workspace() -> Path:
     if active_workspace is None:
-        raise HTTPException(status_code=404, detail="请先打开 Notebook workspace。")
+        raise HTTPException(status_code=404, detail="请先打开 学习工作区。")
     if not active_workspace.is_dir():
         raise HTTPException(
-            status_code=410, detail="Notebook workspace 已移动或不可用。"
+            status_code=410, detail="学习工作区 已移动或不可用。"
         )
     return active_workspace.resolve()
 
 
 def resolve_workspace_directory(relative_path: str) -> Path:
     root = require_active_workspace()
-    candidate = (root / relative_path).resolve()
     try:
-        candidate.relative_to(root)
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail="目录路径无效。") from error
-
-    if not candidate.is_dir():
-        raise HTTPException(status_code=404, detail="目标目录不存在。")
-    return candidate
+        return safe_workspace_directory(root, root / relative_path)
+    except WorkspaceFileError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 def resolve_workspace_entry(relative_path: str) -> Path:
     root = require_active_workspace()
-    candidate = (root / relative_path).resolve()
     try:
+        relative_parts_without_symlinks(root, root / relative_path)
+        candidate = (root / relative_path).resolve(strict=True)
         relative = candidate.relative_to(root)
-    except ValueError as error:
+    except (OSError, RuntimeError, ValueError, WorkspaceFileError) as error:
         raise HTTPException(status_code=400, detail="文件路径无效。") from error
 
     if not relative.parts or not candidate.exists():
         raise HTTPException(status_code=404, detail="页面或目录不存在。")
     if candidate.is_dir() and not candidate.is_symlink():
         return candidate
-    if candidate.is_file() and candidate.suffix.lower() == ".md":
+    if candidate.is_file() and candidate.suffix.lower() in {".md", ".txt"}:
         return candidate
-    raise HTTPException(status_code=400, detail="只支持管理 Markdown 页面或目录。")
+    raise HTTPException(
+        status_code=400,
+        detail="只支持管理 Markdown、纯文本页面或目录。",
+    )
 
 
 def resolve_workspace_destination(relative_path: str) -> Path:
@@ -291,7 +335,7 @@ def workspace_tree(root: Path, current: Path) -> list[dict[str, object]]:
     for entry in sorted(
         current.iterdir(), key=lambda item: (not item.is_dir(), item.name.casefold())
     ):
-        if entry.name.startswith("."):
+        if entry.name.startswith(".") or entry.is_symlink():
             continue
 
         relative_path = entry.relative_to(root).as_posix()
@@ -304,13 +348,19 @@ def workspace_tree(root: Path, current: Path) -> list[dict[str, object]]:
                     "children": workspace_tree(root, entry),
                 }
             )
-        elif entry.is_file() and entry.suffix.lower() in {".md", ".pdf"}:
+        elif entry.is_file() and entry.suffix.lower() in SOURCE_SUFFIXES:
             nodes.append(
                 {
                     "name": entry.name,
                     "path": relative_path,
                     "type": "file",
-                    "kind": "pdf" if entry.suffix.lower() == ".pdf" else "markdown",
+                    "kind": (
+                        "pdf"
+                        if entry.suffix.lower() == ".pdf"
+                        else "text"
+                        if entry.suffix.lower() == ".txt"
+                        else "markdown"
+                    ),
                 }
             )
 
@@ -333,16 +383,16 @@ def resolve_workspace_file(
     allowed_suffixes: set[str],
 ) -> Path:
     root = require_active_workspace()
-    candidate = (root / relative_path).resolve()
     try:
-        candidate.relative_to(root)
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail="文件路径无效。") from error
-
-    if not candidate.is_file() or candidate.suffix.lower() not in allowed_suffixes:
-        raise HTTPException(status_code=404, detail="资料文件不存在。")
-
-    return candidate
+        return safe_workspace_file(
+            root,
+            root / relative_path,
+            allowed_suffixes=allowed_suffixes,
+        )
+    except WorkspaceFileError as error:
+        message = str(error)
+        status = 404 if "不存在" in message else 400
+        raise HTTPException(status_code=status, detail=message) from error
 
 
 def serialize_document(file_path: Path) -> dict[str, object]:
@@ -371,6 +421,25 @@ def serialize_document(file_path: Path) -> dict[str, object]:
         "title": file_path.stem,
         **document,
         "draft": serialized_draft,
+    }
+
+
+def serialize_text_document(file_path: Path) -> dict[str, object]:
+    relative_path = file_path.relative_to(require_active_workspace()).as_posix()
+    try:
+        content = file_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise HTTPException(status_code=422, detail="纯文本文件不是 UTF-8 编码。") from error
+    return {
+        "path": relative_path,
+        "title": file_path.stem,
+        "content": content,
+        "revision": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "blocks": [],
+        "draft": None,
+        "sidecarStatus": "valid",
+        "sidecarBackupPath": None,
+        "readOnly": True,
     }
 
 
@@ -433,7 +502,7 @@ def embedding_config_from_request(
     if not base_url.startswith(("http://", "https://")):
         raise HTTPException(status_code=422, detail="Base URL 必须使用 HTTP 或 HTTPS。")
     if not model:
-        raise HTTPException(status_code=422, detail="请填写 Embedding 模型。")
+        raise HTTPException(status_code=422, detail="请填写 向量模型。")
     if not api_key:
         raise HTTPException(status_code=422, detail="请填写 API Key。")
     return EmbeddingConfig(base_url=base_url, api_key=api_key, model=model)
@@ -573,6 +642,27 @@ def serialize_tutor_source(source: dict[str, object]) -> dict[str, object]:
     }
 
 
+def serialize_learning_session(
+    session: dict[str, object],
+    *,
+    source_count: Optional[int] = None,
+) -> dict[str, object]:
+    serialized = {
+        "id": session["id"],
+        "title": session.get("title") or str(session.get("quote", ""))[:80],
+        "path": session["path"],
+        "blockId": session.get("block_id"),
+        "page": session.get("page"),
+        "quote": session.get("quote", ""),
+        "archived": bool(session.get("archived", 0)),
+        "createdAt": serialize_datetime(session.get("created_at")),
+        "updatedAt": serialize_datetime(session.get("updated_at")),
+    }
+    if source_count is not None:
+        serialized["sourceCount"] = source_count
+    return serialized
+
+
 def parse_datetime(value: str) -> datetime:
     candidate = value.strip()
     if not candidate:
@@ -602,6 +692,114 @@ def serialize_citation_json(raw: object) -> dict[str, object]:
     except (json.JSONDecodeError, TypeError):
         citation = {}
     return citation if isinstance(citation, dict) else {}
+
+
+def deserialize_json_value(raw: object, default: object) -> object:
+    try:
+        value = json.loads(str(raw))
+    except (json.JSONDecodeError, TypeError):
+        return default
+    return value
+
+
+def source_kind_for_path(path: str) -> str:
+    suffix = Path(path).suffix.lower()
+    if suffix == ".pdf":
+        return "pdf"
+    if suffix == ".txt":
+        return "text"
+    return "markdown"
+
+
+def global_search_results(
+    workspace: Path,
+    query: str,
+) -> dict[str, object]:
+    source_results, index = search_workspace(workspace, query)
+    if not query.strip():
+        return {
+            "index": index,
+            "indexIssues": list_index_issues(workspace),
+            "results": [],
+        }
+    records = search_learning_records(workspace, query)
+    results: list[dict[str, object]] = [
+        {**result, "resultType": "source"} for result in source_results
+    ]
+    for session in records["sessions"]:
+        kind = source_kind_for_path(str(session["path"]))
+        results.append(
+            {
+                "id": f"session:{session['id']}",
+                "resultType": "session",
+                "entityId": session["id"],
+                "sessionId": session["id"],
+                "kind": kind,
+                "title": f"学习会话 · {session.get('title') or session['quote']}",
+                "path": session["path"],
+                "blockId": session.get("block_id"),
+                "blockIndex": None,
+                "page": session.get("page"),
+                "headingPath": [],
+                "tags": [],
+                "quote": session["quote"],
+                "snippet": str(session["quote"])[:240],
+                "matchedIn": "session",
+            }
+        )
+    for item in records["gaps"]:
+        citation = serialize_citation_json(item["citation_json"])
+        path_value = str(citation.get("path", ""))
+        if not path_value:
+            continue
+        results.append(
+            {
+                "id": f"gap:{item['id']}",
+                "resultType": "gap",
+                "entityId": item["id"],
+                "sessionId": item["session_id"],
+                "kind": source_kind_for_path(path_value),
+                "title": f"知识缺口 · {item['title']}",
+                "path": path_value,
+                "blockId": citation.get("blockId"),
+                "blockIndex": citation.get("blockIndex"),
+                "page": citation.get("page"),
+                "headingPath": citation.get("headingPath", []),
+                "tags": [],
+                "quote": citation.get("quote", ""),
+                "snippet": str(citation.get("quote", ""))[:240],
+                "matchedIn": "gap",
+            }
+        )
+    for item in records["practice"]:
+        citation = serialize_citation_json(item["citation_json"])
+        path_value = str(citation.get("path", ""))
+        if not path_value:
+            continue
+        results.append(
+            {
+                "id": f"practice:{item['id']}",
+                "resultType": "practice",
+                "entityId": item["id"],
+                "sessionId": item["session_id"],
+                "kind": source_kind_for_path(path_value),
+                "title": f"练习项 · {item['stem']}",
+                "path": path_value,
+                "blockId": citation.get("blockId"),
+                "blockIndex": citation.get("blockIndex"),
+                "page": citation.get("page"),
+                "headingPath": citation.get("headingPath", []),
+                "tags": [],
+                "quote": citation.get("quote", ""),
+                "snippet": str(item["stem"])[:240],
+                "matchedIn": "practice",
+            }
+        )
+    return {
+        "index": index,
+        "indexIssues": list_index_issues(workspace),
+        "results": results,
+    }
 
 
 def serialize_practice_item_summary(
@@ -736,6 +934,29 @@ def model_settings() -> dict[str, object]:
     return serialize_model_settings()
 
 
+@app.get("/api/onboarding")
+def onboarding_status() -> dict[str, bool]:
+    return {
+        "boundaryAccepted": load_app_setting("data_boundary_accepted") == "true",
+        "completed": load_app_setting("onboarding_completed") == "true",
+    }
+
+
+@app.put("/api/onboarding")
+def update_onboarding(request: OnboardingRequest) -> dict[str, bool]:
+    if request.boundary_accepted is not None:
+        save_app_setting(
+            "data_boundary_accepted",
+            "true" if request.boundary_accepted else "false",
+        )
+    if request.completed is not None:
+        save_app_setting(
+            "onboarding_completed",
+            "true" if request.completed else "false",
+        )
+    return onboarding_status()
+
+
 @app.put("/api/model-settings")
 def update_model_settings(request: ModelSettingsRequest) -> dict[str, object]:
     config = model_config_from_request(request)
@@ -743,7 +964,7 @@ def update_model_settings(request: ModelSettingsRequest) -> dict[str, object]:
     if request.embedding_enabled and not embedding_model:
         raise HTTPException(
             status_code=422,
-            detail="启用语义检索前请填写 Embedding 模型。",
+            detail="启用语义检索前请填写 向量模型。",
         )
     try:
         if request.api_key.strip():
@@ -820,6 +1041,7 @@ def create_tutor_session(
     )
     return {
         "id": session["id"],
+        "title": session["title"],
         "path": session["path"],
         "blockId": session["block_id"],
         "page": session["page"],
@@ -829,11 +1051,83 @@ def create_tutor_session(
     }
 
 
+@app.get("/api/tutor/sessions")
+def tutor_sessions(
+    q: str = "",
+    archived: Optional[bool] = None,
+) -> dict[str, object]:
+    root = require_active_workspace()
+    sessions = list_learning_sessions(root, query=q, archived=archived)
+    return {
+        "sessions": [
+            serialize_learning_session(
+                session,
+                source_count=len(
+                    list_learning_session_sources(root, str(session["id"]))
+                ),
+            )
+            for session in sessions
+        ]
+    }
+
+
+@app.patch("/api/tutor/sessions/{session_id}")
+def update_tutor_session(
+    session_id: str,
+    request: UpdateTutorSessionRequest,
+) -> dict[str, object]:
+    root = require_active_workspace()
+    try:
+        session = update_learning_session(
+            root,
+            session_id,
+            title=request.title,
+            archived=request.archived,
+        )
+    except ValueError as session_error:
+        raise HTTPException(status_code=422, detail=str(session_error)) from session_error
+    if session is None:
+        raise HTTPException(status_code=404, detail="学习会话不存在。")
+    return {"session": serialize_learning_session(session)}
+
+
+@app.get("/api/tutor/sessions/{session_id}")
+def tutor_session_detail(session_id: str) -> dict[str, object]:
+    root, session = require_learning_session(session_id)
+    messages = list_session_messages(root, session_id, limit=500)
+    return {
+        "session": serialize_learning_session(
+            session,
+            source_count=len(list_learning_session_sources(root, session_id)),
+        ),
+        "sources": [
+            serialize_tutor_source(source)
+            for source in list_learning_session_sources(root, session_id)
+        ],
+        "messages": [
+            {
+                "id": message["id"],
+                "role": message["role"],
+                "content": message["content"],
+                "answerType": message.get("answer_type"),
+                "citations": deserialize_json_value(
+                    message.get("citations_json"),
+                    [],
+                )
+                if message.get("citations_json")
+                else [],
+                "createdAt": serialize_datetime(message.get("created_at")),
+            }
+            for message in messages
+        ],
+    }
+
+
 @app.delete("/api/tutor/sessions/{session_id}")
 def remove_tutor_session(session_id: str) -> dict[str, bool]:
     root = require_active_workspace()
     if not delete_learning_session(root, session_id):
-        raise HTTPException(status_code=404, detail="Learning session 不存在。")
+        raise HTTPException(status_code=404, detail="学习会话不存在。")
     return {"deleted": True}
 
 
@@ -845,13 +1139,13 @@ def create_tutor_turn(
     root = require_active_workspace()
     session = load_learning_session(root, session_id)
     if session is None:
-        raise HTTPException(status_code=404, detail="Learning session 不存在。")
+        raise HTTPException(status_code=404, detail="学习会话 不存在。")
     question = request.question.strip()
     if not question:
         raise HTTPException(status_code=422, detail="请输入问题。")
     if request.mode not in {"guided", "direct"}:
         raise HTTPException(status_code=422, detail="辅导模式无效。")
-    resolve_workspace_file(str(session["path"]), {".md", ".pdf"})
+    resolve_workspace_file(str(session["path"]), SOURCE_SUFFIXES)
     session_sources = list_learning_session_sources(root, session_id)
     config = configured_model()
     embedding_config = configured_embedding()
@@ -878,8 +1172,8 @@ def require_learning_session(session_id: str) -> tuple[Path, dict[str, object]]:
     root = require_active_workspace()
     session = load_learning_session(root, session_id)
     if session is None:
-        raise HTTPException(status_code=404, detail="Learning session 不存在。")
-    resolve_workspace_file(str(session["path"]), {".md", ".pdf"})
+        raise HTTPException(status_code=404, detail="学习会话 不存在。")
+    resolve_workspace_file(str(session["path"]), SOURCE_SUFFIXES)
     return root, session
 
 
@@ -932,7 +1226,7 @@ def remove_tutor_source(
     except ValueError as source_error:
         raise HTTPException(status_code=409, detail=str(source_error)) from source_error
     if not deleted:
-        raise HTTPException(status_code=404, detail="Learning source 不存在。")
+        raise HTTPException(status_code=404, detail="学习资料 不存在。")
     return {"deleted": True}
 
 
@@ -1117,6 +1411,17 @@ def update_practice_self_assessment(
     return serialize_practice_attempt(attempt)
 
 
+@app.delete("/api/tutor/sessions/{session_id}/practice/items/{item_id}")
+def remove_practice_item(
+    session_id: str,
+    item_id: str,
+) -> dict[str, object]:
+    root, _session = require_learning_session(session_id)
+    if not delete_practice_item(root, session_id, item_id):
+        raise HTTPException(status_code=404, detail="练习项不存在。")
+    return saved_practice_response(root, session_id)
+
+
 @app.post("/api/tutor/sessions/{session_id}/gaps")
 def create_gap(
     session_id: str,
@@ -1140,7 +1445,7 @@ def create_gap(
     else:
         sources = list_learning_session_sources(root, session_id)
         if not sources:
-            raise HTTPException(status_code=409, detail="Learning session 没有可引用来源。")
+            raise HTTPException(status_code=409, detail="学习会话 没有可引用来源。")
         source = sources[0]
         try:
             heading_path = json.loads(str(source["heading_path_json"]))
@@ -1354,18 +1659,99 @@ def workspace() -> dict[str, object]:
     }
 
 
+@app.get("/api/workspaces")
+def registered_workspaces() -> dict[str, object]:
+    return {"workspaces": list_registered_workspaces()}
+
+
+@app.patch("/api/workspaces")
+def rename_workspace(request: RenameWorkspaceRequest) -> dict[str, object]:
+    try:
+        workspace_record = rename_registered_workspace(
+            Path(request.path).expanduser(),
+            request.name,
+        )
+    except ValueError as rename_error:
+        raise HTTPException(status_code=422, detail=str(rename_error)) from rename_error
+    if workspace_record is None:
+        raise HTTPException(status_code=404, detail="工作区注册记录不存在。")
+    return {"workspace": workspace_record, "workspaces": list_registered_workspaces()}
+
+
+@app.delete("/api/workspaces")
+def remove_workspace_registration(path: str) -> dict[str, object]:
+    global active_workspace
+
+    registered = list_registered_workspaces()
+    selected = next(
+        (item for item in registered if item["path"] == str(Path(path).expanduser())),
+        None,
+    )
+    if selected is None:
+        selected = next(
+            (
+                item
+                for item in registered
+                if Path(str(item["path"])).resolve()
+                == Path(path).expanduser().resolve()
+            ),
+            None,
+        )
+    if selected is None:
+        raise HTTPException(status_code=404, detail="工作区注册记录不存在。")
+    if not remove_registered_workspace(Path(str(selected["path"]))):
+        raise HTTPException(status_code=404, detail="工作区注册记录不存在。")
+    if active_workspace is not None and active_workspace.resolve() == Path(
+        str(selected["path"])
+    ).resolve():
+        active_workspace = None
+    return {"deleted": True, "workspaces": list_registered_workspaces()}
+
+
 @app.get("/api/search")
 def search(q: str = "") -> dict[str, object]:
     root = require_active_workspace()
-    results, index = search_workspace(root, q)
-    return {"index": index, "results": results}
+    return global_search_results(root, q)
+
+
+@app.get("/api/tags")
+def tags() -> dict[str, object]:
+    return {"tags": list_workspace_tags(require_active_workspace())}
+
+
+@app.get("/api/tagged")
+def tagged(tag: str) -> dict[str, object]:
+    return {"paths": paths_for_tag(require_active_workspace(), tag)}
+
+
+@app.get("/api/links")
+def links(path: str) -> dict[str, object]:
+    root = require_active_workspace()
+    file_path = resolve_workspace_file(path, {".md"})
+    relative_path = file_path.relative_to(root).as_posix()
+    return workspace_link_graph(root, relative_path)
+
+
+@app.get("/api/templates")
+def templates() -> dict[str, object]:
+    root = require_active_workspace()
+    template_files = safe_files_under(root, ".templates", suffixes={".md"})
+    return {
+        "templates": [
+            {
+                "name": file_path.stem,
+                "path": file_path.relative_to(root).as_posix(),
+            }
+            for file_path in template_files
+        ]
+    }
 
 
 @app.post("/api/search/reindex")
 def rebuild_search_index() -> dict[str, object]:
     root = require_active_workspace()
     index = rebuild_workspace_index(root)
-    return {"index": index}
+    return {"index": index, "indexIssues": list_index_issues(root)}
 
 
 @app.post("/api/workspace")
@@ -1374,7 +1760,16 @@ def open_workspace(request: OpenWorkspaceRequest) -> dict[str, object]:
 
     candidate = Path(request.path).expanduser().resolve()
     if not candidate.is_dir():
-        raise HTTPException(status_code=400, detail="Notebook workspace 不存在。")
+        raise HTTPException(status_code=400, detail="学习工作区 不存在。")
+
+    saved_workspace = load_saved_workspace_path()
+    if (
+        active_workspace is None
+        and saved_workspace is not None
+        and not saved_workspace.exists()
+        and saved_workspace.resolve() != candidate
+    ):
+        relocate_workspace_data(saved_workspace, candidate)
 
     save_active_workspace(candidate)
     active_workspace = candidate
@@ -1394,15 +1789,65 @@ def create_page(request: CreatePageRequest) -> dict[str, object]:
     if Path(name).suffix.lower() != ".md":
         name = f"{name}.md"
 
+    root = require_active_workspace()
     page_path = directory / name
+    content = f"# {page_path.stem}\n\n"
+    if request.template:
+        template_files = safe_files_under(root, ".templates", suffixes={".md"})
+        selected_template = next(
+            (
+                file_path
+                for file_path in template_files
+                if file_path.relative_to(root).as_posix() == request.template.strip()
+            ),
+            None,
+        )
+        if selected_template is None:
+            raise HTTPException(status_code=404, detail="页面模板不存在。")
+        try:
+            content = selected_template.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            raise HTTPException(status_code=422, detail="无法读取页面模板。") from error
     try:
         with page_path.open("x", encoding="utf-8") as page:
-            page.write(f"# {page_path.stem}\n\n")
+            page.write(content)
     except FileExistsError as error:
         raise HTTPException(status_code=409, detail="同名页面已经存在。") from error
 
-    root = require_active_workspace()
     return {
+        "path": page_path.relative_to(root).as_posix(),
+        "tree": workspace_tree(root, root),
+    }
+
+
+@app.post("/api/daily")
+def create_daily(request: CreateDailyRequest) -> dict[str, object]:
+    root = require_active_workspace()
+    requested_date = (request.date or datetime.now().date().isoformat()).strip()
+    try:
+        parsed_date = datetime.strptime(requested_date, "%Y-%m-%d").date()
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="每日笔记日期必须使用 YYYY-MM-DD。") from error
+    daily_directory = root / "Daily"
+    if daily_directory.exists() and daily_directory.is_symlink():
+        raise HTTPException(status_code=400, detail="每日笔记目录不能是符号链接。")
+    daily_directory.mkdir(parents=True, exist_ok=True)
+    page_path = daily_directory / f"{parsed_date.isoformat()}.md"
+    created = False
+    if not page_path.exists():
+        try:
+            with page_path.open("x", encoding="utf-8") as page:
+                page.write(
+                    "---\n"
+                    "tags: [每日笔记]\n"
+                    "---\n\n"
+                    f"# {parsed_date.isoformat()}\n\n"
+                )
+            created = True
+        except FileExistsError:
+            created = False
+    return {
+        "created": created,
         "path": page_path.relative_to(root).as_posix(),
         "tree": workspace_tree(root, root),
     }
@@ -1422,20 +1867,37 @@ def move_entry(request: MoveEntryRequest) -> dict[str, object]:
             pass
         else:
             raise HTTPException(status_code=400, detail="目录不能移动到自身内部。")
-    elif destination.suffix.lower() != ".md":
-        raise HTTPException(status_code=400, detail="Markdown 页面必须保留 .md 后缀。")
+    elif (
+        destination.suffix.lower() not in {".md", ".txt"}
+        or destination.suffix.lower() != source.suffix.lower()
+    ):
+        raise HTTPException(status_code=400, detail="页面移动时必须保留原文件后缀。")
 
     if not destination.parent.is_dir():
         raise HTTPException(status_code=400, detail="目标目录不存在。")
 
+    old_relative_destination = destination.relative_to(root).as_posix()
     source_sidecar = sidecar_path_for(source)
     destination_sidecar = sidecar_path_for(destination)
     source.rename(destination)
+    sidecar_moved = False
     if source_sidecar.exists():
         source_sidecar.rename(destination_sidecar)
-    move_document_draft(root, old_relative_path, request.new_path)
+        sidecar_moved = True
+    try:
+        remap_relative_paths(
+            root,
+            old_relative_path,
+            old_relative_destination,
+            directory=destination.is_dir(),
+        )
+    except Exception:
+        destination.rename(source)
+        if sidecar_moved and destination_sidecar.exists():
+            destination_sidecar.rename(source_sidecar)
+        raise
     return {
-        "newPath": destination.relative_to(root).as_posix(),
+        "newPath": old_relative_destination,
         "oldPath": old_relative_path,
         "tree": workspace_tree(root, root),
     }
@@ -1461,7 +1923,9 @@ def delete_entry(path: str) -> dict[str, object]:
 
 @app.get("/api/file")
 def read_file(path: str) -> dict[str, object]:
-    file_path = resolve_workspace_file(path, {".md"})
+    file_path = resolve_workspace_file(path, {".md", ".txt"})
+    if file_path.suffix.lower() == ".txt":
+        return serialize_text_document(file_path)
     return serialize_document(file_path)
 
 
@@ -1532,7 +1996,7 @@ def pdf_content(path: str) -> FileResponse:
 @app.get("/api/citations")
 def citations(path: str) -> list[dict[str, object]]:
     if active_workspace is None:
-        raise HTTPException(status_code=404, detail="请先打开 Notebook workspace。")
+        raise HTTPException(status_code=404, detail="请先打开 学习工作区。")
 
     resolve_workspace_file(path, {".pdf"})
     return [
@@ -1544,7 +2008,7 @@ def citations(path: str) -> list[dict[str, object]]:
 @app.post("/api/citations")
 def create_citation(request: CreateCitationRequest) -> dict[str, object]:
     if active_workspace is None:
-        raise HTTPException(status_code=404, detail="请先打开 Notebook workspace。")
+        raise HTTPException(status_code=404, detail="请先打开 学习工作区。")
 
     file_path = resolve_workspace_file(request.path, {".pdf"})
     quote = normalize_quote(request.quote)
@@ -1581,7 +2045,7 @@ def create_citation(request: CreateCitationRequest) -> dict[str, object]:
 @app.post("/api/citations/{citation_id}/validate")
 def validate_citation(citation_id: int) -> dict[str, object]:
     if active_workspace is None:
-        raise HTTPException(status_code=404, detail="请先打开 Notebook workspace。")
+        raise HTTPException(status_code=404, detail="请先打开 学习工作区。")
 
     citation = load_source_citation(active_workspace, citation_id)
     if citation is None:

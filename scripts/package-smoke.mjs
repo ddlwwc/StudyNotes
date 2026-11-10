@@ -137,7 +137,7 @@ try {
   await waitForUrl(webUrl);
 
   await firstWindow
-    .getByLabel("Notebook workspace 路径")
+    .getByLabel("学习工作区路径")
     .fill(workspaceDir);
   await firstWindow.getByRole("button", { name: "打开工作区" }).click();
   await firstWindow

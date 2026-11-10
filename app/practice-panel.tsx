@@ -7,7 +7,8 @@ import {
   ChevronRight,
   LoaderCircle,
   RotateCcw,
-  Save
+  Save,
+  Trash2
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { GapDialog } from "./gap-dialog";
@@ -106,6 +107,9 @@ export function PracticePanel({
   const [gapDialogOpen, setGapDialogOpen] = useState(false);
   const [gapCreatedItems, setGapCreatedItems] = useState<Record<string, true>>(
     {}
+  );
+  const [deleteConfirmItemId, setDeleteConfirmItemId] = useState<string | null>(
+    null
   );
   const ownsSessionRef = useRef(false);
 
@@ -350,6 +354,33 @@ export function PracticePanel({
     }
   }
 
+  async function deleteCurrentItem() {
+    if (!activeSessionId || !currentItem) {
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/tutor/sessions/${activeSessionId}/practice/items/${currentItem.id}`,
+        { method: "DELETE" }
+      );
+      if (!response.ok) {
+        throw new Error(await readError(response));
+      }
+      applyResponse((await response.json()) as PracticeResponse);
+      setDeleteConfirmItemId(null);
+    } catch (deleteError) {
+      setError(
+        deleteError instanceof Error
+          ? deleteError.message
+          : "无法删除练习项。"
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   function moveNext() {
     if (!practice) {
       return;
@@ -468,7 +499,7 @@ export function PracticePanel({
                 (question) => byItem[question.id]?.correct
               ).length
             }{" "}
-            题。作答结果已保存到当前 Learning session。
+            题。作答结果已保存到当前学习会话。
           </p>
         </div>
       ) : currentItem ? (
@@ -477,8 +508,37 @@ export function PracticePanel({
             <span>
               第 {currentIndex + 1} / {practice?.questionCount} 题
             </span>
-            <span>{isShortAnswer ? "短答题" : "单选题"}</span>
+            <span>
+              {isShortAnswer ? "短答题" : "单选题"}
+              <button
+                aria-label="删除当前练习项"
+                className="practice-delete-item"
+                type="button"
+                onClick={() => setDeleteConfirmItemId(currentItem.id)}
+              >
+                <Trash2 aria-hidden="true" size={12} />
+              </button>
+            </span>
           </div>
+          {deleteConfirmItemId === currentItem.id ? (
+            <div className="practice-delete-confirm" role="alert">
+              <span>删除后作答记录也会移除，但知识缺口仍会保留。</span>
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmItemId(null)}
+              >
+                取消
+              </button>
+              <button
+                className="danger-text-button"
+                disabled={submitting}
+                type="button"
+                onClick={() => void deleteCurrentItem()}
+              >
+                {submitting ? "正在删除…" : "确认删除"}
+              </button>
+            </div>
+          ) : null}
           <h4>{currentItem.stem}</h4>
 
           {isShortAnswer ? (

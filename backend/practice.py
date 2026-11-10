@@ -68,7 +68,7 @@ def practice_messages(
     sent = context["sent"]
     system = (
         "你是 StudyNotes 的 Practice item 生成器。你必须只根据给定的 "
-        "Learning source 上下文和当前 Learning session 对话出题，不得引入资料"
+        "学习资料 上下文和当前 学习会话 对话出题，不得引入资料"
         "之外的模型知识。请生成恰好 "
         f"{question_count} 道简体中文 Practice item。"
         "题型只能是 single_choice 或 short_answer。"
@@ -96,9 +96,9 @@ def practice_messages(
         {
             "role": "user",
             "content": (
-                "Learning source 可审计上下文：\n"
+                "学习资料 可审计上下文：\n"
                 f"{json.dumps(sent, ensure_ascii=False)}\n\n"
-                "当前 Learning session 对话：\n"
+                "当前 学习会话 对话：\n"
                 f"{json.dumps(dialogue, ensure_ascii=False)}"
             ),
         },
@@ -148,7 +148,7 @@ def validate_questions(
 
         raw_citation = raw_question.get("citation")
         if not isinstance(raw_citation, dict):
-            raise ValueError("每道题必须有 Source citation。")
+            raise ValueError("每道题必须有 资料引用。")
         source_id = str(raw_citation.get("source_id", ""))
         quote = normalize_text(str(raw_citation.get("quote", "")))
         chunk = chunks.get(source_id)
@@ -278,7 +278,7 @@ def short_answer_feedback_messages(
     answer_text: str,
 ) -> list[dict[str, str]]:
     system = (
-        "你是 StudyNotes 的短答题评分器。你必须只根据给定的 Learning source "
+        "你是 StudyNotes 的短答题评分器。你必须只根据给定的 学习资料 "
         "上下文、题目、参考要点和学习者答案给出反馈，不得引入资料之外的模型知识。"
         "评分要帮助学习者理解自己命中了什么、遗漏了什么。"
         "只返回一个 JSON 对象，不要使用 Markdown 代码围栏。结构必须是："
@@ -295,7 +295,7 @@ def short_answer_feedback_messages(
         {
             "role": "user",
             "content": (
-                "Learning source 可审计上下文：\n"
+                "学习资料 可审计上下文：\n"
                 f"{json.dumps(context['sent'], ensure_ascii=False)}\n\n"
                 f"短答题：{item['stem']}\n"
                 f"参考要点：{item.get('reference_answer') or ''}\n"
@@ -332,11 +332,11 @@ def validate_short_answer_feedback(
     }
     raw_citations = payload.get("citations")
     if not isinstance(raw_citations, list) or not raw_citations:
-        raise ValueError("短答题反馈必须有 Source citation。")
+        raise ValueError("短答题反馈必须有 资料引用。")
     citations: list[dict[str, object]] = []
     for raw_citation in raw_citations:
         if not isinstance(raw_citation, dict):
-            raise ValueError("Source citation 条目无效。")
+            raise ValueError("资料引用 条目无效。")
         source_id = str(raw_citation.get("source_id", ""))
         quote = normalize_text(str(raw_citation.get("quote", "")))
         chunk = chunks.get(source_id)

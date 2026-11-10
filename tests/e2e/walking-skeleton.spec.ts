@@ -106,7 +106,8 @@ async function startMockQiniu(): Promise<{
 }
 
 async function configureQiniu(page: Page) {
-  await page.getByRole("button", { name: "设置" }).click();
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByLabel("资料发送边界确认").check();
   await page.getByLabel("七牛桶").fill("study-notes-public");
   await page.getByLabel("访问域名").fill("https://images.example.test");
   await page.getByLabel("Access Key").fill("mock-access-key");
@@ -281,7 +282,7 @@ async function startApp(options: StartAppOptions = {}): Promise<RunningApp> {
   };
 }
 
-test("first launch asks the user to open a Notebook workspace", async ({ page }) => {
+test("first launch asks the user to open a 学习工作区", async ({ page }) => {
   const app = await startApp();
 
   try {
@@ -291,11 +292,57 @@ test("first launch asks the user to open a Notebook workspace", async ({ page })
       page.getByRole("heading", { name: "打开你的学习空间" })
     ).toBeVisible();
     await page
-      .getByLabel("Notebook workspace 路径")
+      .getByLabel("学习工作区路径")
       .fill("/tmp/example-workspace");
     await expect(page.getByRole("button", { name: "打开工作区" })).toBeEnabled();
   } finally {
     await app.stop();
+  }
+});
+
+test("first launch explains three setup steps and the data boundary before online services", async ({
+  page
+}) => {
+  const app = await startApp();
+  const workspaceDir = await mkdtemp(
+    path.join(tmpdir(), "studynotes-workspace-")
+  );
+  await writeFile(
+    path.join(workspaceDir, "欢迎.md"),
+    "# 欢迎\n\n开始学习。\n",
+    "utf8"
+  );
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+
+    const onboarding = page.getByRole("region", { name: "首次设置" });
+    await expect(onboarding.getByText("三步开始")).toBeVisible();
+    await expect(onboarding.getByText("资料目录")).toBeVisible();
+    await expect(onboarding.getByText("模型服务")).toBeVisible();
+    await expect(onboarding.getByText("七牛图片")).toBeVisible();
+    await expect(
+      onboarding.getByText(/模型会收到当前选区、固定资料与检索片段/)
+    ).toBeVisible();
+
+    await onboarding.getByLabel("首次联网资料边界确认").check();
+    await onboarding.getByRole("button", { name: "稍后配置模型" }).click();
+    await onboarding.getByRole("button", { name: "跳过七牛并完成" }).click();
+    await expect(onboarding).toBeHidden();
+    await expect(page.getByRole("button", { name: "新建页面" })).toBeVisible();
+    const body = page.locator("body");
+    await expect(body).not.toContainText("Notebook workspace");
+    await expect(body).not.toContainText("Learning session");
+    await expect(body).not.toContainText("Source citation");
+    await expect(body).not.toContainText("product data");
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await expect(body).not.toContainText("Grounded answer");
+    await expect(body).not.toContainText("Unsupported supplement");
+  } finally {
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
   }
 });
 
@@ -313,7 +360,8 @@ test("Settings stores Qiniu credentials in secure storage without exposing them 
 
   try {
     await page.goto(app.webUrl);
-    await page.getByRole("button", { name: "设置" }).click();
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByLabel("资料发送边界确认").check();
     await expect(
       page.getByRole("heading", { name: "七牛图片存储" })
     ).toBeVisible();
@@ -378,7 +426,7 @@ test("pasting an image uploads it before writing an HTTPS Markdown reference", a
   try {
     await page.goto(app.webUrl);
     await configureQiniu(page);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await page.getByRole("button", { name: "图片.md", exact: true }).click();
 
@@ -453,7 +501,7 @@ test("a failed image upload leaves Markdown unchanged and can be retried", async
   try {
     await page.goto(app.webUrl);
     await configureQiniu(page);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await page.getByRole("button", { name: "上传失败.md", exact: true }).click();
 
@@ -528,7 +576,7 @@ test("existing local images stay local until migration and removal offers cloud 
   try {
     await page.goto(app.webUrl);
     await configureQiniu(page);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await page.getByRole("button", { name: "本地图片.md", exact: true }).click();
     await expect(page.getByRole("img", { name: "本地图" })).toBeVisible();
@@ -577,7 +625,7 @@ test("opening a workspace maps its directories and Markdown files", async ({
 
   try {
     await page.goto(app.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
 
     await expect(
@@ -590,7 +638,7 @@ test("opening a workspace maps its directories and Markdown files", async ({
       page.getByRole("button", { name: "注意力机制.md", exact: true })
     ).toBeVisible();
     await expect(
-      page.getByText(canonicalWorkspaceDir, { exact: true })
+      page.getByText(canonicalWorkspaceDir, { exact: true }).first()
     ).toBeVisible();
   } finally {
     await app.stop();
@@ -612,7 +660,7 @@ test("opening a Markdown page shows rendered content without changing the file",
 
   try {
     await page.goto(app.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await page
       .getByRole("button", { name: "注意力机制.md", exact: true })
@@ -644,7 +692,7 @@ test("opening a PDF supports page navigation, zoom, text selection, and citation
 
   try {
     await page.goto(app.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await page
       .getByRole("button", { name: "注意力研究.pdf", exact: true })
@@ -707,7 +755,7 @@ test("an externally changed PDF marks its saved citation as mismatched", async (
 
   try {
     await page.goto(app.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await page
       .getByRole("button", { name: "文献综述.pdf", exact: true })
@@ -743,7 +791,7 @@ test("a PDF page without a text layer explains that OCR is unsupported", async (
 
   try {
     await page.goto(app.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await page
       .getByRole("button", { name: "扫描资料.pdf", exact: true })
@@ -764,7 +812,7 @@ test("a PDF page without a text layer explains that OCR is unsupported", async (
   }
 });
 
-test("the active Notebook workspace survives an application restart", async ({
+test("the active 学习工作区 survives an application restart", async ({
   page
 }) => {
   const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
@@ -780,7 +828,7 @@ test("the active Notebook workspace survives an application restart", async ({
   const firstApp = await startApp({ dataDir });
   try {
     await page.goto(firstApp.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await expect(
       page.getByRole("button", { name: "课程", exact: true })
@@ -797,7 +845,7 @@ test("the active Notebook workspace survives an application restart", async ({
       page.getByRole("button", { name: "课程", exact: true })
     ).toBeVisible();
     await expect(
-      page.getByText(canonicalWorkspaceDir, { exact: true })
+      page.getByText(canonicalWorkspaceDir, { exact: true }).first()
     ).toBeVisible();
     await expect(
       page.getByRole("heading", { name: "打开你的学习空间" })
@@ -818,7 +866,7 @@ test("a user can create a Markdown page in the selected directory", async ({
 
   try {
     await page.goto(app.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await page.getByRole("button", { name: "课程", exact: true }).click();
     await expect(
@@ -856,7 +904,7 @@ test("a user can move a page and rename a directory without losing content", asy
 
   try {
     await page.goto(app.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await page
       .getByRole("button", { name: "课堂笔记.md", exact: true })
@@ -905,7 +953,7 @@ test("deleting a page requires explicit confirmation", async ({ page }) => {
 
   try {
     await page.goto(app.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await page.getByRole("button", { name: "待删除.md", exact: true }).click();
     await page.getByRole("button", { name: "删除", exact: true }).click();
@@ -940,7 +988,7 @@ test("external Markdown changes refresh the page tree and open page", async ({
 
   try {
     await page.goto(app.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await page.getByRole("button", { name: "实时.md", exact: true }).click();
     await expect(page.getByText("初始内容。")).toBeVisible();
@@ -1013,7 +1061,7 @@ test("Cmd+K searches Markdown content and jumps to the matching block", async ({
 
   try {
     await page.goto(app.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await expect(
       page.getByRole("button", { name: "注意力机制.md", exact: true })
@@ -1062,7 +1110,7 @@ test("Cmd+K opens a PDF search result on the matching page", async ({ page }) =>
 
   try {
     await page.goto(app.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await expect(
       page.getByRole("button", { name: "注意力研究.pdf", exact: true })
@@ -1098,17 +1146,17 @@ test("the search index updates incrementally and can be rebuilt from files", asy
 
   try {
     await page.goto(app.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
 
     const initial = await page.evaluate(async () => {
       const response = await fetch("/api/search?q=共同种子");
       return (await response.json()) as {
-        index: { indexedSources: number };
+        index: { indexedSources: number; unchangedSources: number };
         results: unknown[];
       };
     });
-    expect(initial.index.indexedSources).toBe(2);
+    expect(initial.index.indexedSources + initial.index.unchangedSources).toBe(2);
     expect(initial.results).toHaveLength(2);
 
     await writeFile(
@@ -1168,7 +1216,7 @@ test("an external edit conflicts with unsaved content without overwriting Markdo
 
   try {
     await page.goto(app.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await page.getByRole("button", { name: "冲突.md", exact: true }).click();
 
@@ -1234,7 +1282,7 @@ test("an unsaved draft is recoverable after an abnormal app restart", async ({
       }
     });
     await page.goto(firstApp.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await page.getByRole("button", { name: "崩溃恢复.md", exact: true }).click();
 
@@ -1297,7 +1345,7 @@ test("editing Markdown autosaves the canonical file and BlockNote sidecar", asyn
 
   try {
     await page.goto(app.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await page.getByRole("button", { name: "块编辑.md", exact: true }).click();
 
@@ -1374,7 +1422,7 @@ test("BlockNote renders the editable Markdown block types required by the ticket
 
   try {
     await page.goto(app.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await page.getByRole("button", { name: "块类型.md", exact: true }).click();
 
@@ -1440,7 +1488,7 @@ test("a valid sidecar restores block ids, custom properties, and layout after ed
 
   try {
     await page.goto(app.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await page.getByRole("button", { name: "块元数据.md", exact: true }).click();
 
@@ -1509,12 +1557,12 @@ test("a damaged sidecar is backed up and rebuilt from canonical Markdown", async
 
   try {
     await page.goto(app.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await page.getByRole("button", { name: "损坏恢复.md", exact: true }).click();
 
     await expect(
-      page.getByText(/sidecar 已损坏或过期.*备份旧文件/)
+      page.getByText(/块结构文件已损坏或过期.*备份旧文件/)
     ).toBeVisible();
     await expect(page.getByText("Markdown 仍然完整。", { exact: true })).toBeVisible();
 
@@ -1547,7 +1595,7 @@ test("a damaged sidecar is backed up and rebuilt from canonical Markdown", async
   }
 });
 
-test("a moved Notebook workspace can be relocated without losing its records", async ({
+test("a moved 学习工作区 can be relocated without losing its records", async ({
   page
 }) => {
   const workspaceDir = await mkdtemp(path.join(tmpdir(), "studynotes-workspace-"));
@@ -1565,7 +1613,7 @@ test("a moved Notebook workspace can be relocated without losing its records", a
 
   try {
     await page.goto(app.webUrl);
-    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByLabel("学习工作区路径").fill(workspaceDir);
     await page.getByRole("button", { name: "打开工作区" }).click();
     await expect(
       page.getByRole("button", { name: "可恢复页面.md", exact: true })
@@ -1574,14 +1622,14 @@ test("a moved Notebook workspace can be relocated without losing its records", a
     await rename(workspaceDir, movedWorkspaceDir);
     await expect(
       page.getByRole("heading", {
-        name: "Notebook workspace 需要重新定位"
+        name: "学习工作区需要重新定位"
       })
     ).toBeVisible();
     await expect(
       page.getByText(canonicalWorkspacePath, { exact: true })
     ).toBeVisible();
 
-    await page.getByLabel("新的 workspace 路径").fill(movedWorkspaceDir);
+    await page.getByLabel("新的学习工作区路径").fill(movedWorkspaceDir);
     await page.getByRole("button", { name: "重新定位工作区" }).click();
 
     await expect(
@@ -1626,7 +1674,7 @@ test("the Electron development shell loads the same UI and stops local services"
     await expect(
       window.getByRole("heading", { name: "打开你的学习空间" })
     ).toBeVisible();
-    await window.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await window.getByLabel("学习工作区路径").fill(workspaceDir);
     await window.getByRole("button", { name: "打开工作区" }).click();
     await expect(
       window.getByRole("button", { name: "桌面壳.md", exact: true })

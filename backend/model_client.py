@@ -183,7 +183,7 @@ def request_embeddings(
     timeout: float = 45,
 ) -> list[list[float]]:
     if not inputs or any(not value.strip() for value in inputs):
-        raise ValueError("Embedding 输入不能为空。")
+        raise ValueError("向量模型输入不能为空。")
     payload = json.dumps(
         {
             "model": config.model,
@@ -205,12 +205,12 @@ def request_embeddings(
             raw_response = response.read().decode("utf-8")
     except error.HTTPError as request_error:
         raise ModelRequestError(
-            f"Embedding 服务返回 HTTP {request_error.code}。",
+            f"向量模型服务返回 HTTP {request_error.code}。",
             status=502,
         ) from request_error
     except (error.URLError, TimeoutError, OSError) as request_error:
         raise ModelRequestError(
-            "无法连接 Embedding 服务，已自动回退全文检索。",
+            "无法连接 向量模型服务，已自动回退全文检索。",
             status=502,
         ) from request_error
 
@@ -219,12 +219,12 @@ def request_embeddings(
         raw_embeddings = data["data"]
     except (json.JSONDecodeError, KeyError, TypeError) as parse_error:
         raise ModelRequestError(
-            "Embedding 服务返回了无法识别的响应。",
+            "向量模型服务返回了无法识别的响应。",
             status=502,
         ) from parse_error
 
     if not isinstance(raw_embeddings, list) or len(raw_embeddings) != len(inputs):
-        raise ModelRequestError("Embedding 服务返回的向量数量不匹配。", status=502)
+        raise ModelRequestError("向量模型服务返回的向量数量不匹配。", status=502)
 
     sorted_embeddings = sorted(
         enumerate(raw_embeddings),
@@ -238,20 +238,20 @@ def request_embeddings(
     dimension: Optional[int] = None
     for _, entry in sorted_embeddings:
         if not isinstance(entry, dict) or not isinstance(entry.get("embedding"), list):
-            raise ModelRequestError("Embedding 服务返回了无效向量。", status=502)
+            raise ModelRequestError("向量模型服务返回了无效向量。", status=502)
         try:
             vector = [float(value) for value in entry["embedding"]]
         except (TypeError, ValueError) as parse_error:
             raise ModelRequestError(
-                "Embedding 服务返回了无效向量。",
+                "向量模型服务返回了无效向量。",
                 status=502,
             ) from parse_error
         if not vector:
-            raise ModelRequestError("Embedding 服务返回了空向量。", status=502)
+            raise ModelRequestError("向量模型服务返回了空向量。", status=502)
         if dimension is None:
             dimension = len(vector)
         elif len(vector) != dimension:
-            raise ModelRequestError("Embedding 向量维度不一致。", status=502)
+            raise ModelRequestError("向量模型向量维度不一致。", status=502)
         vectors.append(vector)
     return vectors
 
@@ -259,4 +259,4 @@ def request_embeddings(
 def test_embedding_connection(config: EmbeddingConfig) -> None:
     vectors = request_embeddings(config, ["StudyNotes embedding connection test"])
     if not vectors:
-        raise ModelRequestError("Embedding 服务返回了空响应。", status=502)
+        raise ModelRequestError("向量模型服务返回了空响应。", status=502)

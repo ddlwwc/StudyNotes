@@ -14,6 +14,7 @@ from typing import cast
 import uuid
 
 from documents import sidecar_path_for
+from workspace_files import SOURCE_SUFFIXES, safe_source_files
 from storage import (
     application_data_directory,
     connect,
@@ -28,7 +29,7 @@ BACKUP_SCHEMA_VERSION = 1
 BACKUP_SUFFIX = ".studynotes.gz"
 MAX_PACKAGE_BYTES = 64 * 1024 * 1024
 MAX_PAYLOAD_BYTES = 128 * 1024 * 1024
-SUPPORTED_SOURCE_SUFFIXES = {".md", ".pdf"}
+SUPPORTED_SOURCE_SUFFIXES = SOURCE_SUFFIXES
 PREVIEW_TTL_SECONDS = 60 * 60
 
 TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
@@ -65,6 +66,8 @@ TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "block_id",
         "page",
         "quote",
+        "title",
+        "archived",
         "created_at",
         "updated_at",
     ),
@@ -226,16 +229,7 @@ def _file_sha256(file_path: Path) -> str:
 
 
 def _relative_source_files(workspace: Path) -> list[Path]:
-    files: list[Path] = []
-    for candidate in workspace.rglob("*"):
-        relative = candidate.relative_to(workspace)
-        if any(part.startswith(".") for part in relative.parts):
-            continue
-        if candidate.is_symlink() or not candidate.is_file():
-            continue
-        if candidate.suffix.lower() in SUPPORTED_SOURCE_SUFFIXES:
-            files.append(candidate)
-    return sorted(files, key=lambda item: item.as_posix().casefold())
+    return safe_source_files(workspace, suffixes=SUPPORTED_SOURCE_SUFFIXES)
 
 
 def _markdown_sidecar_record(file_path: Path, workspace: Path) -> dict[str, object]:
@@ -285,7 +279,11 @@ def _sidecar_manifest(workspace: Path) -> list[dict[str, object]]:
         else:
             records.append(
                 {
-                    "kind": "pdf",
+                    "kind": (
+                        "pdf"
+                        if file_path.suffix.lower() == ".pdf"
+                        else "text"
+                    ),
                     "path": file_path.relative_to(workspace).as_posix(),
                     "sourceFileSha256": _file_sha256(file_path),
                 }
@@ -570,11 +568,11 @@ def _validate_payload(payload: dict[str, object]) -> None:
         _safe_relative_path(row.get("path"), label="Markdown", suffixes={".md"})
     for row in rows_by_table["source_citations"]:
         _safe_relative_path(row.get("path"), label="PDF", suffixes={".pdf"})
-        _validate_sha256(row.get("pdf_sha256"), "Source citation")
+        _validate_sha256(row.get("pdf_sha256"), "资料引用")
     for row in rows_by_table["learning_sessions"]:
-        _safe_relative_path(row.get("path"), label="Learning source")
+        _safe_relative_path(row.get("path"), label="学习资料")
     for row in rows_by_table["learning_session_sources"]:
-        _safe_relative_path(row.get("path"), label="Learning source")
+        _safe_relative_path(row.get("path"), label="学习资料")
     for row in rows_by_table["session_messages"]:
         _json_path_values(row.get("citations_json"), "Session message citation")
         _json_path_values(row.get("context_json"), "Session message context")
@@ -598,7 +596,7 @@ def _validate_payload(payload: dict[str, object]) -> None:
         if not isinstance(raw_record, dict):
             raise BackupPackageError("备份包页面结构校验信息无效。")
         kind = raw_record.get("kind")
-        if kind not in {"markdown", "pdf"}:
+        if kind not in {"markdown", "pdf", "text"}:
             raise BackupPackageError("备份包页面结构类型无效。")
         relative_path = _safe_relative_path(
             raw_record.get("path"),
@@ -724,7 +722,7 @@ def _sidecar_review(
             source_path = _workspace_target_file(
                 workspace,
                 relative_path,
-                label="Learning source",
+                label="学习资料",
             )
         except BackupRestoreError as error:
             issues.append(

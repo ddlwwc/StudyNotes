@@ -43,7 +43,7 @@ export type MarkdownDocument = {
 
 export type TutorSelection = {
   blockId: string | null;
-  kind: "markdown" | "pdf";
+  kind: "markdown" | "pdf" | "text";
   page: number | null;
   quote: string;
 };
@@ -1002,8 +1002,8 @@ export function BlockNoteEditor({
           <RotateCcw aria-hidden="true" size={15} />
           <span>
             {sidecarStatus === "missing"
-              ? "sidecar 缺失，已从 Markdown 重建基础块。"
-              : "sidecar 已损坏或过期，已从 Markdown 重建并备份旧文件。"}
+              ? "块结构文件缺失，已从 Markdown 重建基础块。"
+              : "块结构文件已损坏或过期，已从 Markdown 重建并备份旧文件。"}
           </span>
           {sidecarBackupPath ? (
             <code title={sidecarBackupPath}>

@@ -445,7 +445,7 @@ export function PdfViewer({
         <aside className="citation-panel" aria-label="资料引用">
           <div className="citation-heading">
             <Quote aria-hidden="true" size={16} />
-            <span>Source citation</span>
+            <span>资料引用</span>
           </div>
           <section className="selected-fragment" aria-label="选中片段">
             <span className="field-label">选中片段</span>
@@ -482,7 +482,7 @@ export function PdfViewer({
                 node?.setAttribute("aria-current", "citation");
               }}
             >
-              <span>已定位 Source citation · 第 {currentPage} 页</span>
+              <span>已定位 资料引用 · 第 {currentPage} 页</span>
               <q>{citationTargetQuote}</q>
             </div>
           ) : null}

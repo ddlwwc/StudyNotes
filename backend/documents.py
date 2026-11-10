@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
@@ -31,6 +32,10 @@ def markdown_sha256(content: str) -> str:
 
 def sidecar_path_for(file_path: Path) -> Path:
     return Path(f"{file_path}.note.json")
+
+
+def commit_journal_path_for(file_path: Path) -> Path:
+    return file_path.parent / f".{file_path.name}.note-commit.json"
 
 
 @contextmanager
@@ -72,6 +77,116 @@ def atomic_write_text(file_path: Path, content: str) -> None:
     except Exception:
         temporary_path.unlink(missing_ok=True)
         raise
+
+
+def atomic_write_bytes(file_path: Path, content: bytes) -> None:
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{file_path.name}.",
+        suffix=".tmp",
+        dir=file_path.parent,
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, file_path)
+        directory_descriptor = os.open(file_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def sha256_bytes(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def recover_interrupted_commit(file_path: Path) -> None:
+    journal_path = commit_journal_path_for(file_path)
+    if not journal_path.exists():
+        return
+    try:
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("检测到损坏的双文件提交恢复日志。") from error
+    if not isinstance(journal, dict) or journal.get("schemaVersion") != 1:
+        raise ValueError("双文件提交恢复日志版本不受支持。")
+
+    sidecar_path = sidecar_path_for(file_path)
+    new_markdown_sha = str(journal.get("newMarkdownSha256", ""))
+    new_sidecar_sha = str(journal.get("newSidecarSha256", ""))
+    current_markdown = file_path.read_bytes() if file_path.exists() else b""
+    current_sidecar = sidecar_path.read_bytes() if sidecar_path.exists() else b""
+    if (
+        sha256_bytes(current_markdown) == new_markdown_sha
+        and sha256_bytes(current_sidecar) == new_sidecar_sha
+    ):
+        journal_path.unlink(missing_ok=True)
+        return
+
+    old_markdown = journal.get("oldMarkdown")
+    if not isinstance(old_markdown, str):
+        raise ValueError("双文件提交恢复日志缺少旧 Markdown。")
+    atomic_write_text(file_path, old_markdown)
+    old_sidecar_value = journal.get("oldSidecarBase64")
+    if old_sidecar_value is None:
+        sidecar_path.unlink(missing_ok=True)
+    elif isinstance(old_sidecar_value, str):
+        try:
+            atomic_write_bytes(
+                sidecar_path,
+                base64.b64decode(old_sidecar_value, validate=True),
+            )
+        except (ValueError, OSError) as error:
+            raise ValueError("双文件提交恢复日志中的 sidecar 无效。") from error
+    else:
+        raise ValueError("双文件提交恢复日志中的 sidecar 字段无效。")
+    journal_path.unlink(missing_ok=True)
+
+
+def commit_document_pair(
+    file_path: Path,
+    markdown: str,
+    sidecar_content: str,
+    *,
+    old_markdown: str,
+    old_sidecar: bytes | None,
+) -> None:
+    journal_path = commit_journal_path_for(file_path)
+    journal = {
+        "schemaVersion": 1,
+        "oldMarkdown": old_markdown,
+        "oldSidecarBase64": (
+            base64.b64encode(old_sidecar).decode("ascii")
+            if old_sidecar is not None
+            else None
+        ),
+        "newMarkdownSha256": markdown_sha256(markdown),
+        "newSidecarSha256": sha256_bytes(sidecar_content.encode("utf-8")),
+    }
+    atomic_write_text(
+        journal_path,
+        json.dumps(journal, ensure_ascii=False, separators=(",", ":")),
+    )
+    sidecar_path = sidecar_path_for(file_path)
+    try:
+        atomic_write_text(file_path, markdown)
+        atomic_write_text(sidecar_path, sidecar_content)
+    except Exception:
+        atomic_write_text(file_path, old_markdown)
+        if old_sidecar is None:
+            sidecar_path.unlink(missing_ok=True)
+        else:
+            atomic_write_bytes(sidecar_path, old_sidecar)
+        journal_path.unlink(missing_ok=True)
+        raise
+    journal_path.unlink(missing_ok=True)
 
 
 def backup_sidecar(file_path: Path) -> Path | None:
@@ -199,7 +314,12 @@ def rebuild_blocks(file_path: Path) -> list[dict[str, object]]:
     return blocks
 
 
-def load_document(file_path: Path) -> dict[str, object]:
+def load_document(
+    file_path: Path,
+    *,
+    repair_sidecar: bool = True,
+) -> dict[str, object]:
+    recover_interrupted_commit(file_path)
     markdown = read_markdown(file_path)
     revision = markdown_sha256(markdown)
     sidecar_path = sidecar_path_for(file_path)
@@ -225,8 +345,9 @@ def load_document(file_path: Path) -> dict[str, object]:
             blocks = validate_blocks(sidecar.get("blocks"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
             sidecar_status = "rebuilt"
-            backup = backup_sidecar(file_path)
-            backup_path = str(backup) if backup is not None else None
+            if repair_sidecar:
+                backup = backup_sidecar(file_path)
+                backup_path = str(backup) if backup is not None else None
             blocks = rebuild_blocks(file_path)
 
     return {
@@ -247,13 +368,21 @@ def save_document(
     sidecar_content = serialize_sidecar(file_path, content, blocks)
 
     with document_lock(file_path):
+        recover_interrupted_commit(file_path)
         current_markdown = read_markdown(file_path)
+        sidecar_path = sidecar_path_for(file_path)
+        old_sidecar = sidecar_path.read_bytes() if sidecar_path.exists() else None
         current_revision = markdown_sha256(current_markdown)
         if current_revision != expected_revision:
             raise DocumentConflictError(load_document(file_path))
 
-        atomic_write_text(file_path, content)
-        atomic_write_text(sidecar_path_for(file_path), sidecar_content)
+        commit_document_pair(
+            file_path,
+            content,
+            sidecar_content,
+            old_markdown=current_markdown,
+            old_sidecar=old_sidecar,
+        )
         revision = markdown_sha256(content)
 
     return {
