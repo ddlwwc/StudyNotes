@@ -319,6 +319,18 @@ def load_document(
     *,
     repair_sidecar: bool = True,
 ) -> dict[str, object]:
+    with document_lock(file_path):
+        return _load_document_locked(
+            file_path,
+            repair_sidecar=repair_sidecar,
+        )
+
+
+def _load_document_locked(
+    file_path: Path,
+    *,
+    repair_sidecar: bool,
+) -> dict[str, object]:
     recover_interrupted_commit(file_path)
     markdown = read_markdown(file_path)
     revision = markdown_sha256(markdown)

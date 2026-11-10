@@ -1318,9 +1318,12 @@ test("an unsaved draft is recoverable after an abnormal app restart", async ({
       page.getByText("异常退出前的内容。", { exact: false })
     ).toBeVisible();
     await expect(page.getByText("已保存", { exact: true })).toBeVisible();
-    expect(await readFile(markdownPath, "utf8")).toContain(
-      "异常退出前的内容。"
-    );
+    await expect
+      .poll(async () => readFile(markdownPath, "utf8"), {
+        message: "恢复草稿后应自动写入 Markdown",
+        timeout: 5_000
+      })
+      .toContain("异常退出前的内容。");
   } finally {
     await secondApp.stop();
     await rm(workspaceDir, { recursive: true, force: true });
