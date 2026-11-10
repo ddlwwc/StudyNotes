@@ -300,6 +300,42 @@ test("first launch asks the user to open a 学习工作区", async ({ page }) =>
   }
 });
 
+test("browser extension attributes on html do not cause hydration errors", async ({
+  page
+}) => {
+  const app = await startApp();
+  const hydrationErrors: string[] = [];
+  page.on("console", (message) => {
+    if (
+      message.type() === "error" &&
+      /hydrated|hydration mismatch/i.test(message.text())
+    ) {
+      hydrationErrors.push(message.text());
+    }
+  });
+  await page.addInitScript(() => {
+    const annotateDocument = () => {
+      document.documentElement?.setAttribute("trancy-version", "7.9.7");
+    };
+    new MutationObserver(annotateDocument).observe(document, {
+      childList: true,
+      subtree: true
+    });
+    annotateDocument();
+  });
+
+  try {
+    await page.goto(app.webUrl);
+    await expect(
+      page.getByRole("heading", { name: "打开你的学习空间" })
+    ).toBeVisible();
+    await page.waitForTimeout(250);
+    expect(hydrationErrors).toEqual([]);
+  } finally {
+    await app.stop();
+  }
+});
+
 test("first launch explains three setup steps and the data boundary before online services", async ({
   page
 }) => {
