@@ -10,7 +10,7 @@ from urllib.parse import unquote, urlsplit
 import fitz
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from credentials import (
     ACCESS_KEY_ACCOUNT,
@@ -29,6 +29,11 @@ from model_client import (
     ModelRequestError,
     test_model_connection,
 )
+from practice import (
+    PracticeGenerationError,
+    generate_practice,
+    serialize_practice,
+)
 from qiniu_images import MAX_IMAGE_BYTES, QiniuError, delete_image, upload_image
 from search_index import rebuild_workspace_index, search_workspace
 from secret_store import has_api_key, load_api_key, save_api_key
@@ -41,10 +46,13 @@ from storage import (
     load_app_setting,
     load_active_workspace,
     load_document_draft,
+    load_practice_set,
     load_qiniu_settings,
     load_source_citation,
     load_saved_workspace_path,
+    list_practice_attempts,
     move_document_draft,
+    save_practice_attempt,
     save_active_workspace,
     save_app_setting,
     save_document_draft,
@@ -94,6 +102,15 @@ class CreateTutorTurnRequest(BaseModel):
     question: str
     mode: str = "guided"
     supplement_requested: bool = False
+
+
+class CreatePracticeRequest(BaseModel):
+    question_count: int = Field(default=3, ge=1, le=10)
+
+
+class CreatePracticeAttemptRequest(BaseModel):
+    practice_item_id: str
+    selected_index: int = Field(ge=0)
 
 
 class CreateCitationRequest(BaseModel):
@@ -525,6 +542,87 @@ def create_tutor_turn(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+def require_learning_session(session_id: str) -> tuple[Path, dict[str, object]]:
+    root = require_active_workspace()
+    session = load_learning_session(root, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Learning session 不存在。")
+    resolve_workspace_file(str(session["path"]), {".md"})
+    return root, session
+
+
+def saved_practice_response(
+    workspace: Path,
+    session_id: str,
+) -> dict[str, object]:
+    loaded = load_practice_set(workspace, session_id)
+    if loaded is None:
+        return serialize_practice(None, [])
+    attempts = list_practice_attempts(
+        workspace,
+        session_id,
+        str(loaded["practice"]["id"]),  # type: ignore[index]
+    )
+    return serialize_practice(loaded, attempts)
+
+
+@app.get("/api/tutor/sessions/{session_id}/practice")
+def get_practice(session_id: str) -> dict[str, object]:
+    root, _session = require_learning_session(session_id)
+    return saved_practice_response(root, session_id)
+
+
+@app.post("/api/tutor/sessions/{session_id}/practice")
+def create_practice(
+    session_id: str,
+    request: CreatePracticeRequest,
+) -> dict[str, object]:
+    root, session = require_learning_session(session_id)
+    config = configured_model()
+    try:
+        return generate_practice(
+            root,
+            session,
+            config,
+            request.question_count,
+        )
+    except PracticeGenerationError as practice_error:
+        raise HTTPException(status_code=502, detail=str(practice_error)) from practice_error
+    except TutorContextError as context_error:
+        raise HTTPException(status_code=422, detail=str(context_error)) from context_error
+    except ModelRequestError as model_error:
+        raise HTTPException(
+            status_code=model_error.status,
+            detail=str(model_error),
+        ) from model_error
+
+
+@app.post("/api/tutor/sessions/{session_id}/practice/attempts")
+def create_practice_attempt(
+    session_id: str,
+    request: CreatePracticeAttemptRequest,
+) -> dict[str, object]:
+    root, _session = require_learning_session(session_id)
+    try:
+        attempt = save_practice_attempt(
+            root,
+            session_id,
+            request.practice_item_id,
+            request.selected_index,
+        )
+    except ValueError as selection_error:
+        raise HTTPException(status_code=422, detail=str(selection_error)) from selection_error
+    if attempt is None:
+        raise HTTPException(status_code=404, detail="Practice item 不存在。")
+    return {
+        "id": attempt["id"],
+        "practiceItemId": attempt["practice_item_id"],
+        "selectedIndex": attempt["selected_index"],
+        "correct": bool(attempt["correct"]),
+        "answeredAt": attempt["answered_at"],
+    }
 
 
 @app.get("/api/settings/qiniu")

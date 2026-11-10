@@ -32,12 +32,14 @@ def request_chat_completion(
     config: ModelConfig,
     messages: list[dict[str, str]],
     *,
+    metadata: dict[str, object] | None = None,
     timeout: float = 30,
 ) -> str:
     payload = json.dumps(
         {
             "model": config.model,
             "messages": messages,
+            "metadata": metadata or {},
             "stream": False,
         }
     ).encode("utf-8")

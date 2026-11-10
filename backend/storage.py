@@ -145,6 +145,50 @@ def initialize_database() -> None:
 
             CREATE INDEX IF NOT EXISTS session_messages_session
             ON session_messages (workspace_path, session_id, id);
+
+            CREATE TABLE IF NOT EXISTS practice_sets (
+                id TEXT PRIMARY KEY,
+                workspace_path TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                question_count INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS practice_sets_session
+            ON practice_sets (workspace_path, session_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS practice_items (
+                id TEXT PRIMARY KEY,
+                practice_set_id TEXT NOT NULL,
+                workspace_path TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                stem TEXT NOT NULL,
+                options_json TEXT NOT NULL,
+                correct_index INTEGER NOT NULL,
+                explanation TEXT NOT NULL,
+                citation_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (practice_set_id, ordinal)
+            );
+
+            CREATE INDEX IF NOT EXISTS practice_items_session
+            ON practice_items (workspace_path, session_id, practice_set_id, ordinal);
+
+            CREATE TABLE IF NOT EXISTS practice_attempts (
+                id TEXT PRIMARY KEY,
+                workspace_path TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                practice_set_id TEXT NOT NULL,
+                practice_item_id TEXT NOT NULL,
+                selected_index INTEGER NOT NULL,
+                correct INTEGER NOT NULL,
+                answered_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (workspace_path, practice_item_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS practice_attempts_session
+            ON practice_attempts (workspace_path, session_id, practice_set_id);
             """
         )
 
@@ -317,6 +361,229 @@ def save_session_message(
         ).fetchone()
     if row is None:
         raise RuntimeError("Session message was not persisted.")
+    return dict(row)
+
+
+def list_session_messages(
+    workspace: Path,
+    session_id: str,
+    *,
+    limit: int = 8,
+) -> list[dict[str, object]]:
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM (
+                SELECT *
+                FROM session_messages
+                WHERE workspace_path = ? AND session_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+            )
+            ORDER BY id ASC
+            """,
+            (str(workspace.resolve()), session_id, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def save_practice_set(
+    workspace: Path,
+    session_id: str,
+    questions: list[dict[str, object]],
+) -> dict[str, object]:
+    practice_set_id = str(uuid.uuid4())
+    workspace_path = str(workspace.resolve())
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO practice_sets (
+                id,
+                workspace_path,
+                session_id,
+                question_count
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (practice_set_id, workspace_path, session_id, len(questions)),
+        )
+        for ordinal, question in enumerate(questions, start=1):
+            item_id = str(uuid.uuid4())
+            connection.execute(
+                """
+                INSERT INTO practice_items (
+                    id,
+                    practice_set_id,
+                    workspace_path,
+                    session_id,
+                    ordinal,
+                    stem,
+                    options_json,
+                    correct_index,
+                    explanation,
+                    citation_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item_id,
+                    practice_set_id,
+                    workspace_path,
+                    session_id,
+                    ordinal,
+                    str(question["stem"]),
+                    json.dumps(question["options"], ensure_ascii=False),
+                    int(question["correctIndex"]),
+                    str(question["explanation"]),
+                    json.dumps(question["citation"], ensure_ascii=False),
+                ),
+            )
+        connection.execute(
+            """
+            UPDATE learning_sessions
+            SET updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (workspace_path, session_id),
+        )
+
+    loaded = load_practice_set(workspace, session_id)
+    if loaded is None or loaded["practice"]["id"] != practice_set_id:
+        raise RuntimeError("Practice set was not persisted.")
+    return loaded
+
+
+def load_practice_set(
+    workspace: Path,
+    session_id: str,
+) -> Optional[dict[str, object]]:
+    workspace_path = str(workspace.resolve())
+    with connect() as connection:
+        practice = connection.execute(
+            """
+            SELECT *
+            FROM practice_sets
+            WHERE workspace_path = ? AND session_id = ?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            (workspace_path, session_id),
+        ).fetchone()
+        if practice is None:
+            return None
+        items = connection.execute(
+            """
+            SELECT *
+            FROM practice_items
+            WHERE workspace_path = ?
+              AND session_id = ?
+              AND practice_set_id = ?
+            ORDER BY ordinal ASC
+            """,
+            (workspace_path, session_id, practice["id"]),
+        ).fetchall()
+    return {"practice": dict(practice), "items": [dict(row) for row in items]}
+
+
+def list_practice_attempts(
+    workspace: Path,
+    session_id: str,
+    practice_set_id: str,
+) -> list[dict[str, object]]:
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM practice_attempts
+            WHERE workspace_path = ?
+              AND session_id = ?
+              AND practice_set_id = ?
+            ORDER BY answered_at ASC, rowid ASC
+            """,
+            (str(workspace.resolve()), session_id, practice_set_id),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def save_practice_attempt(
+    workspace: Path,
+    session_id: str,
+    item_id: str,
+    selected_index: int,
+) -> Optional[dict[str, object]]:
+    workspace_path = str(workspace.resolve())
+    with connect() as connection:
+        item = connection.execute(
+            """
+            SELECT *
+            FROM practice_items
+            WHERE id = ?
+              AND workspace_path = ?
+              AND session_id = ?
+            """,
+            (item_id, workspace_path, session_id),
+        ).fetchone()
+        if item is None:
+            return None
+        try:
+            options = json.loads(str(item["options_json"]))
+        except json.JSONDecodeError as error:
+            raise ValueError("Practice item options are invalid.") from error
+        if (
+            not isinstance(options, list)
+            or selected_index < 0
+            or selected_index >= len(options)
+        ):
+            raise ValueError("请选择有效答案。")
+
+        attempt_id = str(uuid.uuid4())
+        correct = int(selected_index == int(item["correct_index"]))
+        connection.execute(
+            """
+            INSERT INTO practice_attempts (
+                id,
+                workspace_path,
+                session_id,
+                practice_set_id,
+                practice_item_id,
+                selected_index,
+                correct
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(workspace_path, practice_item_id) DO UPDATE SET
+                selected_index = excluded.selected_index,
+                correct = excluded.correct,
+                answered_at = CURRENT_TIMESTAMP
+            """,
+            (
+                attempt_id,
+                workspace_path,
+                session_id,
+                str(item["practice_set_id"]),
+                item_id,
+                selected_index,
+                correct,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE learning_sessions
+            SET updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (workspace_path, session_id),
+        )
+        row = connection.execute(
+            """
+            SELECT *
+            FROM practice_attempts
+            WHERE workspace_path = ? AND practice_item_id = ?
+            """,
+            (workspace_path, item_id),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("Practice attempt was not persisted.")
     return dict(row)
 
 

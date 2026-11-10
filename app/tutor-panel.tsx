@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { TutorSelection } from "./blocknote-editor";
+import { PracticePanel } from "./practice-panel";
 
 export type TutorCitation = {
   blockId: string | null;
@@ -483,6 +484,15 @@ export function TutorPanel({
             </button>
           ) : null}
         </div>
+      ) : null}
+
+      {selection ? (
+        <PracticePanel
+          key={`${path}:${selection.blockId}`}
+          onCitationSelect={onCitationSelect}
+          onEnsureSession={ensureSession}
+          sessionId={sessionId}
+        />
       ) : null}
 
       {contextOpen && context ? (
