@@ -245,6 +245,55 @@ async function openStudyPage(page: Page) {
   return workspaceDir;
 }
 
+function createTextLayerPdf(): Buffer {
+  const firstPageStream =
+    "BT /F1 16 Tf 72 700 Td (PDF attention evidence.) Tj " +
+    "0 -26 Td (Attention allocation shapes comprehension.) Tj ET";
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    `<< /Length ${Buffer.byteLength(firstPageStream, "ascii")} >>\nstream\n${firstPageStream}\nendstream`
+  ];
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(pdf, "ascii"));
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+
+  const xrefOffset = Buffer.byteLength(pdf, "ascii");
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += "0000000000 65535 f \n";
+  offsets.slice(1).forEach((offset) => {
+    pdf += `${offset.toString().padStart(10, "0")} 00000 n \n`;
+  });
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\n`;
+  pdf += `startxref\n${xrefOffset}\n%%EOF\n`;
+
+  return Buffer.from(pdf, "ascii");
+}
+
+async function selectPdfText(page: Page, text: string) {
+  const textLine = page.getByLabel("PDF 文本层").getByText(text, {
+    exact: true
+  });
+  await expect(textLine).toBeVisible();
+  await textLine.evaluate((element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  });
+  await expect(
+    page.getByRole("region", { name: "选中片段" })
+  ).toContainText(text);
+}
+
 async function configureModel(page: Page, baseUrl: string) {
   await page.getByRole("button", { name: "设置" }).click();
   await page.getByLabel("Base URL").fill(baseUrl);
@@ -270,7 +319,9 @@ async function prepareTutor(
   await page
     .getByText("注意力帮助学习者筛选当前任务相关的信息。", { exact: true })
     .click();
-  return page.getByRole("complementary", { name: "Grounded tutor" });
+  const tutor = page.getByRole("complementary", { name: "Grounded tutor" });
+  await expect(tutor).toContainText("已绑定 Markdown 选区");
+  return tutor;
 }
 
 test("a user can configure and test an OpenAI-compatible model", async ({
@@ -396,6 +447,220 @@ test("asking from a Markdown block streams a grounded answer with auditable cont
         supplement_requested: false
       }
     });
+  } finally {
+    await model.close();
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("a PDF selection can start a grounded Learning session directly", async ({
+  page
+}) => {
+  const app = await startApp();
+  const model = await startMockModel(async (body, requestIndex, response) => {
+    expect(requestIndex).toBe(0);
+    expect(JSON.stringify(body.messages)).toContain("PDF attention evidence.");
+    await sendStreamingCompletion(
+      response,
+      JSON.stringify({
+        type: "grounded",
+        answer: "PDF 资料说明注意力分配会影响理解。[S1]",
+        citations: [
+          {
+            source_id: "S1",
+            quote: "PDF attention evidence."
+          }
+        ],
+        missing: []
+      })
+    );
+  });
+  const workspaceDir = await openStudyPage(page);
+  const pdfPath = path.join(workspaceDir, "课程", "注意力研究.pdf");
+  await writeFile(pdfPath, createTextLayerPdf());
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await configureModel(page, model.baseUrl);
+    await page
+      .getByRole("button", { name: "注意力研究.pdf", exact: true })
+      .click();
+
+    await expect(page.getByText("第 1 / 1 页", { exact: true })).toBeVisible();
+    await selectPdfText(page, "PDF attention evidence.");
+    await page.getByRole("button", { name: "用此片段发起提问" }).click();
+
+    const tutor = page.getByRole("complementary", { name: "Grounded tutor" });
+    await expect(tutor).toContainText("PDF 第 1 页");
+    await expect(tutor).toContainText("PDF attention evidence.");
+    await page.getByLabel("向当前资料提问").fill("这段资料说明了什么？");
+    await tutor.getByRole("button", { name: "发送" }).click();
+
+    await expect(tutor.getByText("已完成")).toBeVisible();
+    await expect(tutor.getByText("PDF 资料说明注意力分配会影响理解。")).toBeVisible();
+  } finally {
+    await model.close();
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("a Learning session answers across pinned Markdown and PDF sources with exact citation jumps", async ({
+  page
+}) => {
+  const app = await startApp();
+  const model = await startMockModel(async (body, requestIndex, response) => {
+    expect(requestIndex).toBe(0);
+    const messages = body.messages as Array<{ content?: string }> | undefined;
+    const contextMessage = messages?.find((message) =>
+      message.content?.startsWith("Learning source 上下文：")
+    )?.content;
+    if (!contextMessage) {
+      throw new Error("Tutor context was not sent to the model.");
+    }
+    const contextJson = contextMessage
+      .slice(
+        "Learning source 上下文：\n".length,
+        contextMessage.lastIndexOf("\n\n问题：")
+      );
+    const context = JSON.parse(contextJson) as {
+      chunks: Array<{
+        sourceId: string;
+        path: string;
+        text: string;
+      }>;
+    };
+    const markdownChunk = context.chunks.find((chunk) =>
+      chunk.path.endsWith("注意力机制.md")
+    );
+    const pdfChunk = context.chunks.find((chunk) =>
+      chunk.path.endsWith("注意力研究.pdf")
+    );
+    if (!markdownChunk || !pdfChunk) {
+      throw new Error("Mixed Markdown and PDF context was not sent.");
+    }
+
+    await sendStreamingCompletion(
+      response,
+      JSON.stringify({
+        type: "grounded",
+        answer:
+          `Markdown 解释注意力筛选信息。[${markdownChunk.sourceId}] ` +
+          `PDF 资料补充注意力分配与理解的关系。[${pdfChunk.sourceId}]`,
+        citations: [
+          {
+            source_id: markdownChunk.sourceId,
+            quote: "注意力帮助学习者筛选当前任务相关的信息。"
+          },
+          {
+            source_id: pdfChunk.sourceId,
+            quote: "PDF attention evidence."
+          }
+        ],
+        missing: []
+      })
+    );
+  });
+  const workspaceDir = await openStudyPage(page);
+  await writeFile(
+    path.join(workspaceDir, "课程", "注意力研究.pdf"),
+    createTextLayerPdf()
+  );
+  await mkdir(path.join(workspaceDir, "补充"), { recursive: true });
+  await Promise.all(
+    Array.from({ length: 8 }, (_, index) =>
+      writeFile(
+        path.join(workspaceDir, "补充", `证据-${index + 1}.md`),
+        `# 证据 ${index + 1}\n\n注意力证据帮助理解任务与工作记忆。`,
+        "utf8"
+      )
+    )
+  );
+
+  try {
+    const tutor = await prepareTutor(
+      page,
+      app.webUrl,
+      workspaceDir,
+      model.baseUrl
+    );
+    await page
+      .getByLabel("选择其他 Learning source")
+      .selectOption("课程/注意力研究.pdf");
+    await tutor.getByRole("button", { name: "固定来源" }).click();
+    await expect(tutor.getByRole("status")).toContainText("已固定");
+    await expect(tutor).toContainText("2 个来源");
+
+    await tutor
+      .getByRole("button", { name: "移除 课程/注意力研究.pdf" })
+      .click();
+    await expect(tutor.getByRole("status")).toContainText("已移除");
+    await expect(tutor).toContainText("1 个来源");
+
+    await page
+      .getByLabel("选择其他 Learning source")
+      .selectOption("课程/注意力研究.pdf");
+    await tutor.getByRole("button", { name: "固定来源" }).click();
+    await expect(tutor).toContainText("2 个来源");
+
+    await page
+      .getByText("工作记忆容量有限，因此注意力控制会影响理解。", {
+        exact: true
+      })
+      .click();
+    await expect(tutor).toContainText(
+      "工作记忆容量有限，因此注意力控制会影响理解。"
+    );
+    await tutor.getByRole("button", { name: "固定当前选区" }).click();
+    await expect(tutor).toContainText("3 个来源");
+    await tutor.getByRole("button", { name: "固定当前选区" }).click();
+    await expect(tutor.getByRole("status")).toContainText("已经固定");
+    await expect(tutor).toContainText("3 个来源");
+    await tutor
+      .getByRole("button", { name: "移除 课程/注意力机制.md" })
+      .click();
+    await expect(tutor).toContainText("2 个来源");
+
+    await page
+      .getByLabel("选择其他 Learning source")
+      .selectOption("课程/注意力研究.pdf");
+    await tutor.getByRole("button", { name: "固定来源" }).click();
+    await expect(tutor.getByRole("status")).toContainText("已固定");
+    await expect(tutor).toContainText("2 个来源");
+
+    await page
+      .getByLabel("向当前资料提问")
+      .fill("注意力证据帮助理解任务与工作记忆");
+    await tutor.getByRole("button", { name: "发送" }).click();
+    await expect(tutor.getByText("已完成")).toBeVisible();
+
+    const markdownCitation = tutor.getByRole("button", {
+      name: /Source citation 课程\/注意力机制\.md/
+    });
+    const pdfCitation = tutor.getByRole("button", {
+      name: /Source citation 课程\/注意力研究\.pdf/
+    });
+    await expect(markdownCitation).toBeVisible();
+    await expect(pdfCitation).toContainText("第 1 页");
+
+    await tutor.getByRole("button", { name: "查看上下文" }).click();
+    const contextDrawer = page.getByRole("region", { name: "上下文" });
+    await expect(contextDrawer).toContainText("上下文限额");
+    await expect(contextDrawer).toContainText("已省略");
+
+    await markdownCitation.click();
+    await expect(page.locator('[aria-current="citation"]')).toContainText(
+      "注意力帮助学习者筛选当前任务相关的信息。"
+    );
+
+    await pdfCitation.click();
+    await expect(page.getByText("第 1 / 1 页", { exact: true })).toBeVisible();
+    await expect(page.locator('[aria-current="citation"]')).toContainText(
+      "PDF attention evidence."
+    );
   } finally {
     await model.close();
     await app.stop();

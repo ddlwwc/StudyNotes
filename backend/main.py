@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from contextlib import asynccontextmanager
 import hashlib
 import json
@@ -34,8 +36,10 @@ from search_index import rebuild_workspace_index, search_workspace
 from secret_store import has_api_key, load_api_key, save_api_key
 from storage import (
     create_learning_session,
+    delete_learning_session_source,
     delete_document_draft,
     initialize_database,
+    list_learning_session_sources,
     load_learning_session,
     list_source_citations,
     load_app_setting,
@@ -48,6 +52,7 @@ from storage import (
     save_active_workspace,
     save_app_setting,
     save_document_draft,
+    save_learning_session_source,
     save_qiniu_settings,
     save_source_citation,
 )
@@ -55,6 +60,7 @@ from tutor import (
     TutorContextError,
     bind_tutor_selection,
     event_stream,
+    resolve_tutor_source,
 )
 
 
@@ -86,8 +92,16 @@ class ModelSettingsRequest(BaseModel):
 
 class CreateTutorSessionRequest(BaseModel):
     path: str
-    block_id: str
+    block_id: Optional[str] = None
+    page: Optional[int] = None
     quote: str
+
+
+class AddTutorSourceRequest(BaseModel):
+    path: str
+    block_id: Optional[str] = None
+    page: Optional[int] = None
+    quote: str = ""
 
 
 class CreateTutorTurnRequest(BaseModel):
@@ -428,6 +442,25 @@ def serialize_citation(citation: dict[str, object]) -> dict[str, object]:
     }
 
 
+def serialize_tutor_source(source: dict[str, object]) -> dict[str, object]:
+    try:
+        heading_path = json.loads(str(source.get("heading_path_json", "[]")))
+    except json.JSONDecodeError:
+        heading_path = []
+    return {
+        "id": source["id"],
+        "kind": source["kind"],
+        "path": source["path"],
+        "blockId": source.get("block_id"),
+        "blockIndex": source.get("block_index"),
+        "page": source.get("page"),
+        "headingPath": heading_path if isinstance(heading_path, list) else [],
+        "quote": source.get("quote", ""),
+        "isInitial": bool(source.get("is_initial")),
+        "createdAt": source.get("created_at"),
+    }
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -469,28 +502,41 @@ def create_tutor_session(
     request: CreateTutorSessionRequest,
 ) -> dict[str, object]:
     root = require_active_workspace()
-    resolve_workspace_file(request.path, {".md"})
     try:
         selected = bind_tutor_selection(
             root,
             request.path,
             request.block_id,
             request.quote,
+            page=request.page,
         )
     except TutorContextError as context_error:
         raise HTTPException(status_code=422, detail=str(context_error)) from context_error
     session = create_learning_session(
         root,
-        request.path,
-        str(selected["blockId"]),
+        str(selected["path"]),
+        (
+            str(selected["blockId"])
+            if selected.get("blockId") is not None
+            else None
+        ),
         str(selected["quote"]),
+        page=selected.get("page"),  # type: ignore[arg-type]
+    )
+    initial_source, _ = save_learning_session_source(
+        root,
+        str(session["id"]),
+        selected,
+        is_initial=True,
     )
     return {
         "id": session["id"],
         "path": session["path"],
         "blockId": session["block_id"],
+        "page": session["page"],
         "quote": session["quote"],
         "createdAt": session["created_at"],
+        "sources": [serialize_tutor_source(initial_source)],
     }
 
 
@@ -508,12 +554,14 @@ def create_tutor_turn(
         raise HTTPException(status_code=422, detail="请输入问题。")
     if request.mode not in {"guided", "direct"}:
         raise HTTPException(status_code=422, detail="辅导模式无效。")
-    resolve_workspace_file(str(session["path"]), {".md"})
+    resolve_workspace_file(str(session["path"]), {".md", ".pdf"})
+    session_sources = list_learning_session_sources(root, session_id)
     config = configured_model()
     return StreamingResponse(
         event_stream(
             root,
             session,
+            session_sources,
             config,
             question,
             request.mode,
@@ -525,6 +573,68 @@ def create_tutor_turn(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/api/tutor/sessions/{session_id}/sources")
+def tutor_sources(session_id: str) -> dict[str, object]:
+    root = require_active_workspace()
+    session = load_learning_session(root, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Learning session 不存在。")
+    return {
+        "sources": [
+            serialize_tutor_source(source)
+            for source in list_learning_session_sources(root, session_id)
+        ]
+    }
+
+
+@app.post("/api/tutor/sessions/{session_id}/sources")
+def add_tutor_source(
+    session_id: str,
+    request: AddTutorSourceRequest,
+) -> dict[str, object]:
+    root = require_active_workspace()
+    session = load_learning_session(root, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Learning session 不存在。")
+    try:
+        resolved = resolve_tutor_source(
+            root,
+            request.path,
+            block_id=request.block_id,
+            page=request.page,
+            quote=request.quote,
+        )
+    except TutorContextError as context_error:
+        raise HTTPException(status_code=422, detail=str(context_error)) from context_error
+    source, deduplicated = save_learning_session_source(
+        root,
+        session_id,
+        resolved,
+    )
+    return {
+        "source": serialize_tutor_source(source),
+        "deduplicated": deduplicated,
+    }
+
+
+@app.delete("/api/tutor/sessions/{session_id}/sources/{source_id}")
+def remove_tutor_source(
+    session_id: str,
+    source_id: str,
+) -> dict[str, bool]:
+    root = require_active_workspace()
+    session = load_learning_session(root, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Learning session 不存在。")
+    try:
+        deleted = delete_learning_session_source(root, session_id, source_id)
+    except ValueError as source_error:
+        raise HTTPException(status_code=409, detail=str(source_error)) from source_error
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Learning source 不存在。")
+    return {"deleted": True}
 
 
 @app.get("/api/settings/qiniu")

@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  BookOpenCheck,
   ChevronLeft,
   ChevronRight,
   LoaderCircle,
@@ -11,6 +12,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
 import type * as PdfJsModule from "pdfjs-dist/legacy/build/pdf.mjs";
+import type { TutorSelection } from "./blocknote-editor";
 
 type PdfPageMetadata = {
   hasText: boolean;
@@ -46,10 +48,14 @@ const MAX_SCALE = 2.5;
 const SCALE_STEP = 0.15;
 
 export function PdfViewer({
+  citationTargetQuote,
   initialPage = 1,
+  onTutorSelectionChange,
   path
 }: {
+  citationTargetQuote?: string | null;
   initialPage?: number;
+  onTutorSelectionChange?: (selection: TutorSelection | null) => void;
   path: string;
 }) {
   const [metadata, setMetadata] = useState<PdfMetadata | null>(null);
@@ -68,6 +74,12 @@ export function PdfViewer({
   const textLayerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    if (citationTargetQuote) {
+      setSelectedQuote(citationTargetQuote);
+    }
+  }, [citationTargetQuote]);
+
+  useEffect(() => {
     let cancelled = false;
     let loadingTask: ReturnType<typeof PdfJsModule.getDocument> | null = null;
 
@@ -76,7 +88,7 @@ export function PdfViewer({
     setMetadata(null);
     setPdfDocument(null);
     setCurrentPage(1);
-    setSelectedQuote("");
+    setSelectedQuote(citationTargetQuote ?? "");
     setSavedCitation(null);
     setValidationMessage("");
 
@@ -131,7 +143,7 @@ export function PdfViewer({
       cancelled = true;
       void loadingTask?.destroy();
     };
-  }, [initialPage, path]);
+  }, [citationTargetQuote, initialPage, path]);
 
   useEffect(() => {
     if (!pdfDocument || !pdfjs) {
@@ -447,6 +459,33 @@ export function PdfViewer({
           >
             {saving ? "正在保存…" : "保存引用"}
           </button>
+          <button
+            className="secondary-button citation-tutor"
+            type="button"
+            disabled={!selectedQuote}
+            onClick={() =>
+              onTutorSelectionChange?.({
+                blockId: null,
+                kind: "pdf",
+                page: currentPage,
+                quote: selectedQuote
+              })
+            }
+          >
+            <BookOpenCheck aria-hidden="true" size={14} />
+            用此片段发起提问
+          </button>
+          {citationTargetQuote ? (
+            <div
+              className="pdf-citation-target"
+              ref={(node) => {
+                node?.setAttribute("aria-current", "citation");
+              }}
+            >
+              <span>已定位 Source citation · 第 {currentPage} 页</span>
+              <q>{citationTargetQuote}</q>
+            </div>
+          ) : null}
           {savedCitation ? (
             <>
               <div className="citation-saved" role="status">
