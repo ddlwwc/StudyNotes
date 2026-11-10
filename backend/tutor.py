@@ -412,6 +412,17 @@ def _chunk_key(chunk: dict[str, object]) -> str:
     )
 
 
+def _chunk_identity(chunk: dict[str, object]) -> str:
+    return source_key(
+        str(chunk["kind"]),
+        str(chunk["path"]),
+        block_id=chunk.get("blockId"),  # type: ignore[arg-type]
+        block_index=chunk.get("blockIndex"),  # type: ignore[arg-type]
+        page=chunk.get("page"),  # type: ignore[arg-type]
+        quote="",
+    )
+
+
 def build_tutor_context(
     workspace: Path,
     session: dict[str, object],
@@ -492,7 +503,7 @@ def build_tutor_context(
     truncated = False
 
     for candidate in candidates:
-        key = _chunk_key(candidate)
+        key = _chunk_identity(candidate)
         if key in seen:
             deduplicated_count += 1
             continue

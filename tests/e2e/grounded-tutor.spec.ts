@@ -36,6 +36,17 @@ type EmbeddingResponder = (
   response: ServerResponse
 ) => Promise<void> | void;
 
+type TutorSentContext = {
+  chunks: Array<{
+    blockId: string | null;
+    blockIndex: number | null;
+    page: number | null;
+    path: string;
+    sourceId: string;
+    text: string;
+  }>;
+};
+
 function reservePort(): number {
   return 45_000 + Math.floor(Math.random() * 10_000);
 }
@@ -341,6 +352,58 @@ async function selectPdfText(page: Page, text: string) {
   await expect(
     page.getByRole("region", { name: "选中片段" })
   ).toContainText(text);
+}
+
+async function selectMarkdownText(
+  page: Page,
+  fullText: string,
+  selectedText: string
+) {
+  const blockText = page.getByText(fullText, { exact: true });
+  await expect(blockText).toBeVisible();
+  await blockText.evaluate((element, fragment) => {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    let textNode: Text | null = null;
+    while (walker.nextNode()) {
+      const candidate = walker.currentNode as Text;
+      if (candidate.data.includes(fragment)) {
+        textNode = candidate;
+        break;
+      }
+    }
+    if (!textNode) {
+      throw new Error("Markdown fragment was not found.");
+    }
+    const start = textNode.data.indexOf(fragment);
+    const range = document.createRange();
+    range.setStart(textNode, start);
+    range.setEnd(textNode, start + fragment.length);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  }, selectedText);
+}
+
+function parseTutorContext(body: Record<string, unknown>): TutorSentContext {
+  const messages = body.messages as
+    | Array<{ content?: string }>
+    | undefined;
+  const contextMessage = messages?.find((message) =>
+    message.content?.startsWith("Learning source 上下文：")
+  )?.content;
+  if (!contextMessage) {
+    throw new Error("Tutor context was not sent to the model.");
+  }
+  const prefix = "Learning source 上下文：\n";
+  const start = contextMessage.indexOf(prefix);
+  const end = contextMessage.lastIndexOf("\n\n问题：");
+  if (start < 0 || end < start) {
+    throw new Error("Tutor context message was malformed.");
+  }
+  return JSON.parse(
+    contextMessage.slice(start + prefix.length, end)
+  ) as TutorSentContext;
 }
 
 async function configureModel(
@@ -710,6 +773,65 @@ test("asking from a Markdown block streams a grounded answer with auditable cont
   }
 });
 
+test("a selected Markdown fragment is not duplicated by matching retrieval", async ({
+  page
+}) => {
+  const app = await startApp();
+  const model = await startMockModel();
+  const workspaceDir = await openStudyPage(page);
+  const paragraph =
+    "注意力帮助学习者筛选当前任务相关的信息。工作记忆容量有限，因此注意力控制会影响理解。";
+  await writeFile(
+    path.join(workspaceDir, "课程", "注意力机制.md"),
+    ["# 注意力机制", "", paragraph].join("\n"),
+    "utf8"
+  );
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await configureModel(page, model.baseUrl);
+    await page
+      .getByRole("button", { name: "注意力机制.md", exact: true })
+      .click();
+    await selectMarkdownText(
+      page,
+      paragraph,
+      "注意力帮助学习者筛选当前任务相关的信息。"
+    );
+
+    const tutor = page.getByRole("complementary", { name: "Grounded tutor" });
+    await expect(tutor).toContainText(
+      "注意力帮助学习者筛选当前任务相关的信息。"
+    );
+    await page
+      .getByLabel("向当前资料提问")
+      .fill("注意力如何帮助筛选信息？");
+    await tutor.getByRole("button", { name: "发送" }).click();
+    await expect(tutor.getByText("已完成")).toBeVisible();
+
+    const context = parseTutorContext(model.requests[0]?.body ?? {});
+    const matchingChunks = context.chunks.filter((chunk) =>
+      chunk.path.endsWith("注意力机制.md")
+    );
+    expect(matchingChunks).toHaveLength(1);
+    const identities = context.chunks.map((chunk) =>
+      [
+        chunk.path,
+        chunk.blockId ?? "",
+        chunk.blockIndex ?? "",
+        chunk.page ?? ""
+      ].join(":")
+    );
+    expect(new Set(identities).size).toBe(identities.length);
+  } finally {
+    await model.close();
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
 test("a PDF selection can start a grounded Learning session directly", async ({
   page
 }) => {
@@ -770,25 +892,7 @@ test("a Learning session answers across pinned Markdown and PDF sources with exa
   const app = await startApp();
   const model = await startMockModel(async (body, requestIndex, response) => {
     expect(requestIndex).toBe(0);
-    const messages = body.messages as Array<{ content?: string }> | undefined;
-    const contextMessage = messages?.find((message) =>
-      message.content?.startsWith("Learning source 上下文：")
-    )?.content;
-    if (!contextMessage) {
-      throw new Error("Tutor context was not sent to the model.");
-    }
-    const contextJson = contextMessage
-      .slice(
-        "Learning source 上下文：\n".length,
-        contextMessage.lastIndexOf("\n\n问题：")
-      );
-    const context = JSON.parse(contextJson) as {
-      chunks: Array<{
-        sourceId: string;
-        path: string;
-        text: string;
-      }>;
-    };
+    const context = parseTutorContext(body);
     const markdownChunk = context.chunks.find((chunk) =>
       chunk.path.endsWith("注意力机制.md")
     );
