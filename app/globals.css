@@ -630,6 +630,40 @@ button:disabled {
   margin-top: 6px;
 }
 
+.settings-toggle {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 2px 9px;
+  margin: 7px 0 2px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #f7faff;
+}
+
+.dialog .settings-toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--blue);
+}
+
+.settings-toggle label {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.settings-toggle p {
+  grid-column: 2;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .settings-status {
   margin: 10px 0 0;
   color: #157347;
@@ -638,6 +672,7 @@ button:disabled {
 
 .dialog-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 22px;
@@ -1172,6 +1207,32 @@ button:disabled {
   margin-top: 9px;
   color: var(--faint);
   font-size: 10px;
+}
+
+.tutor-retrieval-mode {
+  display: grid;
+  gap: 2px;
+  margin-top: 3px;
+  padding: 8px 9px;
+  border: 1px solid #cddcf5;
+  border-radius: 6px;
+  background: #f4f8ff;
+  color: #2459a8;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.tutor-retrieval-mode.is-fallback {
+  border-color: #ead6ac;
+  background: #fffaf0;
+  color: #7b5718;
+}
+
+.tutor-retrieval-mode small {
+  color: inherit;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.45;
 }
 
 .tutor-error {

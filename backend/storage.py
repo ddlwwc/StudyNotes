@@ -102,6 +102,28 @@ def initialize_database() -> None:
                 PRIMARY KEY (workspace_path, path)
             );
 
+            CREATE TABLE IF NOT EXISTS embedding_entries (
+                workspace_path TEXT NOT NULL,
+                entry_key TEXT NOT NULL,
+                path TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                block_id TEXT,
+                block_index INTEGER,
+                heading_path TEXT NOT NULL,
+                page INTEGER,
+                title TEXT NOT NULL,
+                tags TEXT NOT NULL,
+                body TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                embedding_model TEXT NOT NULL,
+                embedding_json TEXT NOT NULL,
+                indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (workspace_path, entry_key)
+            );
+
+            CREATE INDEX IF NOT EXISTS embedding_entries_workspace_model
+            ON embedding_entries (workspace_path, embedding_model, path);
+
             CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
                 workspace_path UNINDEXED,
                 path UNINDEXED,

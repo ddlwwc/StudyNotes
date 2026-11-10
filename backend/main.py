@@ -25,8 +25,10 @@ from documents import (
     sidecar_path_for,
 )
 from model_client import (
+    EmbeddingConfig,
     ModelConfig,
     ModelRequestError,
+    test_embedding_connection,
     test_model_connection,
 )
 from practice import (
@@ -90,6 +92,8 @@ class ModelSettingsRequest(BaseModel):
     base_url: str = ""
     model: str = ""
     api_key: str = ""
+    embedding_model: str = ""
+    embedding_enabled: bool = False
 
 
 class CreateTutorSessionRequest(BaseModel):
@@ -317,12 +321,22 @@ def normalize_quote(value: str) -> str:
 def serialize_model_settings() -> dict[str, object]:
     base_url = load_app_setting("model_base_url")
     model = load_app_setting("model_name")
-    configured = bool(base_url and model and has_api_key())
+    embedding_model = load_app_setting("embedding_model")
+    embedding_enabled = load_app_setting("embedding_enabled") == "true"
+    api_key_available = has_api_key()
     return {
         "baseUrl": base_url,
         "model": model,
-        "hasApiKey": has_api_key(),
-        "configured": configured,
+        "hasApiKey": api_key_available,
+        "configured": bool(base_url and model and api_key_available),
+        "embeddingModel": embedding_model,
+        "embeddingEnabled": embedding_enabled,
+        "embeddingConfigured": bool(
+            embedding_enabled
+            and embedding_model
+            and base_url
+            and api_key_available
+        ),
     }
 
 
@@ -341,6 +355,23 @@ def model_config_from_request(request: ModelSettingsRequest) -> ModelConfig:
     return ModelConfig(base_url=base_url, api_key=api_key, model=model)
 
 
+def embedding_config_from_request(
+    request: ModelSettingsRequest,
+) -> EmbeddingConfig:
+    base_url = request.base_url.strip()
+    model = request.embedding_model.strip()
+    api_key = request.api_key.strip() or load_api_key()
+    if not base_url:
+        raise HTTPException(status_code=422, detail="请填写 Base URL。")
+    if not base_url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=422, detail="Base URL 必须使用 HTTP 或 HTTPS。")
+    if not model:
+        raise HTTPException(status_code=422, detail="请填写 Embedding 模型。")
+    if not api_key:
+        raise HTTPException(status_code=422, detail="请填写 API Key。")
+    return EmbeddingConfig(base_url=base_url, api_key=api_key, model=model)
+
+
 def configured_model() -> ModelConfig:
     base_url = load_app_setting("model_base_url")
     model = load_app_setting("model_name")
@@ -348,6 +379,17 @@ def configured_model() -> ModelConfig:
     if not base_url or not model or not api_key:
         raise HTTPException(status_code=409, detail="请先配置模型服务。")
     return ModelConfig(base_url=base_url, api_key=api_key, model=model)
+
+
+def configured_embedding() -> Optional[EmbeddingConfig]:
+    if load_app_setting("embedding_enabled") != "true":
+        return None
+    base_url = load_app_setting("model_base_url")
+    model = load_app_setting("embedding_model")
+    api_key = load_api_key()
+    if not base_url or not model or not api_key:
+        return None
+    return EmbeddingConfig(base_url=base_url, api_key=api_key, model=model)
 
 
 def normalize_qiniu_domain(value: str) -> str:
@@ -458,6 +500,12 @@ def model_settings() -> dict[str, object]:
 @app.put("/api/model-settings")
 def update_model_settings(request: ModelSettingsRequest) -> dict[str, object]:
     config = model_config_from_request(request)
+    embedding_model = request.embedding_model.strip()
+    if request.embedding_enabled and not embedding_model:
+        raise HTTPException(
+            status_code=422,
+            detail="启用语义检索前请填写 Embedding 模型。",
+        )
     try:
         if request.api_key.strip():
             save_api_key(config.api_key)
@@ -465,6 +513,11 @@ def update_model_settings(request: ModelSettingsRequest) -> dict[str, object]:
         raise HTTPException(status_code=500, detail=str(secret_error)) from secret_error
     save_app_setting("model_base_url", config.base_url)
     save_app_setting("model_name", config.model)
+    save_app_setting("embedding_model", embedding_model)
+    save_app_setting(
+        "embedding_enabled",
+        "true" if request.embedding_enabled else "false",
+    )
     return serialize_model_settings()
 
 
@@ -473,6 +526,19 @@ def test_model_settings(request: ModelSettingsRequest) -> dict[str, bool]:
     config = model_config_from_request(request)
     try:
         test_model_connection(config)
+    except ModelRequestError as model_error:
+        raise HTTPException(
+            status_code=model_error.status,
+            detail=str(model_error),
+        ) from model_error
+    return {"ok": True}
+
+
+@app.post("/api/model-settings/test-embedding")
+def test_embedding_settings(request: ModelSettingsRequest) -> dict[str, bool]:
+    config = embedding_config_from_request(request)
+    try:
+        test_embedding_connection(config)
     except ModelRequestError as model_error:
         raise HTTPException(
             status_code=model_error.status,
@@ -527,11 +593,13 @@ def create_tutor_turn(
         raise HTTPException(status_code=422, detail="辅导模式无效。")
     resolve_workspace_file(str(session["path"]), {".md"})
     config = configured_model()
+    embedding_config = configured_embedding()
     return StreamingResponse(
         event_stream(
             root,
             session,
             config,
+            embedding_config,
             question,
             request.mode,
             request.supplement_requested,

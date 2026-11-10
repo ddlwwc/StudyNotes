@@ -15,6 +15,7 @@ type RunningApp = {
 type ModelRequest = {
   authorization: string | undefined;
   body: Record<string, unknown>;
+  url: string | undefined;
 };
 
 type MockModel = {
@@ -25,6 +26,12 @@ type MockModel = {
 
 type ModelResponder = (
   body: Record<string, unknown>,
+  requestIndex: number,
+  response: ServerResponse
+) => Promise<void> | void;
+
+type EmbeddingResponder = (
+  inputs: string[],
   requestIndex: number,
   response: ServerResponse
 ) => Promise<void> | void;
@@ -61,6 +68,28 @@ function sendChatCompletion(
   );
 }
 
+function sendEmbedding(
+  response: ServerResponse,
+  inputs: string[]
+) {
+  response.writeHead(200, { "Content-Type": "application/json" });
+  response.end(
+    JSON.stringify({
+      object: "list",
+      data: inputs.map((input, index) => ({
+        object: "embedding",
+        index,
+        embedding: input.includes("短时记忆")
+          ? [1, 0, 0]
+          : input.includes("工作记忆容量")
+            ? [0.98, 0.18, 0]
+            : [0, 1, 0]
+      })),
+      model: "mock-embedding"
+    })
+  );
+}
+
 async function sendStreamingCompletion(
   response: ServerResponse,
   content: string
@@ -82,10 +111,18 @@ async function sendStreamingCompletion(
   response.end();
 }
 
-async function startMockModel(responder?: ModelResponder): Promise<MockModel> {
+async function startMockModel(
+  responder?: ModelResponder,
+  embeddingResponder?: EmbeddingResponder
+): Promise<MockModel> {
   const requests: ModelRequest[] = [];
   const server = createServer(async (request, response) => {
-    if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+    if (
+      request.method !== "POST" ||
+      !["/v1/chat/completions", "/v1/embeddings"].includes(
+        request.url ?? ""
+      )
+    ) {
       response.writeHead(404);
       response.end();
       return;
@@ -95,8 +132,20 @@ async function startMockModel(responder?: ModelResponder): Promise<MockModel> {
     const body = JSON.parse(raw) as Record<string, unknown>;
     requests.push({
       authorization: request.headers.authorization,
-      body
+      body,
+      url: request.url
     });
+    if (request.url === "/v1/embeddings") {
+      const inputs = Array.isArray(body.input)
+        ? body.input.map(String)
+        : [String(body.input ?? "")];
+      if (embeddingResponder) {
+        await embeddingResponder(inputs, requests.length - 1, response);
+        return;
+      }
+      sendEmbedding(response, inputs);
+      return;
+    }
     if (responder) {
       await responder(body, requests.length - 1, response);
       return;
@@ -245,11 +294,19 @@ async function openStudyPage(page: Page) {
   return workspaceDir;
 }
 
-async function configureModel(page: Page, baseUrl: string) {
+async function configureModel(
+  page: Page,
+  baseUrl: string,
+  embeddingModel?: string
+) {
   await page.getByRole("button", { name: "设置" }).click();
   await page.getByLabel("Base URL").fill(baseUrl);
   await page.getByLabel("API Key").fill("test-key");
   await page.getByLabel("聊天模型").fill("mock-model");
+  if (embeddingModel) {
+    await page.getByLabel("Embedding 模型").fill(embeddingModel);
+    await page.getByLabel("启用语义检索").check();
+  }
   await page.getByRole("button", { name: "保存设置" }).click();
   await expect(page.getByRole("dialog", { name: "模型设置" })).toBeHidden();
 }
@@ -258,12 +315,13 @@ async function prepareTutor(
   page: Page,
   webUrl: string,
   workspaceDir: string,
-  baseUrl: string
+  baseUrl: string,
+  embeddingModel?: string
 ) {
   await page.goto(webUrl);
   await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
   await page.getByRole("button", { name: "打开工作区" }).click();
-  await configureModel(page, baseUrl);
+  await configureModel(page, baseUrl, embeddingModel);
   await page
     .getByRole("button", { name: "注意力机制.md", exact: true })
     .click();
@@ -303,6 +361,204 @@ test("a user can configure and test an OpenAI-compatible model", async ({
 
     await page.getByRole("button", { name: "保存设置" }).click();
     await expect(page.getByRole("dialog", { name: "模型设置" })).toBeHidden();
+  } finally {
+    await model.close();
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("embedding settings can be configured, tested, and disabled", async ({
+  page
+}) => {
+  const app = await startApp();
+  const model = await startMockModel();
+  const workspaceDir = await openStudyPage(page);
+
+  try {
+    await page.goto(app.webUrl);
+    await page
+      .getByLabel("Notebook workspace 路径")
+      .fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await page.getByRole("button", { name: "设置" }).click();
+    await page.getByLabel("Base URL").fill(model.baseUrl);
+    await page.getByLabel("API Key").fill("test-key");
+    await page.getByLabel("聊天模型").fill("mock-model");
+    await page.getByLabel("Embedding 模型").fill("mock-embedding");
+    await page.getByLabel("启用语义检索").check();
+    await page.getByRole("button", { name: "测试 Embedding" }).click();
+
+    await expect(page.getByText("Embedding 连接成功")).toBeVisible();
+    const embeddingTest = model.requests.find(
+      (request) => request.url === "/v1/embeddings"
+    );
+    expect(embeddingTest?.authorization).toBe("Bearer test-key");
+    expect(embeddingTest?.body).toMatchObject({
+      input: expect.any(Array),
+      model: "mock-embedding"
+    });
+
+    await page.getByRole("button", { name: "保存设置" }).click();
+    await expect(page.getByRole("dialog", { name: "模型设置" })).toBeHidden();
+    const enabledSettings = await page.evaluate(async () => {
+      const response = await fetch("/api/model-settings");
+      return response.json();
+    });
+    expect(enabledSettings).toMatchObject({
+      embeddingEnabled: true,
+      embeddingModel: "mock-embedding"
+    });
+
+    await page.getByRole("button", { name: "设置" }).click();
+    await page.getByLabel("启用语义检索").uncheck();
+    await page.getByRole("button", { name: "保存设置" }).click();
+    const disabledSettings = await page.evaluate(async () => {
+      const response = await fetch("/api/model-settings");
+      return response.json();
+    });
+    expect(disabledSettings).toMatchObject({
+      embeddingEnabled: false,
+      embeddingModel: "mock-embedding"
+    });
+
+    const embeddingRequestCount = model.requests.filter(
+      (request) => request.url === "/v1/embeddings"
+    ).length;
+    await page
+      .getByRole("button", { name: "注意力机制.md", exact: true })
+      .click();
+    await page
+      .getByText("注意力帮助学习者筛选当前任务相关的信息。", { exact: true })
+      .click();
+    const tutor = page.getByRole("complementary", { name: "Grounded tutor" });
+    await page
+      .getByLabel("向当前资料提问")
+      .fill("注意力帮助学习者筛选当前任务相关的信息。");
+    await tutor.getByRole("button", { name: "发送" }).click();
+    await expect(tutor.getByText("已完成")).toBeVisible();
+    await expect(tutor.getByText("检索模式：全文检索")).toBeVisible();
+    expect(
+      model.requests.filter((request) => request.url === "/v1/embeddings")
+    ).toHaveLength(embeddingRequestCount);
+  } finally {
+    await model.close();
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("semantic retrieval finds a lexically different passage with a Source citation", async ({
+  page
+}) => {
+  const app = await startApp();
+  const model = await startMockModel(async (body, _requestIndex, response) => {
+    expect(JSON.stringify(body.messages)).toContain("工作记忆容量有限");
+    await sendStreamingCompletion(
+      response,
+      JSON.stringify({
+        type: "grounded",
+        answer: "工作记忆容量有限，会限制同时处理的信息量。[S2]",
+        citations: [
+          {
+            source_id: "S2",
+            quote: "工作记忆容量有限，因此注意力控制会影响理解。"
+          }
+        ],
+        missing: []
+      })
+    );
+  });
+  const workspaceDir = await openStudyPage(page);
+
+  try {
+    const tutor = await prepareTutor(
+      page,
+      app.webUrl,
+      workspaceDir,
+      model.baseUrl,
+      "mock-embedding"
+    );
+    await page.getByLabel("向当前资料提问").fill("短时记忆有什么限制？");
+    await tutor.getByRole("button", { name: "发送" }).click();
+
+    await expect(tutor.getByText("已完成")).toBeVisible();
+    const citation = tutor.getByRole("button", {
+      name: /Source citation.*工作记忆容量有限/
+    });
+    await expect(citation).toBeVisible();
+    await citation.click();
+    await expect(page.locator('[aria-current="citation"]')).toContainText(
+      "工作记忆容量有限"
+    );
+
+    await tutor.getByRole("button", { name: "查看上下文" }).click();
+    const contextDrawer = page.getByRole("region", { name: "上下文" });
+    await expect(contextDrawer).toContainText("检索模式：语义检索");
+    await expect(contextDrawer).toContainText("工作记忆容量有限");
+    expect(
+      model.requests.some((request) => request.url === "/v1/embeddings")
+    ).toBe(true);
+  } finally {
+    await model.close();
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("embedding failure automatically falls back to full-text retrieval", async ({
+  page
+}) => {
+  const app = await startApp();
+  const model = await startMockModel(
+    async (body, _requestIndex, response) => {
+      expect(JSON.stringify(body.messages)).toContain("工作记忆容量有限");
+      await sendStreamingCompletion(
+        response,
+        JSON.stringify({
+          type: "grounded",
+          answer: "工作记忆的容量限制会影响理解。[S2]",
+          citations: [
+            {
+              source_id: "S2",
+              quote: "工作记忆容量有限，因此注意力控制会影响理解。"
+            }
+          ],
+          missing: []
+        })
+      );
+    },
+    (_inputs, _requestIndex, response) => {
+      response.writeHead(500, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "embedding failed" } }));
+    }
+  );
+  const workspaceDir = await openStudyPage(page);
+
+  try {
+    const tutor = await prepareTutor(
+      page,
+      app.webUrl,
+      workspaceDir,
+      model.baseUrl,
+      "mock-embedding"
+    );
+    await page.getByLabel("向当前资料提问").fill("工作记忆容量有限");
+    await tutor.getByRole("button", { name: "发送" }).click();
+
+    await expect(tutor.getByText("已完成")).toBeVisible();
+    await expect(tutor.getByText("检索模式：全文检索（已降级）")).toBeVisible();
+    const citation = tutor.getByRole("button", {
+      name: /Source citation.*工作记忆容量有限/
+    });
+    await expect(citation).toBeVisible();
+    await citation.click();
+    await expect(page.locator('[aria-current="citation"]')).toContainText(
+      "工作记忆容量有限"
+    );
+    expect(
+      model.requests.some((request) => request.url === "/v1/embeddings")
+    ).toBe(true);
   } finally {
     await model.close();
     await app.stop();
