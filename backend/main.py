@@ -5,6 +5,7 @@ import hashlib
 import json
 import mimetypes
 import posixpath
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urlsplit
@@ -45,12 +46,19 @@ from qiniu_images import MAX_IMAGE_BYTES, QiniuError, delete_image, upload_image
 from search_index import rebuild_workspace_index, search_workspace
 from secret_store import has_api_key, load_api_key, save_api_key
 from storage import (
+    create_gap_record,
     create_learning_session,
+    delete_gap_record,
+    delete_learning_session,
     delete_learning_session_source,
     delete_document_draft,
     initialize_database,
+    list_due_gap_records,
+    list_gap_records,
     list_learning_session_sources,
+    list_review_results,
     load_learning_session,
+    load_gap_record,
     list_source_citations,
     load_app_setting,
     load_active_workspace,
@@ -58,6 +66,7 @@ from storage import (
     load_practice_set,
     load_practice_attempt,
     load_practice_item,
+    load_practice_item_by_id,
     load_qiniu_settings,
     load_source_citation,
     load_saved_workspace_path,
@@ -72,7 +81,9 @@ from storage import (
     save_document_draft,
     save_learning_session_source,
     save_qiniu_settings,
+    save_review_result,
     save_source_citation,
+    update_gap_review_date,
 )
 from tutor import (
     TutorContextError,
@@ -146,6 +157,21 @@ class CreateShortAnswerAttemptRequest(BaseModel):
 
 class SavePracticeSelfAssessmentRequest(BaseModel):
     final_score: int = Field(ge=0, le=100)
+
+
+class CreateGapRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=300)
+    practice_item_id: Optional[str] = None
+
+
+class UpdateGapReviewDateRequest(BaseModel):
+    next_review_at: Optional[str] = None
+
+
+class CreateReviewResultRequest(BaseModel):
+    answer: str = Field(min_length=1, max_length=10_000)
+    feedback: str = Field(default="", max_length=10_000)
+    result: str
 
 
 class CreateCitationRequest(BaseModel):
@@ -537,6 +563,119 @@ def serialize_tutor_source(source: dict[str, object]) -> dict[str, object]:
     }
 
 
+def parse_datetime(value: str) -> datetime:
+    candidate = value.strip()
+    if not candidate:
+        raise ValueError("日期不能为空。")
+    try:
+        parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("日期格式无效。") from error
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def serialize_datetime(value: object) -> Optional[str]:
+    if value is None or not str(value).strip():
+        return None
+    try:
+        parsed = parse_datetime(str(value))
+    except ValueError:
+        return None
+    return parsed.isoformat().replace("+00:00", "Z")
+
+
+def serialize_citation_json(raw: object) -> dict[str, object]:
+    try:
+        citation = json.loads(str(raw))
+    except (json.JSONDecodeError, TypeError):
+        citation = {}
+    return citation if isinstance(citation, dict) else {}
+
+
+def serialize_practice_item_summary(
+    item: Optional[dict[str, object]],
+) -> Optional[dict[str, object]]:
+    if item is None:
+        return None
+    try:
+        options = json.loads(str(item["options_json"]))
+    except (json.JSONDecodeError, TypeError):
+        options = []
+    return {
+        "id": item["id"],
+        "itemType": item.get("item_type"),
+        "stem": item.get("stem"),
+        "options": options if isinstance(options, list) else [],
+        "correctIndex": item.get("correct_index"),
+        "explanation": item.get("explanation"),
+        "referenceAnswer": item.get("reference_answer"),
+        "citation": serialize_citation_json(item.get("citation_json")),
+    }
+
+
+def serialize_review_result(review: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": review["id"],
+        "answer": review["answer"],
+        "feedback": review["feedback"],
+        "result": review["result"],
+        "reviewedAt": serialize_datetime(review["reviewed_at"]),
+        "nextReviewAt": serialize_datetime(review["next_review_at"]),
+    }
+
+
+def serialize_gap_record(
+    workspace: Path,
+    record: dict[str, object],
+    *,
+    include_reviews: bool = True,
+) -> dict[str, object]:
+    practice_item_id = record.get("practice_item_id")
+    practice_item = (
+        load_practice_item_by_id(workspace, str(practice_item_id))
+        if practice_item_id
+        else None
+    )
+    reviews = (
+        list_review_results(workspace, str(record["id"]))
+        if include_reviews
+        else []
+    )
+    next_review = serialize_datetime(record.get("next_review_at"))
+    due = False
+    if next_review:
+        due = parse_datetime(next_review) <= datetime.now(timezone.utc)
+    return {
+        "id": record["id"],
+        "title": record["title"],
+        "sessionId": record["session_id"],
+        "practiceItemId": practice_item_id,
+        "practiceItem": serialize_practice_item_summary(practice_item),
+        "citation": serialize_citation_json(record["citation_json"]),
+        "scheduleStep": record["schedule_step"],
+        "nextReviewAt": next_review,
+        "due": due,
+        "createdAt": serialize_datetime(record["created_at"]),
+        "updatedAt": serialize_datetime(record["updated_at"]),
+        "reviews": [serialize_review_result(review) for review in reviews],
+    }
+
+
+def review_response(workspace: Path) -> dict[str, object]:
+    return {
+        "queue": [
+            serialize_gap_record(workspace, record)
+            for record in list_due_gap_records(workspace, limit=20)
+        ],
+        "records": [
+            serialize_gap_record(workspace, record)
+            for record in list_gap_records(workspace)
+        ],
+    }
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -638,6 +777,14 @@ def create_tutor_session(
         "createdAt": session["created_at"],
         "sources": [serialize_tutor_source(initial_source)],
     }
+
+
+@app.delete("/api/tutor/sessions/{session_id}")
+def remove_tutor_session(session_id: str) -> dict[str, bool]:
+    root = require_active_workspace()
+    if not delete_learning_session(root, session_id):
+        raise HTTPException(status_code=404, detail="Learning session 不存在。")
+    return {"deleted": True}
 
 
 @app.post("/api/tutor/sessions/{session_id}/turns")
@@ -918,6 +1065,125 @@ def update_practice_self_assessment(
     if attempt is None:
         raise HTTPException(status_code=404, detail="该题尚未提交答案。")
     return serialize_practice_attempt(attempt)
+
+
+@app.post("/api/tutor/sessions/{session_id}/gaps")
+def create_gap(
+    session_id: str,
+    request: CreateGapRequest,
+) -> dict[str, object]:
+    root, session = require_learning_session(session_id)
+    title = request.title.strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="请填写缺口标题。")
+
+    practice_item: Optional[dict[str, object]] = None
+    if request.practice_item_id:
+        practice_item = load_practice_item(
+            root,
+            session_id,
+            request.practice_item_id,
+        )
+        if practice_item is None:
+            raise HTTPException(status_code=404, detail="Practice item 不存在。")
+        citation = serialize_citation_json(practice_item["citation_json"])
+    else:
+        sources = list_learning_session_sources(root, session_id)
+        if not sources:
+            raise HTTPException(status_code=409, detail="Learning session 没有可引用来源。")
+        source = sources[0]
+        try:
+            heading_path = json.loads(str(source["heading_path_json"]))
+        except json.JSONDecodeError:
+            heading_path = []
+        citation = {
+            "sourceId": source["id"],
+            "kind": source["kind"],
+            "path": source["path"],
+            "blockId": source.get("block_id"),
+            "blockIndex": source.get("block_index"),
+            "page": source.get("page"),
+            "headingPath": heading_path if isinstance(heading_path, list) else [],
+            "quote": source.get("quote", session.get("quote", "")),
+        }
+
+    record = create_gap_record(
+        root,
+        session_id,
+        title,
+        citation,
+        practice_item_id=str(practice_item["id"]) if practice_item else None,
+    )
+    return serialize_gap_record(root, record)
+
+
+@app.get("/api/review")
+def review_records() -> dict[str, object]:
+    return review_response(require_active_workspace())
+
+
+@app.get("/api/review/gaps/{gap_id}")
+def review_gap(gap_id: str) -> dict[str, object]:
+    root = require_active_workspace()
+    record = load_gap_record(root, gap_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="知识缺口不存在。")
+    return serialize_gap_record(root, record)
+
+
+@app.patch("/api/review/gaps/{gap_id}")
+def update_review_gap(
+    gap_id: str,
+    request: UpdateGapReviewDateRequest,
+) -> dict[str, object]:
+    root = require_active_workspace()
+    try:
+        next_review_at = (
+            parse_datetime(request.next_review_at)
+            if request.next_review_at is not None
+            else None
+        )
+    except ValueError as date_error:
+        raise HTTPException(status_code=422, detail=str(date_error)) from date_error
+    record = update_gap_review_date(root, gap_id, next_review_at)
+    if record is None:
+        raise HTTPException(status_code=404, detail="知识缺口不存在。")
+    return serialize_gap_record(root, record)
+
+
+@app.post("/api/review/gaps/{gap_id}/results")
+def create_review_result(
+    gap_id: str,
+    request: CreateReviewResultRequest,
+) -> dict[str, object]:
+    root = require_active_workspace()
+    try:
+        review = save_review_result(
+            root,
+            gap_id,
+            answer=request.answer,
+            feedback=request.feedback,
+            result=request.result,
+        )
+    except ValueError as review_error:
+        raise HTTPException(status_code=422, detail=str(review_error)) from review_error
+    if review is None:
+        raise HTTPException(status_code=404, detail="知识缺口不存在。")
+    record = load_gap_record(root, gap_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="知识缺口不存在。")
+    return {
+        "review": serialize_review_result(review),
+        "gap": serialize_gap_record(root, record),
+    }
+
+
+@app.delete("/api/review/gaps/{gap_id}")
+def remove_review_gap(gap_id: str) -> dict[str, bool]:
+    root = require_active_workspace()
+    if not delete_gap_record(root, gap_id):
+        raise HTTPException(status_code=404, detail="知识缺口不存在。")
+    return {"deleted": True}
 
 
 @app.get("/api/settings/qiniu")

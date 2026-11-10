@@ -2,6 +2,7 @@
 
 import {
   BookOpenCheck,
+  BookmarkPlus,
   Check,
   ChevronRight,
   LoaderCircle,
@@ -9,6 +10,7 @@ import {
   Save
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { GapDialog } from "./gap-dialog";
 import type { TutorCitation } from "./tutor-panel";
 
 type PracticeItem = {
@@ -101,11 +103,18 @@ export function PracticePanel({
   const [loadingSaved, setLoadingSaved] = useState(false);
   const [finished, setFinished] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [gapDialogOpen, setGapDialogOpen] = useState(false);
+  const [gapCreatedItems, setGapCreatedItems] = useState<Record<string, true>>(
+    {}
+  );
   const ownsSessionRef = useRef(false);
 
   const byItem = attemptMap(attempts);
   const currentItem = practice?.questions[currentIndex] ?? null;
   const currentAttempt = currentItem ? byItem[currentItem.id] : undefined;
+  const currentItemHasGap = currentItem
+    ? Boolean(gapCreatedItems[currentItem.id])
+    : false;
 
   function replaceAttempt(attempt: PracticeAttempt) {
     setAttempts((current) => [
@@ -543,6 +552,19 @@ export function PracticePanel({
                 </span>
                 <q>{currentItem.citation.quote}</q>
               </button>
+              <div className="practice-gap-capture">
+                {currentItemHasGap ? (
+                  <span role="status">已加入复习队列</span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setGapDialogOpen(true)}
+                  >
+                    <BookmarkPlus aria-hidden="true" size={13} />
+                    记为知识缺口
+                  </button>
+                )}
+              </div>
             </div>
           ) : null}
 
@@ -619,6 +641,22 @@ export function PracticePanel({
                   <q>{citation.quote}</q>
                 </button>
               ))}
+              {currentAttempt.finalScore !== null &&
+              currentAttempt.finalScore < 60 ? (
+                <div className="practice-gap-capture">
+                  {currentItemHasGap ? (
+                    <span role="status">已加入复习队列</span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setGapDialogOpen(true)}
+                    >
+                      <BookmarkPlus aria-hidden="true" size={13} />
+                      记为知识缺口
+                    </button>
+                  )}
+                </div>
+              ) : null}
             </div>
           ) : null}
 
@@ -717,6 +755,22 @@ export function PracticePanel({
         <p className="practice-empty">
           需要检验当前资料的掌握情况时，再按所选数量生成习题。
         </p>
+      ) : null}
+
+      {gapDialogOpen && activeSessionId && currentItem ? (
+        <GapDialog
+          defaultTitle={currentItem.stem}
+          onClose={() => setGapDialogOpen(false)}
+          onCreated={() => {
+            setGapCreatedItems((current) => ({
+              ...current,
+              [currentItem.id]: true
+            }));
+            setGapDialogOpen(false);
+          }}
+          practiceItemId={currentItem.id}
+          sessionId={activeSessionId}
+        />
       ) : null}
     </section>
   );

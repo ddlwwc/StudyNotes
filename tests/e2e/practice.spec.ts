@@ -394,6 +394,15 @@ test("a Learning session generates, answers, cites, and persists single-choice P
       workspaceDir,
       model.baseUrl
     );
+    await tutor.getByRole("button", { name: "记为知识缺口" }).click();
+    const sessionGapDialog = page.getByRole("dialog", { name: "记录知识缺口" });
+    await expect(sessionGapDialog.getByLabel("缺口标题")).toHaveValue(
+      "注意力帮助学习者筛选当前任务相关的信息。"
+    );
+    await sessionGapDialog.getByLabel("缺口标题").fill("注意力筛选机制");
+    await sessionGapDialog.getByRole("button", { name: "加入复习" }).click();
+    await expect(tutor.getByText("已记录为知识缺口")).toBeVisible();
+
     await page.getByLabel("向当前资料提问").fill("注意力为什么重要？");
     await tutor.getByRole("button", { name: "发送" }).click();
     await expect(tutor.getByText("已完成")).toBeVisible();
@@ -771,6 +780,271 @@ test("a failed short-answer grading keeps the answer and supports manual assessm
     });
   } finally {
     await model.close();
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("a failed Practice item becomes a Gap record and advances through Review", async ({
+  page
+}) => {
+  const app = await startApp();
+  const model = await startMockModel();
+  const workspaceDir = await openStudyPage(page);
+
+  try {
+    const tutor = await prepareTutor(
+      page,
+      app.webUrl,
+      workspaceDir,
+      model.baseUrl
+    );
+    await page.getByLabel("向当前资料提问").fill("注意力为什么重要？");
+    await tutor.getByRole("button", { name: "发送" }).click();
+    await expect(tutor.getByText("已完成")).toBeVisible();
+
+    const practice = page.getByRole("region", { name: "练习题" });
+    await practice.getByLabel("练习题数量").selectOption("1");
+    await practice.getByRole("button", { name: "考考我" }).click();
+    await practice.getByLabel("B. 永久存储所有信息").check();
+    await practice.getByRole("button", { name: "提交答案" }).click();
+    await expect(practice.getByText("回答错误")).toBeVisible();
+
+    await practice.getByRole("button", { name: "记为知识缺口" }).click();
+    const gapDialog = page.getByRole("dialog", { name: "记录知识缺口" });
+    await expect(gapDialog.getByLabel("缺口标题")).toHaveValue(
+      "注意力对学习的主要作用是什么？"
+    );
+    await gapDialog.getByRole("button", { name: "加入复习" }).click();
+    await expect(gapDialog).toBeHidden();
+    await expect(practice.getByText("已加入复习队列")).toBeVisible();
+
+    const sessionId = await practice.getAttribute("data-session-id");
+    expect(sessionId).toBeTruthy();
+
+    await page.getByRole("button", { name: "复习" }).click();
+    const review = page.getByRole("region", { name: "复习" });
+    await expect(review.getByText("注意力对学习的主要作用是什么？")).toBeVisible();
+    const practiceGap = review
+      .locator("article")
+      .filter({ hasText: "注意力对学习的主要作用是什么？" });
+    await practiceGap
+      .getByLabel("复习答案")
+      .fill("注意力帮助筛选当前任务信息。");
+    await practiceGap
+      .getByLabel("复习反馈")
+      .fill("能够说明注意力的筛选作用。");
+    await practiceGap.getByRole("button", { name: "通过" }).click();
+    await expect(review.getByText(/已通过 · 下次复习/)).toBeVisible();
+
+    const reviewResponse = await page.request.get(`${app.webUrl}/api/review`);
+    expect(reviewResponse.ok()).toBe(true);
+    const savedReview = (await reviewResponse.json()) as {
+      queue: Array<{ id: string; title: string }>;
+      records: Array<{
+        id: string;
+        title: string;
+        nextReviewAt: string | null;
+        reviews: Array<{
+          answer: string;
+          feedback: string;
+          result: string;
+          reviewedAt: string;
+          nextReviewAt: string;
+        }>;
+      }>;
+    };
+    const gap = savedReview.records.find(
+      (record) => record.title === "注意力对学习的主要作用是什么？"
+    );
+    expect(gap).toBeTruthy();
+    expect(gap?.nextReviewAt).toBeTruthy();
+    expect(gap?.reviews.at(-1)).toMatchObject({
+      answer: "注意力帮助筛选当前任务信息。",
+      feedback: "能够说明注意力的筛选作用。",
+      result: "pass"
+    });
+    expect(savedReview.queue.map((record) => record.title)).not.toContain(
+      "注意力对学习的主要作用是什么？"
+    );
+
+    const deleteSession = await page.request.delete(
+      `${app.webUrl}/api/tutor/sessions/${sessionId}`
+    );
+    expect(deleteSession.ok()).toBe(true);
+
+    const retainedResponse = await page.request.get(
+      `${app.webUrl}/api/review/gaps/${gap?.id}`
+    );
+    expect(retainedResponse.ok()).toBe(true);
+    const retained = (await retainedResponse.json()) as {
+      id: string;
+      practiceItem: { id: string; stem: string } | null;
+      reviews: Array<{ result: string }>;
+    };
+    expect(retained.id).toBe(gap?.id);
+    expect(retained.practiceItem).toMatchObject({
+      stem: "注意力对学习的主要作用是什么？"
+    });
+    expect(retained.reviews.at(-1)?.result).toBe("pass");
+  } finally {
+    await model.close();
+    await app.stop();
+    await rm(workspaceDir, { recursive: true, force: true });
+  }
+});
+
+test("Review schedules 1, 3, 7, 14 days, batches 20 items, and supports date controls", async ({
+  page
+}) => {
+  const app = await startApp();
+  const workspaceDir = await openStudyPage(page);
+
+  try {
+    await page.goto(app.webUrl);
+    await page.getByLabel("Notebook workspace 路径").fill(workspaceDir);
+    await page.getByRole("button", { name: "打开工作区" }).click();
+    await expect(
+      page.getByRole("button", { name: "注意力机制.md", exact: true })
+    ).toBeVisible();
+
+    const sessionResponse = await page.request.post(
+      `${app.webUrl}/api/tutor/sessions`,
+      {
+        data: {
+          path: "课程/注意力机制.md",
+          quote: "注意力帮助学习者筛选当前任务相关的信息。"
+        }
+      }
+    );
+    expect(sessionResponse.ok()).toBe(true);
+    const session = (await sessionResponse.json()) as { id: string };
+
+    const gapIds: string[] = [];
+    for (let index = 1; index <= 21; index += 1) {
+      const title = `复习调度 ${String(index).padStart(2, "0")}`;
+      const gapResponse = await page.request.post(
+        `${app.webUrl}/api/tutor/sessions/${session.id}/gaps`,
+        { data: { title } }
+      );
+      expect(gapResponse.ok()).toBe(true);
+      const gap = (await gapResponse.json()) as {
+        id: string;
+        practiceItem: unknown;
+      };
+      expect(gap.practiceItem).toBeNull();
+      gapIds.push(gap.id);
+    }
+
+    const initialReview = await page.request.get(`${app.webUrl}/api/review`);
+    expect(initialReview.ok()).toBe(true);
+    const initial = (await initialReview.json()) as {
+      queue: Array<{ id: string }>;
+      records: Array<{ id: string }>;
+    };
+    expect(initial.records).toHaveLength(21);
+    expect(initial.queue).toHaveLength(20);
+    expect(initial.queue[0].id).toBe(gapIds[0]);
+
+    const targetGapId = gapIds[0];
+    const targetTitle = "复习调度 01";
+    const intervals = [1, 3, 7, 14];
+    for (const expectedDays of intervals) {
+      const dueResponse = await page.request.patch(
+        `${app.webUrl}/api/review/gaps/${targetGapId}`,
+        { data: { next_review_at: new Date().toISOString() } }
+      );
+      expect(dueResponse.ok()).toBe(true);
+
+      const resultResponse = await page.request.post(
+        `${app.webUrl}/api/review/gaps/${targetGapId}/results`,
+        {
+          data: {
+            answer: `第 ${expectedDays} 天阶段答案`,
+            feedback: "按通过路径推进",
+            result: "pass"
+          }
+        }
+      );
+      expect(resultResponse.ok()).toBe(true);
+      const result = (await resultResponse.json()) as {
+        review: { reviewedAt: string; nextReviewAt: string };
+      };
+      const difference =
+        (new Date(result.review.nextReviewAt).getTime() -
+          new Date(result.review.reviewedAt).getTime()) /
+        86_400_000;
+      expect(difference).toBeCloseTo(expectedDays, 5);
+    }
+
+    const retryDue = await page.request.patch(
+      `${app.webUrl}/api/review/gaps/${targetGapId}`,
+      { data: { next_review_at: new Date().toISOString() } }
+    );
+    expect(retryDue.ok()).toBe(true);
+    const retryResponse = await page.request.post(
+      `${app.webUrl}/api/review/gaps/${targetGapId}/results`,
+      {
+        data: {
+          answer: "重来后的答案",
+          feedback: "重来应重置到一天",
+          result: "again"
+        }
+      }
+    );
+    expect(retryResponse.ok()).toBe(true);
+    const retry = (await retryResponse.json()) as {
+      gap: { scheduleStep: number };
+      review: { reviewedAt: string; nextReviewAt: string; result: string };
+    };
+    expect(retry.review.result).toBe("again");
+    expect(retry.gap.scheduleStep).toBe(0);
+    expect(
+      (new Date(retry.review.nextReviewAt).getTime() -
+        new Date(retry.review.reviewedAt).getTime()) /
+        86_400_000
+    ).toBeCloseTo(1, 5);
+
+    await page.getByRole("button", { name: "复习" }).click();
+    const review = page.getByRole("region", { name: "复习" });
+    await review.getByRole("tab", { name: "全部记录" }).click();
+    const record = review
+      .locator("article")
+      .filter({ hasText: targetTitle })
+      .first();
+    await expect(record).toBeVisible();
+    const dateInput = record.getByLabel(`下次复习时间 · ${targetTitle}`);
+    await dateInput.fill("2027-02-03T10:30");
+    await record.getByRole("button", { name: "保存日期" }).click();
+    await expect
+      .poll(async () => {
+        const response = await page.request.get(
+          `${app.webUrl}/api/review/gaps/${targetGapId}`
+        );
+        const gap = (await response.json()) as {
+          nextReviewAt: string | null;
+          reviews: unknown[];
+        };
+        return {
+          hasDate: Boolean(gap.nextReviewAt),
+          reviewCount: gap.reviews.length
+        };
+      })
+      .toEqual({ hasDate: true, reviewCount: 5 });
+
+    await record.getByRole("button", { name: "清除日期" }).click();
+    await expect
+      .poll(async () => {
+        const response = await page.request.get(
+          `${app.webUrl}/api/review/gaps/${targetGapId}`
+        );
+        const gap = (await response.json()) as {
+          nextReviewAt: string | null;
+        };
+        return gap.nextReviewAt;
+      })
+      .toBeNull();
+  } finally {
     await app.stop();
     await rm(workspaceDir, { recursive: true, force: true });
   }

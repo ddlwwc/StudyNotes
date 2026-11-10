@@ -22,6 +22,7 @@ import {
   type TutorSelection
 } from "./blocknote-editor";
 import { PdfViewer } from "./pdf-viewer";
+import { ReviewPage } from "./review-page";
 import { SearchDialog, type SearchResult } from "./search-dialog";
 import {
   TutorPanel,
@@ -201,6 +202,7 @@ export default function HomePage() {
   const [markdownSearchTarget, setMarkdownSearchTarget] =
     useState<SearchResult | null>(null);
   const [selectedNode, setSelectedNode] = useState<TreeNode | null>(null);
+  const [mainView, setMainView] = useState<"workspace" | "review">("workspace");
   const [workspacePath, setWorkspacePath] = useState("");
   const [canBrowse, setCanBrowse] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -359,6 +361,7 @@ export default function HomePage() {
       setOpenFile(null);
       setOpenPdfPath(null);
       setSelectedNode(null);
+      setMainView("workspace");
       if (data.workspace) {
         setWorkspacePath(data.workspace.path);
       }
@@ -377,6 +380,7 @@ export default function HomePage() {
     node: TreeNode,
     searchTarget: SearchResult | null = null
   ) {
+    setMainView("workspace");
     setOpeningFile(true);
     setError(null);
 
@@ -438,6 +442,7 @@ export default function HomePage() {
 
   const handleCitationSelect = useCallback(
     (citation: TutorCitation) => {
+      setMainView("workspace");
       const node = findTreeNode(tree, citation.path);
       if (!node) {
         setError("Source citation 对应的资料已移动或删除。");
@@ -877,10 +882,25 @@ export default function HomePage() {
 
       <div className="workspace-body">
         <nav className="rail" aria-label="主导航">
-          <button className="rail-button is-active" type="button" aria-label="Workspace">
+          <button
+            aria-label="资料"
+            aria-pressed={mainView === "workspace"}
+            className={`rail-button ${
+              mainView === "workspace" ? "is-active" : ""
+            }`}
+            type="button"
+            onClick={() => setMainView("workspace")}
+          >
             <Library aria-hidden="true" size={18} />
           </button>
-          <button className="rail-button" type="button" aria-label="Review" disabled>
+          <button
+            aria-label="复习"
+            aria-pressed={mainView === "review"}
+            className={`rail-button ${mainView === "review" ? "is-active" : ""}`}
+            disabled={!workspace}
+            type="button"
+            onClick={() => setMainView("review")}
+          >
             <BookOpenText aria-hidden="true" size={18} />
           </button>
         </nav>
@@ -950,10 +970,19 @@ export default function HomePage() {
 
         <section
           className={`content ${
-            openFile || openPdfPath ? "has-reading-surface" : ""
+            mainView === "review"
+              ? "is-review"
+              : openFile || openPdfPath
+                ? "has-reading-surface"
+                : ""
           }`}
         >
-          {loading ? (
+          {mainView === "review" ? (
+            <ReviewPage
+              onCitationSelect={handleCitationSelect}
+              workspacePath={workspace?.path ?? ""}
+            />
+          ) : loading ? (
             <div className="center-state" role="status">
               <LoaderCircle className="spin" aria-hidden="true" size={22} />
               <span>正在连接本地服务…</span>

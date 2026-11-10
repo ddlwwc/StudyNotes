@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -241,6 +242,36 @@ def initialize_database() -> None:
 
             CREATE INDEX IF NOT EXISTS practice_attempts_session
             ON practice_attempts (workspace_path, session_id, practice_set_id);
+
+            CREATE TABLE IF NOT EXISTS gap_records (
+                id TEXT PRIMARY KEY,
+                workspace_path TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                practice_item_id TEXT,
+                title TEXT NOT NULL,
+                citation_json TEXT NOT NULL,
+                schedule_step INTEGER NOT NULL DEFAULT 0,
+                next_review_at TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS gap_records_workspace_due
+            ON gap_records (workspace_path, next_review_at, created_at);
+
+            CREATE TABLE IF NOT EXISTS review_results (
+                id TEXT PRIMARY KEY,
+                workspace_path TEXT NOT NULL,
+                gap_id TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                feedback TEXT NOT NULL,
+                result TEXT NOT NULL CHECK (result IN ('again', 'pass')),
+                reviewed_at TEXT NOT NULL,
+                next_review_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS review_results_gap
+            ON review_results (workspace_path, gap_id, reviewed_at);
             """
         )
         columns = {
@@ -402,6 +433,38 @@ def load_learning_session(
             (str(workspace.resolve()), session_id),
         ).fetchone()
     return dict(row) if row is not None else None
+
+
+def delete_learning_session(workspace: Path, session_id: str) -> bool:
+    """Delete session context while retaining Practice, Gap and Review records."""
+    workspace_path = str(workspace.resolve())
+    with connect() as connection:
+        session = connection.execute(
+            """
+            SELECT id
+            FROM learning_sessions
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (workspace_path, session_id),
+        ).fetchone()
+        if session is None:
+            return False
+        connection.execute(
+            "DELETE FROM session_messages WHERE workspace_path = ? AND session_id = ?",
+            (workspace_path, session_id),
+        )
+        connection.execute(
+            """
+            DELETE FROM learning_session_sources
+            WHERE workspace_path = ? AND session_id = ?
+            """,
+            (workspace_path, session_id),
+        )
+        connection.execute(
+            "DELETE FROM learning_sessions WHERE workspace_path = ? AND id = ?",
+            (workspace_path, session_id),
+        )
+    return True
 
 
 def save_learning_session_source(
@@ -739,6 +802,22 @@ def load_practice_item(
     return dict(row) if row is not None else None
 
 
+def load_practice_item_by_id(
+    workspace: Path,
+    item_id: str,
+) -> Optional[dict[str, object]]:
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM practice_items
+            WHERE id = ? AND workspace_path = ?
+            """,
+            (item_id, str(workspace.resolve())),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
 def load_practice_attempt(
     workspace: Path,
     session_id: str,
@@ -1044,6 +1123,274 @@ def save_practice_self_assessment(
             (workspace_path, item_id),
         ).fetchone()
     return dict(row) if row is not None else None
+
+
+def _timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def create_gap_record(
+    workspace: Path,
+    session_id: str,
+    title: str,
+    citation: dict[str, object],
+    *,
+    practice_item_id: Optional[str] = None,
+    next_review_at: Optional[datetime] = None,
+) -> dict[str, object]:
+    gap_id = str(uuid.uuid4())
+    workspace_path = str(workspace.resolve())
+    due_at = _timestamp(next_review_at or datetime.now(timezone.utc))
+    with connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO gap_records (
+                id,
+                workspace_path,
+                session_id,
+                practice_item_id,
+                title,
+                citation_json,
+                next_review_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                gap_id,
+                workspace_path,
+                session_id,
+                practice_item_id,
+                title,
+                json.dumps(citation, ensure_ascii=False),
+                due_at,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM gap_records WHERE id = ?",
+            (gap_id,),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError("Gap record was not persisted.")
+    return dict(row)
+
+
+def load_gap_record(
+    workspace: Path,
+    gap_id: str,
+) -> Optional[dict[str, object]]:
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM gap_records
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (str(workspace.resolve()), gap_id),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def list_gap_records(
+    workspace: Path,
+    *,
+    limit: int = 200,
+) -> list[dict[str, object]]:
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM gap_records
+            WHERE workspace_path = ?
+            ORDER BY
+                CASE WHEN next_review_at IS NULL THEN 1 ELSE 0 END,
+                next_review_at ASC,
+                created_at ASC,
+                rowid ASC
+            LIMIT ?
+            """,
+            (str(workspace.resolve()), limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_due_gap_records(
+    workspace: Path,
+    *,
+    limit: int = 20,
+    now: Optional[datetime] = None,
+) -> list[dict[str, object]]:
+    due_at = _timestamp(now or datetime.now(timezone.utc))
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM gap_records
+            WHERE workspace_path = ?
+              AND next_review_at IS NOT NULL
+              AND datetime(next_review_at) <= datetime(?)
+            ORDER BY next_review_at ASC, created_at ASC, rowid ASC
+            LIMIT ?
+            """,
+            (str(workspace.resolve()), due_at, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_review_results(
+    workspace: Path,
+    gap_id: str,
+) -> list[dict[str, object]]:
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM review_results
+            WHERE workspace_path = ? AND gap_id = ?
+            ORDER BY reviewed_at ASC, rowid ASC
+            """,
+            (str(workspace.resolve()), gap_id),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def save_review_result(
+    workspace: Path,
+    gap_id: str,
+    *,
+    answer: str,
+    feedback: str,
+    result: str,
+    reviewed_at: Optional[datetime] = None,
+) -> Optional[dict[str, object]]:
+    if result not in {"again", "pass"}:
+        raise ValueError("复习结果无效。")
+    normalized_answer = answer.strip()
+    if not normalized_answer:
+        raise ValueError("请填写复习答案。")
+
+    workspace_path = str(workspace.resolve())
+    reviewed = reviewed_at or datetime.now(timezone.utc)
+    with connect() as connection:
+        gap = connection.execute(
+            """
+            SELECT *
+            FROM gap_records
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (workspace_path, gap_id),
+        ).fetchone()
+        if gap is None:
+            return None
+
+        step = int(gap["schedule_step"])
+        if result == "pass":
+            intervals = (1, 3, 7, 14)
+            days = intervals[min(step, len(intervals) - 1)]
+            next_step = min(step + 1, len(intervals) - 1)
+        else:
+            days = 1
+            next_step = 0
+        next_review = reviewed + timedelta(days=days)
+        reviewed_value = _timestamp(reviewed)
+        next_review_value = _timestamp(next_review)
+
+        connection.execute(
+            """
+            UPDATE gap_records
+            SET schedule_step = ?,
+                next_review_at = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (next_step, next_review_value, workspace_path, gap_id),
+        )
+        review_id = str(uuid.uuid4())
+        connection.execute(
+            """
+            INSERT INTO review_results (
+                id,
+                workspace_path,
+                gap_id,
+                answer,
+                feedback,
+                result,
+                reviewed_at,
+                next_review_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                review_id,
+                workspace_path,
+                gap_id,
+                normalized_answer,
+                feedback.strip(),
+                result,
+                reviewed_value,
+                next_review_value,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM review_results WHERE id = ?",
+            (review_id,),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def update_gap_review_date(
+    workspace: Path,
+    gap_id: str,
+    next_review_at: Optional[datetime],
+) -> Optional[dict[str, object]]:
+    with connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE gap_records
+            SET next_review_at = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (
+                _timestamp(next_review_at) if next_review_at else None,
+                str(workspace.resolve()),
+                gap_id,
+            ),
+        )
+        if cursor.rowcount == 0:
+            return None
+        row = connection.execute(
+            """
+            SELECT *
+            FROM gap_records
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (str(workspace.resolve()), gap_id),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def delete_gap_record(workspace: Path, gap_id: str) -> bool:
+    workspace_path = str(workspace.resolve())
+    with connect() as connection:
+        record = connection.execute(
+            """
+            SELECT id
+            FROM gap_records
+            WHERE workspace_path = ? AND id = ?
+            """,
+            (workspace_path, gap_id),
+        ).fetchone()
+        if record is None:
+            return False
+        connection.execute(
+            "DELETE FROM review_results WHERE workspace_path = ? AND gap_id = ?",
+            (workspace_path, gap_id),
+        )
+        connection.execute(
+            "DELETE FROM gap_records WHERE workspace_path = ? AND id = ?",
+            (workspace_path, gap_id),
+        )
+    return True
 
 
 def save_document_draft(

@@ -2,6 +2,7 @@
 
 import {
   BookOpenCheck,
+  BookmarkPlus,
   PanelRight,
   RotateCcw,
   Send,
@@ -10,6 +11,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { TutorSelection } from "./blocknote-editor";
+import { GapDialog } from "./gap-dialog";
 import { PracticePanel } from "./practice-panel";
 
 export type TutorCitation = {
@@ -147,6 +149,10 @@ export function TutorPanel({
   const [sourcePath, setSourcePath] = useState("");
   const [sourceStatus, setSourceStatus] = useState<string | null>(null);
   const [sourceWorking, setSourceWorking] = useState(false);
+  const [gapDialogOpen, setGapDialogOpen] = useState(false);
+  const [gapSessionId, setGapSessionId] = useState<string | null>(null);
+  const [gapCreating, setGapCreating] = useState(false);
+  const [gapStatus, setGapStatus] = useState<string | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -166,6 +172,9 @@ export function TutorPanel({
     setSources([]);
     setSourcePath("");
     setSourceStatus(null);
+    setGapDialogOpen(false);
+    setGapSessionId(null);
+    setGapStatus(null);
   }, [path]);
 
   async function ensureSession(): Promise<string> {
@@ -314,6 +323,22 @@ export function TutorPanel({
       );
     } finally {
       setSourceWorking(false);
+    }
+  }
+
+  async function openSessionGapDialog() {
+    setGapCreating(true);
+    setGapStatus(null);
+    try {
+      const activeSessionId = await ensureSession();
+      setGapSessionId(activeSessionId);
+      setGapDialogOpen(true);
+    } catch (gapError) {
+      setGapStatus(
+        gapError instanceof Error ? gapError.message : "无法创建知识缺口。"
+      );
+    } finally {
+      setGapCreating(false);
     }
   }
 
@@ -504,6 +529,23 @@ export function TutorPanel({
               : "已绑定 Markdown 选区"}
           </span>
           <p>{selection.quote}</p>
+          <div className="tutor-gap-action">
+            {gapStatus === "已记录为知识缺口" ? (
+              <span role="status">{gapStatus}</span>
+            ) : (
+              <button
+                disabled={gapCreating}
+                type="button"
+                onClick={() => void openSessionGapDialog()}
+              >
+                <BookmarkPlus aria-hidden="true" size={13} />
+                {gapCreating ? "正在准备…" : "记为知识缺口"}
+              </button>
+            )}
+            {gapStatus && gapStatus !== "已记录为知识缺口" ? (
+              <small role="alert">{gapStatus}</small>
+            ) : null}
+          </div>
         </div>
       ) : (
         <p className="tutor-empty">
@@ -777,6 +819,18 @@ export function TutorPanel({
           onCitationSelect={onCitationSelect}
           onEnsureSession={ensureSession}
           sessionId={sessionId}
+        />
+      ) : null}
+
+      {gapDialogOpen && gapSessionId && selection ? (
+        <GapDialog
+          defaultTitle={selection.quote}
+          onClose={() => setGapDialogOpen(false)}
+          onCreated={() => {
+            setGapDialogOpen(false);
+            setGapStatus("已记录为知识缺口");
+          }}
+          sessionId={gapSessionId}
         />
       ) : null}
 
